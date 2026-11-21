@@ -7,19 +7,20 @@ pub fn session_status_changed(session_name: &str, status: SessionStatus, window_
     }
     let (summary, body) = match status {
         SessionStatus::Waiting => (
-            "ankar — waiting",
+            "Ankar — waiting",
             format!("{session_name} is waiting for input"),
         ),
         SessionStatus::Finished => (
-            "ankar — finished",
+            "Ankar — finished",
             format!("{session_name} has exited"),
         ),
         SessionStatus::Active => return,
     };
+    // TODO(ankar): app_id propio requiere registrar un AUMID (HKCU\Software\Classes\AppUserModelId\MtGhozt.Ankar o un acceso directo con AppUserModelID). Sin eso Windows muestra "Windows PowerShell".
     let _ = Notification::new()
         .summary(summary)
         .body(&body)
-        .appname("ankar")
+        .appname("Ankar")
         .timeout(5000)
         .show();
 }

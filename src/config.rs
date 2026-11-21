@@ -5,6 +5,30 @@ use std::path::{Path, PathBuf};
 pub const APP_NAME: &str = "ankar";
 const LEGACY_APP_NAME: &str = "nacar";
 
+/// Copies config.toml and sessions.json from %APPDATA%\nacar to %APPDATA%\ankar
+/// the first time. Never overwrites files that already exist in the new folder
+/// and never deletes the old folder.
+pub fn migrate_legacy_dir() -> anyhow::Result<()> {
+    let Some(base) = dirs::config_dir() else {
+        return Ok(());
+    };
+    let old = base.join(LEGACY_APP_NAME);
+    let new = base.join(APP_NAME);
+    if !old.is_dir() {
+        return Ok(());
+    }
+    fs::create_dir_all(&new)?;
+    for name in ["config.toml", "sessions.json"] {
+        let src = old.join(name);
+        let dst = new.join(name);
+        if src.is_file() && !dst.exists() {
+            fs::copy(&src, &dst)?; // binary copy: keeps UTF-8 as-is
+            log::info!("migrated {} -> {}", src.display(), dst.display());
+        }
+    }
+    Ok(())
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Config {
     pub default_shell: String,
@@ -51,22 +75,7 @@ impl Default for Config {
 impl Config {
     pub fn config_dir() -> anyhow::Result<PathBuf> {
         let base = dirs::config_dir().ok_or_else(|| anyhow::anyhow!("no config dir"))?;
-        let dir = base.join(APP_NAME);
-        let legacy = base.join(LEGACY_APP_NAME);
-        // One-shot migration from the previous app name.
-        if !dir.exists() && legacy.exists() {
-            if let Err(err) = fs::rename(&legacy, &dir) {
-                log::warn!("rename of legacy config failed ({err}); copying instead");
-                copy_dir_recursive(&legacy, &dir)?;
-                let _ = fs::remove_dir_all(&legacy);
-            }
-            log::info!(
-                "migrated config from {} to {}",
-                legacy.display(),
-                dir.display()
-            );
-        }
-        Ok(dir)
+        Ok(base.join(APP_NAME))
     }
 
     pub fn config_path() -> anyhow::Result<PathBuf> {
@@ -101,7 +110,7 @@ impl Config {
 
     fn write_default_file(&self, path: &Path) -> anyhow::Result<()> {
         let body = format!(
-            r#"# ankar configuration
+            r#"# Ankar configuration
 # Location: %APPDATA%\ankar\config.toml
 
 # Default shell profile id: powershell | cmd | wsl | wsl:<distro>
@@ -141,19 +150,4 @@ args = []
         fs::write(path, body)?;
         Ok(())
     }
-}
-
-fn copy_dir_recursive(src: &Path, dst: &Path) -> anyhow::Result<()> {
-    fs::create_dir_all(dst)?;
-    for entry in fs::read_dir(src)? {
-        let entry = entry?;
-        let from = entry.path();
-        let to = dst.join(entry.file_name());
-        if from.is_dir() {
-            copy_dir_recursive(&from, &to)?;
-        } else {
-            fs::copy(&from, &to)?;
-        }
-    }
-    Ok(())
 }

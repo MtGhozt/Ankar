@@ -101,7 +101,7 @@ impl eframe::App for AnkarApp {
         egui::Panel::top("tab_bar").show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.label(
-                    RichText::new("ankar")
+                    RichText::new("Ankar")
                         .strong()
                         .color(Color32::from_rgb(0xE8, 0xE8, 0xE8)),
                 );

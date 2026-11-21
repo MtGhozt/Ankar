@@ -1,4 +1,4 @@
-# ankar
+# Ankar
 
 A clean desktop terminal for Windows. Fast, local-only, no accounts, no telemetry, no AI.
 
@@ -30,7 +30,9 @@ cargo build --release
 .\target\release\ankar.exe
 ```
 
-If you previously used the `nacar` name, the first launch migrates `%APPDATA%\nacar\` → `%APPDATA%\ankar\` automatically.
+## Migrating from nacar
+
+On first launch, Ankar copies `config.toml` and `sessions.json` from `%APPDATA%\nacar` to `%APPDATA%\ankar` if those files do not already exist in the new folder. The old `%APPDATA%\nacar` folder is left in place so you can delete it yourself after confirming the migration.
 
 ## Keyboard shortcuts
 
@@ -53,7 +55,7 @@ If you previously used the `nacar` name, the first launch migrates `%APPDATA%\na
 
 ## Configuration
 
-On first run ankar creates:
+On first run Ankar creates:
 
 `%APPDATA%\ankar\config.toml`
 
@@ -87,7 +89,7 @@ Session layout is stored in `%APPDATA%\ankar\sessions.json` (tabs, panes, folder
 
 ## Colored paths in the prompt
 
-ankar does **not** rewrite your prompt. Use a prompt engine inside the shell:
+Ankar does **not** rewrite your prompt. Use a prompt engine inside the shell:
 
 ### oh-my-posh (PowerShell)
 
@@ -106,7 +108,7 @@ winget install Starship.Starship
 Invoke-Expression (&starship init powershell)
 ```
 
-Pick a theme that colors the cwd segment; alacritty_terminal already renders the ANSI colors ankar receives.
+Pick a theme that colors the cwd segment; alacritty_terminal already renders the ANSI colors Ankar receives.
 
 ## Privacy
 
