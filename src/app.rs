@@ -8,11 +8,14 @@ use crate::sidebar::{self, SidebarState};
 use crate::status::StatusTracker;
 use crate::terminal::TerminalView;
 use crate::ui_theme;
-use egui::{Context, Frame, Key, RichText};
+use egui::{Context, Frame, Key, Modifiers, RichText};
+use std::time::Duration;
 
 pub struct AnkarApp {
     workspace: Workspace,
     config: Config,
+    /// When true, `on_exit` must not overwrite the user's broken config.toml.
+    config_load_failed: bool,
     sidebar: SidebarState,
     show_profile_menu: bool,
     status: StatusTracker,
@@ -23,7 +26,10 @@ pub struct AnkarApp {
 impl AnkarApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> anyhow::Result<Self> {
         ui_theme::apply(&cc.egui_ctx);
-        let config = Config::load_or_create().unwrap_or_default();
+        let (config, config_load_failed) = Config::load_or_create().unwrap_or_else(|e| {
+            log::warn!("config load error: {e}");
+            (Config::default(), true)
+        });
         let (mut workspace, archived) = Workspace::new(&cc.egui_ctx, config.scrollback_lines)?;
         for tab in &mut workspace.tabs {
             if config.pinned_sessions.contains(&tab.session_name) {
@@ -33,6 +39,7 @@ impl AnkarApp {
         Ok(Self {
             workspace,
             config,
+            config_load_failed,
             sidebar: SidebarState {
                 archived,
                 show: true,
@@ -85,6 +92,19 @@ impl eframe::App for AnkarApp {
             .tick(&mut self.workspace, &self.config, focused);
         ui.ctx()
             .request_repaint_after(std::time::Duration::from_secs(1));
+
+        // Autosave structural changes every 30s.
+        if self.workspace.dirty
+            && self.workspace.last_autosave.elapsed() >= Duration::from_secs(30)
+        {
+            if let Err(e) = persist::save_workspace(&self.workspace, &self.sidebar.archived) {
+                log::warn!("autosave failed: {e}");
+            } else {
+                self.workspace.dirty = false;
+                self.workspace.skip_save_until_dirty = false;
+                self.workspace.last_autosave = std::time::Instant::now();
+            }
+        }
 
         // Mark which sessions are on the active tab; drop snapshots for the rest.
         let active = self.workspace.active_tab;
@@ -224,7 +244,13 @@ impl eframe::App for AnkarApp {
                 )
                 .show_separator_line(true)
                 .show(ui, |ui| {
-                    sidebar::draw(ui, &mut self.workspace, &mut self.config, &mut self.sidebar);
+                    sidebar::draw(
+                        ui,
+                        &mut self.workspace,
+                        &mut self.config,
+                        &mut self.sidebar,
+                        !self.config_load_failed,
+                    );
                 });
         }
 
@@ -257,7 +283,7 @@ impl eframe::App for AnkarApp {
             .show(ui, |ui| {
                 if self.workspace.tabs.is_empty() {
                     ui.centered_and_justified(|ui| {
-                        ui.label("Open a tab with Ctrl+T or the + button.");
+                        ui.label("Open a tab with Ctrl+Shift+T or the + button.");
                     });
                     return;
                 }
@@ -278,8 +304,12 @@ impl eframe::App for AnkarApp {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-        let _ = persist::save_workspace(&self.workspace, &self.sidebar.archived);
-        let _ = self.config.save();
+        if self.workspace.should_persist() {
+            let _ = persist::save_workspace(&self.workspace, &self.sidebar.archived);
+        }
+        if !self.config_load_failed {
+            let _ = self.config.save();
+        }
     }
 }
 
@@ -292,87 +322,78 @@ fn handle_shortcuts(
     files: &mut FileViewer,
 ) {
     let ctx = ui.ctx().clone();
-    let mut actions = Vec::new();
-    ui.input(|i| {
-        for event in &i.events {
-            if let egui::Event::Key {
-                key,
-                pressed: true,
-                modifiers,
-                ..
-            } = event
-            {
-                actions.push((*key, *modifiers));
+    let cs = Modifiers::COMMAND | Modifiers::SHIFT;
+    let cmd = Modifiers::COMMAND;
+    let alt = Modifiers::ALT;
+
+    // Most-specific (Ctrl+Shift) first so consume_key matching stays correct.
+    ui.input_mut(|i| {
+        if i.consume_key(cs, Key::T) {
+            let profile = crate::shell::default_profile();
+            let cwd = workspace.active_tab().and_then(|t| t.cwd.clone());
+            let _ = workspace.open_tab(&ctx, &profile, cwd);
+        }
+        if i.consume_key(cs, Key::W) && workspace.close_focused_pane() {
+            workspace.close_active_tab();
+        }
+        if i.consume_key(cs, Key::K) {
+            palette.open = !palette.open;
+            if !palette.open {
+                palette.query.clear();
             }
         }
-    });
-
-    for (key, modifiers) in actions {
-        match (key, modifiers.ctrl, modifiers.shift, modifiers.alt) {
-            (Key::K, true, false, false) => {
-                palette.open = !palette.open;
-                if !palette.open {
-                    palette.query.clear();
-                }
-            }
-            (Key::T, true, false, false) => {
-                let profile = crate::shell::default_profile();
-                let cwd = workspace.active_tab().and_then(|t| t.cwd.clone());
-                let _ = workspace.open_tab(&ctx, &profile, cwd);
-            }
-            (Key::W, true, false, false) => {
-                if workspace.close_focused_pane() {
-                    workspace.close_active_tab();
-                }
-            }
-            (Key::D, true, true, false) => {
-                let _ = workspace.split_focused(&ctx, SplitDir::Vertical);
-            }
-            (Key::E, true, true, false) => {
-                let _ = workspace.split_focused(&ctx, SplitDir::Horizontal);
-            }
-            (Key::Tab, true, false, false) => {
-                if !workspace.tabs.is_empty() {
-                    workspace.active_tab = (workspace.active_tab + 1) % workspace.tabs.len();
-                }
-            }
-            (Key::Tab, false, false, true) => {
-                workspace.focus_next_pane();
-            }
-            (Key::N, true, false, false) => {
-                *show_menu = !*show_menu;
-            }
-            (Key::B, true, false, false) => {
-                sidebar.show = !sidebar.show;
-            }
-            (Key::P, true, false, false) => {
-                workspace.toggle_pin_active();
-            }
-            (Key::S, true, true, false) => {
-                let _ = persist::save_workspace(workspace, &sidebar.archived);
-            }
-            (Key::F, true, false, false) => {
-                files.show = !files.show;
-            }
-            _ => {}
+        if i.consume_key(cs, Key::B) {
+            sidebar.show = !sidebar.show;
         }
-    }
-
-    ui.input(|i| {
-        for n in 1..=9 {
-            let key = match n {
-                1 => Key::Num1,
-                2 => Key::Num2,
-                3 => Key::Num3,
-                4 => Key::Num4,
-                5 => Key::Num5,
-                6 => Key::Num6,
-                7 => Key::Num7,
-                8 => Key::Num8,
-                9 => Key::Num9,
-                _ => continue,
-            };
-            if i.key_pressed(key) && i.modifiers.ctrl {
+        if i.consume_key(cs, Key::F) {
+            files.show = !files.show;
+        }
+        if i.consume_key(cs, Key::P) {
+            workspace.toggle_pin_active();
+        }
+        if i.consume_key(cs, Key::N) {
+            *show_menu = !*show_menu;
+        }
+        if i.consume_key(cs, Key::S) {
+            if let Err(e) = persist::save_workspace(workspace, &sidebar.archived) {
+                log::warn!("manual save failed: {e}");
+            } else {
+                workspace.dirty = false;
+                workspace.skip_save_until_dirty = false;
+                workspace.last_autosave = std::time::Instant::now();
+            }
+        }
+        if i.consume_key(cs, Key::D) {
+            let _ = workspace.split_focused(&ctx, SplitDir::Vertical);
+        }
+        if i.consume_key(cs, Key::E) {
+            let _ = workspace.split_focused(&ctx, SplitDir::Horizontal);
+        }
+        if i.consume_key(cs, Key::Tab) && !workspace.tabs.is_empty() {
+            let n = workspace.tabs.len();
+            workspace.active_tab = (workspace.active_tab + n - 1) % n;
+        }
+        if i.consume_key(cmd, Key::Tab) && !workspace.tabs.is_empty() {
+            workspace.active_tab = (workspace.active_tab + 1) % workspace.tabs.len();
+        }
+        if i.consume_key(alt, Key::ArrowRight) || i.consume_key(alt, Key::ArrowDown) {
+            workspace.focus_next_pane();
+        }
+        if i.consume_key(alt, Key::ArrowLeft) || i.consume_key(alt, Key::ArrowUp) {
+            workspace.focus_prev_pane();
+        }
+        for (n, key) in [
+            (1, Key::Num1),
+            (2, Key::Num2),
+            (3, Key::Num3),
+            (4, Key::Num4),
+            (5, Key::Num5),
+            (6, Key::Num6),
+            (7, Key::Num7),
+            (8, Key::Num8),
+            (9, Key::Num9),
+        ] {
+            if i.consume_key(cmd, key) {
                 let idx = (n - 1) as usize;
                 if idx < workspace.tabs.len() {
                     workspace.active_tab = idx;

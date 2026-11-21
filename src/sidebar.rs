@@ -25,6 +25,7 @@ pub fn draw(
     workspace: &mut Workspace,
     config: &mut Config,
     sidebar: &mut SidebarState,
+    allow_config_save: bool,
 ) {
     ui.horizontal(|ui| {
         ui.label(
@@ -142,15 +143,29 @@ pub fn draw(
         }
         if let Some(i) = restore {
             let arch = sidebar.archived.remove(i);
-            let profile = workspace.profile_by_id(&arch.profile_id);
-            let _ = workspace.open_tab(ui.ctx(), &profile, arch.cwd);
-            if let Some(tab) = workspace.active_tab_mut() {
-                tab.session_name = arch.name;
-                tab.command = arch.command;
+            if let (Some(prog), args) = (arch.program.clone(), arch.args.clone()) {
+                let _ = workspace.open_command_tab(
+                    ui.ctx(),
+                    &arch.name,
+                    &prog,
+                    &args,
+                    arch.cwd,
+                );
+            } else {
+                let profile = workspace.profile_by_id(&arch.profile_id);
+                let _ = workspace.open_tab(ui.ctx(), &profile, arch.cwd);
+                if let Some(tab) = workspace.active_tab_mut() {
+                    tab.session_name = arch.name;
+                    tab.command = arch.command;
+                    tab.program = arch.program;
+                    tab.args = arch.args;
+                }
             }
+            workspace.mark_dirty();
         }
         if let Some(i) = forget {
             sidebar.archived.remove(i);
+            workspace.mark_dirty();
         }
     }
 
@@ -168,7 +183,10 @@ pub fn draw(
             } else {
                 config.pinned_sessions.retain(|s| s != &name);
             }
-            let _ = config.save();
+            workspace.mark_dirty();
+            if allow_config_save {
+                let _ = config.save();
+            }
         }
     }
     if let Some(key) = toggle_pin_project {
@@ -177,7 +195,9 @@ pub fn draw(
         } else {
             config.pinned_projects.push(key);
         }
-        let _ = config.save();
+        if allow_config_save {
+            let _ = config.save();
+        }
     }
     if let Some(i) = archive_idx {
         if i < workspace.tabs.len() {
@@ -187,13 +207,18 @@ pub fn draw(
                 profile_id: tab.profile_id,
                 cwd: tab.cwd,
                 command: tab.command,
+                program: tab.program,
+                args: tab.args,
             });
             if workspace.active_tab >= workspace.tabs.len() && !workspace.tabs.is_empty() {
                 workspace.active_tab = workspace.tabs.len() - 1;
             } else if i < workspace.active_tab {
                 workspace.active_tab = workspace.active_tab.saturating_sub(1);
             }
+            workspace.mark_dirty();
             let _ = persist::save_workspace(workspace, &sidebar.archived);
+            workspace.dirty = false;
+            workspace.skip_save_until_dirty = false;
         }
     }
 }

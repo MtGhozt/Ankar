@@ -12,7 +12,7 @@ Built for running and organizing terminal agents (OpenCode, cursor-agent, gemini
 - Session restore from `%APPDATA%\ankar\sessions.json`
 - Status detection: active / waiting / finished + Windows toasts when unfocused
 - Configurable launchers on the bottom bar
-- Command palette (`Ctrl+K`)
+- Command palette (`Ctrl+Shift+K`)
 - Read-only project file viewer with syntect highlighting
 - Zero network calls from the app itself
 
@@ -38,20 +38,22 @@ On first launch, Ankar copies `config.toml` and `sessions.json` from `%APPDATA%\
 
 | Shortcut | Action |
 |---|---|
-| `Ctrl+T` | New tab (default shell) |
-| `Ctrl+W` | Close focused pane (or tab) |
-| `Ctrl+Tab` | Next tab |
-| `Alt+Tab` | Next pane |
+| `Ctrl+Shift+T` | New tab (default shell) |
+| `Ctrl+Shift+W` | Close focused pane (or tab) |
+| `Ctrl+Tab` / `Ctrl+Shift+Tab` | Next / previous tab |
+| `Alt+←` `↑` `↓` `→` | Focus previous / next pane |
 | `Ctrl+Shift+D` | Split vertical |
 | `Ctrl+Shift+E` | Split horizontal |
-| `Ctrl+K` | Command palette |
-| `Ctrl+B` | Toggle sessions sidebar |
-| `Ctrl+F` | Toggle file viewer |
-| `Ctrl+P` | Pin / unpin active session |
-| `Ctrl+N` | Profile picker |
+| `Ctrl+Shift+K` | Command palette |
+| `Ctrl+Shift+B` | Toggle sessions sidebar |
+| `Ctrl+Shift+F` | Toggle file viewer |
+| `Ctrl+Shift+P` | Pin / unpin active session |
+| `Ctrl+Shift+N` | Profile picker |
 | `Ctrl+1`…`9` | Switch tab |
 | `Ctrl+Shift+S` | Save session layout now |
 | `Ctrl+Shift+C` / `V` | Copy / paste in terminal |
+| `Ctrl+C` | Copy selection, or interrupt (0x03) if none |
+| `Ctrl+X` | Send 0x18 (cancel) to the shell |
 
 ## Configuration
 

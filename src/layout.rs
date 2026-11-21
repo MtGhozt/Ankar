@@ -37,6 +37,9 @@ pub struct Tab {
     pub sessions: HashMap<u64, TerminalSession>,
     pub focused_pane: u64,
     pub command: Option<String>,
+    /// Executable used to spawn a launcher/command tab (for restore without re-wrapping).
+    pub program: Option<String>,
+    pub args: Vec<String>,
     pub session_name: String,
     pub pinned: bool,
     pub project_key: String,
@@ -50,6 +53,11 @@ pub struct Workspace {
     pub profiles: Vec<ShellProfile>,
     /// Scrollback lines for new sessions (from config; capped in TerminalSession).
     pub scrollback_lines: usize,
+    /// Structural changes since last successful persist.
+    pub dirty: bool,
+    /// Sessions file was corrupt — do not overwrite until the user changes something.
+    pub skip_save_until_dirty: bool,
+    pub last_autosave: std::time::Instant,
 }
 
 impl Workspace {
@@ -58,10 +66,10 @@ impl Workspace {
         scrollback_lines: usize,
     ) -> anyhow::Result<(Self, Vec<crate::persist::ArchivedSession>)> {
         let profiles = crate::shell::list_profiles();
-        let (tabs, active_tab, archived, next_id) =
+        let (tabs, active_tab, archived, next_id, corrupt) =
             crate::persist::load_workspace(ctx, &profiles, scrollback_lines).unwrap_or_else(|e| {
                 log::warn!("session restore failed: {e}");
-                (Vec::new(), 0, Vec::new(), 1)
+                (Vec::new(), 0, Vec::new(), 1, false)
             });
         let mut ws = Self {
             tabs,
@@ -69,12 +77,29 @@ impl Workspace {
             next_id,
             profiles,
             scrollback_lines,
+            dirty: false,
+            skip_save_until_dirty: corrupt,
+            last_autosave: std::time::Instant::now(),
         };
         if ws.tabs.is_empty() {
             let profile = crate::shell::default_profile();
             ws.open_tab(ctx, &profile, None)?;
+            // Opening the first tab after a corrupt load should not force a save
+            // of an empty replacement until the user makes a real change — but we
+            // do need a working tab. Keep skip_save_until_dirty if corrupt.
+            if !corrupt {
+                ws.dirty = false;
+            }
         }
         Ok((ws, archived))
+    }
+
+    pub fn mark_dirty(&mut self) {
+        self.dirty = true;
+    }
+
+    pub fn should_persist(&self) -> bool {
+        !self.skip_save_until_dirty || self.dirty
     }
 
     pub fn alloc_id(&mut self) -> u64 {
@@ -113,12 +138,15 @@ impl Workspace {
             sessions,
             focused_pane: pane_id,
             command: None,
+            program: None,
+            args: Vec::new(),
             session_name,
             pinned: false,
             project_key,
             status: SessionStatus::Active,
         });
         self.active_tab = self.tabs.len() - 1;
+        self.mark_dirty();
         Ok(tab_id)
     }
 
@@ -156,18 +184,22 @@ impl Workspace {
             sessions,
             focused_pane: pane_id,
             command: Some(cmd_display),
+            program: Some(program.to_string()),
+            args: args.to_vec(),
             session_name: name.to_string(),
             pinned: false,
             project_key,
             status: SessionStatus::Active,
         });
         self.active_tab = self.tabs.len() - 1;
+        self.mark_dirty();
         Ok(tab_id)
     }
 
     pub fn toggle_pin_active(&mut self) {
         if let Some(tab) = self.active_tab_mut() {
             tab.pinned = !tab.pinned;
+            self.mark_dirty();
         }
     }
 
@@ -181,6 +213,7 @@ impl Workspace {
         } else if self.active_tab >= self.tabs.len() {
             self.active_tab = self.tabs.len() - 1;
         }
+        self.mark_dirty();
     }
 
     pub fn active_tab_mut(&mut self) -> Option<&mut Tab> {
@@ -234,6 +267,7 @@ impl Workspace {
         }
         tab.sessions.insert(new_id, session);
         tab.focused_pane = new_id;
+        self.mark_dirty();
         Ok(())
     }
 
@@ -252,20 +286,40 @@ impl Workspace {
         tab.focused_pane = ids[(pos + 1) % ids.len()];
     }
 
+    pub fn focus_prev_pane(&mut self) {
+        let Some(tab) = self.active_tab_mut() else {
+            return;
+        };
+        let ids = collect_leaves(&tab.layout);
+        if ids.is_empty() {
+            return;
+        }
+        let pos = ids
+            .iter()
+            .position(|id| *id == tab.focused_pane)
+            .unwrap_or(0);
+        tab.focused_pane = ids[(pos + ids.len() - 1) % ids.len()];
+    }
+
     /// Returns true if the whole tab should be closed (only one pane left).
     pub fn close_focused_pane(&mut self) -> bool {
-        let Some(tab) = self.active_tab_mut() else {
-            return false;
-        };
-        if matches!(tab.layout, LayoutNode::Leaf(_)) {
-            return true;
+        {
+            let Some(tab) = self.active_tab_mut() else {
+                return false;
+            };
+            if matches!(tab.layout, LayoutNode::Leaf(_)) {
+                return true;
+            }
+            let focused = tab.focused_pane;
+            if let Some((new_layout, sibling)) = collapse_leaf(&tab.layout, focused) {
+                tab.layout = new_layout;
+                tab.sessions.remove(&focused);
+                tab.focused_pane = sibling;
+            } else {
+                return false;
+            }
         }
-        let focused = tab.focused_pane;
-        if let Some((new_layout, sibling)) = collapse_leaf(&tab.layout, focused) {
-            tab.layout = new_layout;
-            tab.sessions.remove(&focused);
-            tab.focused_pane = sibling;
-        }
+        self.mark_dirty();
         false
     }
 }

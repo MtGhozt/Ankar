@@ -95,18 +95,31 @@ impl Config {
         Ok(Self::config_dir()?.join("sessions.json"))
     }
 
-    pub fn load_or_create() -> anyhow::Result<Self> {
+    /// Returns `(config, load_failed)`. When `load_failed` is true the on-disk
+    /// TOML was unreadable/unparseable — callers must not overwrite it on exit.
+    pub fn load_or_create() -> anyhow::Result<(Self, bool)> {
         let dir = Self::config_dir()?;
         fs::create_dir_all(&dir)?;
         let path = Self::config_path()?;
         if path.exists() {
             let text = fs::read_to_string(&path)?;
-            let cfg: Config = toml::from_str(&text)?;
-            Ok(cfg)
+            match toml::from_str::<Config>(&text) {
+                Ok(cfg) => Ok((cfg, false)),
+                Err(e) => {
+                    log::warn!("config.toml parse failed: {e}");
+                    let bad = dir.join("config.toml.bad");
+                    if let Err(copy_err) = fs::copy(&path, &bad) {
+                        log::warn!("could not back up broken config.toml: {copy_err}");
+                    } else {
+                        log::warn!("broken config copied to {}", bad.display());
+                    }
+                    Ok((Config::default(), true))
+                }
+            }
         } else {
             let cfg = Config::default();
             cfg.write_default_file(&path)?;
-            Ok(cfg)
+            Ok((cfg, false))
         }
     }
 

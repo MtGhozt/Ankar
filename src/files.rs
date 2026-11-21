@@ -137,11 +137,11 @@ impl FileViewer {
 fn read_file_capped(path: &Path) -> std::io::Result<(String, bool)> {
     let mut file = File::open(path)?;
     let mut buf = Vec::new();
-    let mut limited = file.by_ref().take(MAX_FILE_BYTES + 1);
-    limited.read_to_end(&mut buf)?;
-    let truncated = buf.len() as u64 > MAX_FILE_BYTES;
-    if truncated {
-        buf.truncate(MAX_FILE_BYTES as usize);
+    file.by_ref().take(MAX_FILE_BYTES).read_to_end(&mut buf)?;
+    let truncated = buf.len() as u64 == MAX_FILE_BYTES;
+    let probe = &buf[..buf.len().min(8 * 1024)];
+    if probe.contains(&0) {
+        return Ok(("Archivo binario, no se muestra".into(), false));
     }
     Ok((String::from_utf8_lossy(&buf).into_owned(), truncated))
 }

@@ -359,7 +359,6 @@ impl TerminalSession {
         }
     }
 
-    #[allow(dead_code)]
     pub fn clear_selection(&mut self) {
         let mut term = self.term.lock();
         term.selection = None;

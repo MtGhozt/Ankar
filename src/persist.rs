@@ -5,7 +5,7 @@ use egui::Context;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct SavedWorkspace {
@@ -22,13 +22,26 @@ pub struct SavedTab {
     pub layout: SavedLayout,
     pub focused_pane: u64,
     pub command: Option<String>,
+    #[serde(default)]
+    pub program: Option<String>,
+    #[serde(default)]
+    pub args: Vec<String>,
     pub session_name: String,
     pub pinned: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum SavedLayout {
-    Leaf { id: u64, profile_id: String, cwd: Option<PathBuf>, command: Option<String> },
+    Leaf {
+        id: u64,
+        profile_id: String,
+        cwd: Option<PathBuf>,
+        command: Option<String>,
+        #[serde(default)]
+        program: Option<String>,
+        #[serde(default)]
+        args: Vec<String>,
+    },
     Split {
         direction: SplitDirSerde,
         ratio: f32,
@@ -67,6 +80,10 @@ pub struct ArchivedSession {
     pub profile_id: String,
     pub cwd: Option<PathBuf>,
     pub command: Option<String>,
+    #[serde(default)]
+    pub program: Option<String>,
+    #[serde(default)]
+    pub args: Vec<String>,
 }
 
 pub fn save_workspace(ws: &Workspace, archived: &[ArchivedSession]) -> anyhow::Result<()> {
@@ -80,21 +97,56 @@ pub fn save_workspace(ws: &Workspace, archived: &[ArchivedSession]) -> anyhow::R
         archived: archived.to_vec(),
     };
     let text = serde_json::to_string_pretty(&saved)?;
-    fs::write(path, text)?;
+    atomic_write(&path, &text)?;
     Ok(())
 }
 
+fn atomic_write(path: &Path, text: &str) -> anyhow::Result<()> {
+    let tmp = path.with_extension("json.tmp");
+    fs::write(&tmp, text)?;
+    if path.exists() {
+        let bak = path.with_extension("json.bak");
+        let _ = fs::remove_file(&bak);
+        fs::rename(path, &bak)?;
+        if let Err(e) = fs::rename(&tmp, path) {
+            let _ = fs::rename(&bak, path);
+            return Err(e.into());
+        }
+        let _ = fs::remove_file(&bak);
+    } else {
+        fs::rename(&tmp, path)?;
+    }
+    Ok(())
+}
+
+pub type LoadedWorkspace = (Vec<Tab>, usize, Vec<ArchivedSession>, u64, bool);
+
+/// Returns `(tabs, active, archived, next_id, corrupt)`.
+/// `corrupt` is true when the JSON did not parse — caller must not overwrite
+/// until the user makes a structural change.
 pub fn load_workspace(
     ctx: &Context,
     profiles: &[ShellProfile],
     scrollback_lines: usize,
-) -> anyhow::Result<(Vec<Tab>, usize, Vec<ArchivedSession>, u64)> {
+) -> anyhow::Result<LoadedWorkspace> {
     let path = crate::config::Config::sessions_path()?;
     if !path.exists() {
-        return Ok((Vec::new(), 0, Vec::new(), 1));
+        return Ok((Vec::new(), 0, Vec::new(), 1, false));
     }
-    let text = fs::read_to_string(path)?;
-    let saved: SavedWorkspace = serde_json::from_str(&text)?;
+    let text = fs::read_to_string(&path)?;
+    let saved: SavedWorkspace = match serde_json::from_str(&text) {
+        Ok(s) => s,
+        Err(e) => {
+            log::warn!("sessions.json parse failed: {e}");
+            let bad = path.with_extension("json.bad");
+            if let Err(copy_err) = fs::copy(&path, &bad) {
+                log::warn!("could not back up broken sessions.json: {copy_err}");
+            } else {
+                log::warn!("broken sessions copied to {}", bad.display());
+            }
+            return Ok((Vec::new(), 0, Vec::new(), 1, true));
+        }
+    };
     let mut next_id = 1u64;
     let mut tabs = Vec::new();
     for st in &saved.tabs {
@@ -104,7 +156,7 @@ pub fn load_workspace(
         }
     }
     let active = saved.active_tab.min(tabs.len().saturating_sub(1));
-    Ok((tabs, active, saved.archived, next_id))
+    Ok((tabs, active, saved.archived, next_id, false))
 }
 
 fn tab_to_saved(tab: &Tab) -> SavedTab {
@@ -115,6 +167,8 @@ fn tab_to_saved(tab: &Tab) -> SavedTab {
         layout: layout_to_saved(&tab.layout, tab),
         focused_pane: tab.focused_pane,
         command: tab.command.clone(),
+        program: tab.program.clone(),
+        args: tab.args.clone(),
         session_name: tab.session_name.clone(),
         pinned: tab.pinned,
     }
@@ -127,6 +181,8 @@ fn layout_to_saved(node: &LayoutNode, tab: &Tab) -> SavedLayout {
             profile_id: tab.profile_id.clone(),
             cwd: tab.cwd.clone(),
             command: tab.command.clone(),
+            program: tab.program.clone(),
+            args: tab.args.clone(),
         },
         LayoutNode::Split {
             direction,
@@ -168,20 +224,37 @@ fn restore_tab(
     };
     let tab_id = *next_id;
     *next_id += 1;
+    let cwd = resolve_cwd(saved.cwd.clone());
     Ok(Tab {
         id: tab_id,
         title: saved.title.clone(),
         profile_id: saved.profile_id.clone(),
-        cwd: saved.cwd.clone(),
+        cwd: cwd.clone(),
         layout,
         sessions,
         focused_pane: focused,
         command: saved.command.clone(),
+        program: saved.program.clone(),
+        args: saved.args.clone(),
         session_name: saved.session_name.clone(),
         pinned: saved.pinned,
-        project_key: project_key_for(saved.cwd.as_ref()),
+        project_key: project_key_for(cwd.as_ref()),
         status: crate::layout::SessionStatus::Active,
     })
+}
+
+fn resolve_cwd(cwd: Option<PathBuf>) -> Option<PathBuf> {
+    match cwd {
+        Some(p) if p.is_dir() => Some(p),
+        Some(p) => {
+            log::warn!(
+                "saved cwd {} no longer exists; falling back to home",
+                p.display()
+            );
+            dirs::home_dir()
+        }
+        None => None,
+    }
 }
 
 fn restore_layout(
@@ -197,6 +270,8 @@ fn restore_layout(
             profile_id,
             cwd,
             command,
+            program,
+            args,
             ..
         } => {
             let id = *next_id;
@@ -206,25 +281,28 @@ fn restore_layout(
                 .find(|p| p.id == *profile_id)
                 .cloned()
                 .unwrap_or_else(shell::default_profile);
-            let (program, args) = if let Some(cmd) = command {
-                // Launch via powershell -Command for custom commands
-                (
-                    shell::default_profile().program,
-                    vec![
-                        "-NoLogo".into(),
-                        "-Command".into(),
-                        cmd.clone(),
-                    ],
-                )
+            let cwd = resolve_cwd(cwd.clone());
+            let (spawn_program, spawn_args) = if let Some(prog) = program.as_ref().filter(|p| !p.is_empty()) {
+                (prog.clone(), args.clone())
+            } else if command.is_some() {
+                // Legacy sessions.json: command-only tabs would be re-wrapped in
+                // pwsh -Command and break on paths with spaces. Restore a plain
+                // default-profile shell instead.
+                log::warn!(
+                    "legacy command tab without program/args ({:?}); opening default shell",
+                    command
+                );
+                let def = shell::default_profile();
+                (def.program, def.args)
             } else {
                 (profile.program.clone(), profile.args.clone())
             };
             let session = TerminalSession::spawn(
                 id,
                 ctx.clone(),
-                &program,
-                &args,
-                cwd.clone(),
+                &spawn_program,
+                &spawn_args,
+                cwd,
                 scrollback_lines,
             )?;
             sessions.insert(id, session);

@@ -29,7 +29,18 @@ impl TerminalView {
             response.request_focus();
         }
 
-        if focused {
+        if focused && response.has_focus() {
+            ui.memory_mut(|m| {
+                m.set_focus_lock_filter(
+                    response.id,
+                    egui::EventFilter {
+                        tab: true,
+                        horizontal_arrows: true,
+                        vertical_arrows: true,
+                        escape: true,
+                    },
+                );
+            });
             handle_input(ui, &response, session);
         }
         paint_grid(ui, &response, &painter, session, &font_id, metrics);
@@ -70,14 +81,22 @@ fn handle_input(ui: &Ui, response: &egui::Response, session: &mut TerminalSessio
                     buf.extend_from_slice(b"\x1b[201~");
                     session.write(buf);
                 } else {
-                    session.write(text.into_bytes());
+                    let normalized = text.replace("\r\n", "\r").replace('\n', "\r");
+                    session.write(normalized.into_bytes());
                 }
             }
             egui::Event::Copy => {
                 let text = session.selected_text();
                 if !text.is_empty() {
                     ui.ctx().copy_text(text);
+                    session.clear_selection();
+                } else {
+                    // No selection → interrupt (Ctrl+C → 0x03), Windows Terminal style.
+                    session.write(vec![0x03]);
                 }
+            }
+            egui::Event::Cut => {
+                session.write(vec![0x18]);
             }
             egui::Event::Key {
                 key,
@@ -92,7 +111,10 @@ fn handle_input(ui: &Ui, response: &egui::Response, session: &mut TerminalSessio
                         ui.ctx().copy_text(text);
                     }
                 }
-                KeyAction::Paste => {}
+                KeyAction::Paste => {
+                    ui.ctx()
+                        .send_viewport_cmd(egui::ViewportCommand::RequestPaste);
+                }
                 KeyAction::None => {}
             },
             egui::Event::MouseWheel { unit, delta, .. } => {
