@@ -48,13 +48,18 @@ pub struct Workspace {
     pub active_tab: usize,
     pub next_id: u64,
     pub profiles: Vec<ShellProfile>,
+    /// Scrollback lines for new sessions (from config; capped in TerminalSession).
+    pub scrollback_lines: usize,
 }
 
 impl Workspace {
-    pub fn new(ctx: &Context) -> anyhow::Result<(Self, Vec<crate::persist::ArchivedSession>)> {
+    pub fn new(
+        ctx: &Context,
+        scrollback_lines: usize,
+    ) -> anyhow::Result<(Self, Vec<crate::persist::ArchivedSession>)> {
         let profiles = crate::shell::list_profiles();
         let (tabs, active_tab, archived, next_id) =
-            crate::persist::load_workspace(ctx, &profiles).unwrap_or_else(|e| {
+            crate::persist::load_workspace(ctx, &profiles, scrollback_lines).unwrap_or_else(|e| {
                 log::warn!("session restore failed: {e}");
                 (Vec::new(), 0, Vec::new(), 1)
             });
@@ -63,6 +68,7 @@ impl Workspace {
             active_tab,
             next_id,
             profiles,
+            scrollback_lines,
         };
         if ws.tabs.is_empty() {
             let profile = crate::shell::default_profile();
@@ -92,6 +98,7 @@ impl Workspace {
             &profile.program,
             &profile.args,
             cwd.clone(),
+            self.scrollback_lines,
         )?;
         let mut sessions = HashMap::new();
         sessions.insert(pane_id, session);
@@ -125,7 +132,14 @@ impl Workspace {
     ) -> anyhow::Result<u64> {
         let pane_id = self.alloc_id();
         let tab_id = self.alloc_id();
-        let session = TerminalSession::spawn(pane_id, ctx.clone(), program, args, cwd.clone())?;
+        let session = TerminalSession::spawn(
+            pane_id,
+            ctx.clone(),
+            program,
+            args,
+            cwd.clone(),
+            self.scrollback_lines,
+        )?;
         let mut sessions = HashMap::new();
         sessions.insert(pane_id, session);
         let project_key = crate::persist::project_key_for(cwd.as_ref());
@@ -200,6 +214,7 @@ impl Workspace {
             &profile.program,
             &profile.args,
             cwd,
+            self.scrollback_lines,
         )?;
 
         let tab = self

@@ -84,7 +84,11 @@ pub fn save_workspace(ws: &Workspace, archived: &[ArchivedSession]) -> anyhow::R
     Ok(())
 }
 
-pub fn load_workspace(ctx: &Context, profiles: &[ShellProfile]) -> anyhow::Result<(Vec<Tab>, usize, Vec<ArchivedSession>, u64)> {
+pub fn load_workspace(
+    ctx: &Context,
+    profiles: &[ShellProfile],
+    scrollback_lines: usize,
+) -> anyhow::Result<(Vec<Tab>, usize, Vec<ArchivedSession>, u64)> {
     let path = crate::config::Config::sessions_path()?;
     if !path.exists() {
         return Ok((Vec::new(), 0, Vec::new(), 1));
@@ -94,7 +98,7 @@ pub fn load_workspace(ctx: &Context, profiles: &[ShellProfile]) -> anyhow::Resul
     let mut next_id = 1u64;
     let mut tabs = Vec::new();
     for st in &saved.tabs {
-        match restore_tab(ctx, st, profiles, &mut next_id) {
+        match restore_tab(ctx, st, profiles, &mut next_id, scrollback_lines) {
             Ok(tab) => tabs.push(tab),
             Err(e) => log::warn!("skip restore tab {}: {e}", st.title),
         }
@@ -143,9 +147,17 @@ fn restore_tab(
     saved: &SavedTab,
     profiles: &[ShellProfile],
     next_id: &mut u64,
+    scrollback_lines: usize,
 ) -> anyhow::Result<Tab> {
     let mut sessions = HashMap::new();
-    let layout = restore_layout(ctx, &saved.layout, profiles, &mut sessions, next_id)?;
+    let layout = restore_layout(
+        ctx,
+        &saved.layout,
+        profiles,
+        &mut sessions,
+        next_id,
+        scrollback_lines,
+    )?;
     let focused = if sessions.contains_key(&saved.focused_pane) {
         saved.focused_pane
     } else {
@@ -178,6 +190,7 @@ fn restore_layout(
     profiles: &[ShellProfile],
     sessions: &mut HashMap<u64, TerminalSession>,
     next_id: &mut u64,
+    scrollback_lines: usize,
 ) -> anyhow::Result<LayoutNode> {
     match node {
         SavedLayout::Leaf {
@@ -206,7 +219,14 @@ fn restore_layout(
             } else {
                 (profile.program.clone(), profile.args.clone())
             };
-            let session = TerminalSession::spawn(id, ctx.clone(), &program, &args, cwd.clone())?;
+            let session = TerminalSession::spawn(
+                id,
+                ctx.clone(),
+                &program,
+                &args,
+                cwd.clone(),
+                scrollback_lines,
+            )?;
             sessions.insert(id, session);
             Ok(LayoutNode::Leaf(id))
         }
@@ -218,8 +238,22 @@ fn restore_layout(
         } => Ok(LayoutNode::Split {
             direction: (*direction).into(),
             ratio: *ratio,
-            first: Box::new(restore_layout(ctx, first, profiles, sessions, next_id)?),
-            second: Box::new(restore_layout(ctx, second, profiles, sessions, next_id)?),
+            first: Box::new(restore_layout(
+                ctx,
+                first,
+                profiles,
+                sessions,
+                next_id,
+                scrollback_lines,
+            )?),
+            second: Box::new(restore_layout(
+                ctx,
+                second,
+                profiles,
+                sessions,
+                next_id,
+                scrollback_lines,
+            )?),
         }),
     }
 }

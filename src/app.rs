@@ -24,7 +24,7 @@ impl AnkarApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> anyhow::Result<Self> {
         ui_theme::apply(&cc.egui_ctx);
         let config = Config::load_or_create().unwrap_or_default();
-        let (mut workspace, archived) = Workspace::new(&cc.egui_ctx)?;
+        let (mut workspace, archived) = Workspace::new(&cc.egui_ctx, config.scrollback_lines)?;
         for tab in &mut workspace.tabs {
             if config.pinned_sessions.contains(&tab.session_name) {
                 tab.pinned = true;
@@ -85,6 +85,18 @@ impl eframe::App for AnkarApp {
             .tick(&mut self.workspace, &self.config, focused);
         ui.ctx()
             .request_repaint_after(std::time::Duration::from_secs(1));
+
+        // Mark which sessions are on the active tab; drop snapshots for the rest.
+        let active = self.workspace.active_tab;
+        for (i, tab) in self.workspace.tabs.iter_mut().enumerate() {
+            let tab_visible = i == active;
+            for session in tab.sessions.values_mut() {
+                session.set_visible(tab_visible);
+                if !tab_visible {
+                    session.release_snapshot();
+                }
+            }
+        }
 
         // Sync file viewer root with active project.
         let cwd = self.workspace.active_tab().and_then(|t| t.cwd.clone());

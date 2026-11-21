@@ -71,6 +71,9 @@ waiting_timeout_secs = 30
 font_size = 14.0
 accent = "#3A7CA5"
 
+# Scrollback lines per terminal (default 3000; hard cap 50000)
+scrollback_lines = 3000
+
 pinned_projects = []
 pinned_sessions = []
 

@@ -1,6 +1,12 @@
 use std::path::PathBuf;
 use std::process::Command;
 
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ShellKind {
     PowerShell,
@@ -87,16 +93,37 @@ pub fn default_profile() -> ShellProfile {
 }
 
 fn which_exists(name: &str) -> bool {
-    Command::new("where.exe")
-        .arg(name)
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+    if name.eq_ignore_ascii_case("wsl.exe") {
+        return PathBuf::from(r"C:\Windows\System32\wsl.exe").exists();
+    }
+    #[cfg(windows)]
+    {
+        Command::new("where.exe")
+            .arg(name)
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+    #[cfg(not(windows))]
+    {
+        Command::new("which")
+            .arg(name)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
 }
 
 /// `wsl -l -q` returns UTF-16LE on Windows.
 pub fn list_wsl_distros() -> Vec<String> {
-    let output = match Command::new("wsl.exe").args(["-l", "-q"]).output() {
+    let mut cmd = Command::new("wsl.exe");
+    cmd.args(["-l", "-q"]);
+    #[cfg(windows)]
+    {
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let output = match cmd.output() {
         Ok(o) if o.status.success() => o.stdout,
         _ => return Vec::new(),
     };

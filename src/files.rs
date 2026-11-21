@@ -1,67 +1,86 @@
 use crate::ui_theme;
-use egui::{Color32, RichText, Ui};
-use std::fs;
+use egui::text::{LayoutJob, TextFormat};
+use egui::{Color32, FontId, RichText, Ui};
+use std::collections::HashMap;
+use std::fs::{self, File};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use syntect::easy::HighlightLines;
-use syntect::highlighting::{Style as SynStyle, ThemeSet};
+use syntect::highlighting::{Style as SynStyle, Theme, ThemeSet};
 use syntect::parsing::SyntaxSet;
 use syntect::util::LinesWithEndings;
 
+const MAX_FILE_BYTES: u64 = 512 * 1024;
+
+#[derive(Clone)]
+struct DirEntryInfo {
+    path: PathBuf,
+    name: String,
+    is_dir: bool,
+}
+
+#[derive(Default)]
 pub struct FileViewer {
     pub root: Option<PathBuf>,
     pub open_file: Option<PathBuf>,
     pub content: String,
-    pub highlighted: Vec<(Color32, String)>,
-    syntax_set: SyntaxSet,
-    theme_set: ThemeSet,
+    /// Cached highlighted layout; rebuilt only when a file is opened.
+    pub highlighted_job: Option<LayoutJob>,
+    syntax_set: Option<SyntaxSet>,
+    theme: Option<Theme>,
+    dir_cache: HashMap<PathBuf, Vec<DirEntryInfo>>,
     pub show: bool,
     loaded_path: Option<PathBuf>,
 }
 
-impl Default for FileViewer {
-    fn default() -> Self {
-        Self {
-            root: None,
-            open_file: None,
-            content: String::new(),
-            highlighted: Vec::new(),
-            syntax_set: SyntaxSet::load_defaults_newlines(),
-            theme_set: ThemeSet::load_defaults(),
-            show: false,
-            loaded_path: None,
-        }
-    }
-}
-
 impl FileViewer {
+    fn ensure_syntect(&mut self) {
+        if self.syntax_set.is_some() {
+            return;
+        }
+        self.syntax_set = Some(SyntaxSet::load_defaults_newlines());
+        let mut ts = ThemeSet::load_defaults();
+        let theme = ts
+            .themes
+            .remove("base16-ocean.dark")
+            .or_else(|| ts.themes.into_values().next())
+            .expect("syntect theme");
+        self.theme = Some(theme);
+    }
+
     pub fn set_root(&mut self, root: Option<PathBuf>) {
         if self.root != root {
             self.root = root;
             self.open_file = None;
             self.loaded_path = None;
             self.content.clear();
-            self.highlighted.clear();
+            self.highlighted_job = None;
+            self.dir_cache.clear();
         }
     }
 
     pub fn open_path(&mut self, path: PathBuf) {
-        match fs::read_to_string(&path) {
-            Ok(text) => {
-                let clipped = if text.len() > 512 * 1024 {
-                    let mut t = text[..512 * 1024].to_string();
-                    t.push_str("\n\n… truncated …");
-                    t
-                } else {
-                    text
-                };
-                self.highlighted = highlight(&self.syntax_set, &self.theme_set, &path, &clipped);
+        match read_file_capped(&path) {
+            Ok((text, truncated)) => {
+                let mut clipped = text;
+                if truncated {
+                    clipped.push_str("\n\n… truncated …");
+                }
+                self.ensure_syntect();
+                let job = highlight_job(
+                    self.syntax_set.as_ref().unwrap(),
+                    self.theme.as_ref().unwrap(),
+                    &path,
+                    &clipped,
+                );
+                self.highlighted_job = Some(job);
                 self.content = clipped;
                 self.loaded_path = Some(path.clone());
                 self.open_file = Some(path);
             }
             Err(e) => {
                 self.content = format!("Failed to read file: {e}");
-                self.highlighted.clear();
+                self.highlighted_job = None;
                 self.loaded_path = Some(path.clone());
                 self.open_file = Some(path);
             }
@@ -71,6 +90,9 @@ impl FileViewer {
     pub fn draw(&mut self, ui: &mut Ui) {
         ui.horizontal(|ui| {
             ui.label(RichText::new("Files").strong());
+            if ui.small_button("↻").on_hover_text("Refresh tree").clicked() {
+                self.dir_cache.clear();
+            }
             if ui.small_button("Close").clicked() {
                 self.show = false;
             }
@@ -87,7 +109,7 @@ impl FileViewer {
             .id_salt("file_tree")
             .max_height(ui.available_height() * 0.35)
             .show(ui, |ui| {
-                draw_tree(ui, &root, self.open_file.as_ref(), &mut clicked);
+                draw_tree(ui, &root, self.open_file.as_ref(), &mut clicked, &mut self.dir_cache);
             });
 
         if let Some(path) = clicked {
@@ -102,32 +124,47 @@ impl FileViewer {
                     .color(ui_theme::TEXT_MUTED),
             );
             egui::ScrollArea::both().id_salt("file_content").show(ui, |ui| {
-                if self.highlighted.is_empty() {
-                    ui.monospace(&self.content);
+                if let Some(job) = self.highlighted_job.clone() {
+                    ui.label(job);
                 } else {
-                    // Render as wrapped runs; group by line breaks already in pieces.
-                    ui.horizontal_wrapped(|ui| {
-                        ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
-                        for (color, text) in &self.highlighted {
-                            if text.contains('\n') {
-                                let parts: Vec<&str> = text.split_inclusive('\n').collect();
-                                for part in parts {
-                                    ui.label(
-                                        RichText::new(part).monospace().color(*color).size(12.0),
-                                    );
-                                    if part.ends_with('\n') {
-                                        ui.end_row();
-                                    }
-                                }
-                            } else {
-                                ui.label(RichText::new(text).monospace().color(*color).size(12.0));
-                            }
-                        }
-                    });
+                    ui.monospace(&self.content);
                 }
             });
         }
     }
+}
+
+fn read_file_capped(path: &Path) -> std::io::Result<(String, bool)> {
+    let mut file = File::open(path)?;
+    let mut buf = Vec::new();
+    let mut limited = file.by_ref().take(MAX_FILE_BYTES + 1);
+    limited.read_to_end(&mut buf)?;
+    let truncated = buf.len() as u64 > MAX_FILE_BYTES;
+    if truncated {
+        buf.truncate(MAX_FILE_BYTES as usize);
+    }
+    Ok((String::from_utf8_lossy(&buf).into_owned(), truncated))
+}
+
+fn list_dir_cached(dir: &Path, cache: &mut HashMap<PathBuf, Vec<DirEntryInfo>>) -> Vec<DirEntryInfo> {
+    if let Some(items) = cache.get(dir) {
+        return items.clone();
+    }
+    let mut items = Vec::new();
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.filter_map(|e| e.ok()) {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with('.') || name == "target" || name == "node_modules" {
+                continue;
+            }
+            let is_dir = path.is_dir();
+            items.push(DirEntryInfo { path, name, is_dir });
+        }
+        items.sort_by_key(|e| (!e.is_dir, e.name.to_lowercase()));
+    }
+    cache.insert(dir.to_path_buf(), items.clone());
+    items
 }
 
 fn draw_tree(
@@ -135,65 +172,64 @@ fn draw_tree(
     dir: &Path,
     selected: Option<&PathBuf>,
     clicked: &mut Option<PathBuf>,
+    cache: &mut HashMap<PathBuf, Vec<DirEntryInfo>>,
 ) {
-    let Ok(entries) = fs::read_dir(dir) else {
-        return;
-    };
-    let mut items: Vec<_> = entries.filter_map(|e| e.ok()).collect();
-    items.sort_by_key(|e| {
-        (
-            !e.path().is_dir(),
-            e.file_name().to_string_lossy().to_lowercase(),
-        )
-    });
+    let items = list_dir_cached(dir, cache);
 
     for entry in items {
-        let path = entry.path();
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if name.starts_with('.') || name == "target" || name == "node_modules" {
-            continue;
-        }
-        if path.is_dir() {
-            egui::CollapsingHeader::new(name).show(ui, |ui| {
-                draw_tree(ui, &path, selected, clicked);
+        if entry.is_dir {
+            let header = egui::CollapsingHeader::new(entry.name.clone());
+            let response = header.show(ui, |ui| {
+                draw_tree(ui, &entry.path, selected, clicked, cache);
             });
+            // Populate cache when first expanded (body runs only when open).
+            let _ = response;
         } else if ui
-            .selectable_label(selected == Some(&path), name)
+            .selectable_label(selected == Some(&entry.path), &entry.name)
             .clicked()
         {
-            *clicked = Some(path);
+            *clicked = Some(entry.path);
         }
     }
 }
 
-fn highlight(
-    ss: &SyntaxSet,
-    ts: &ThemeSet,
-    path: &Path,
-    text: &str,
-) -> Vec<(Color32, String)> {
+fn highlight_job(ss: &SyntaxSet, theme: &Theme, path: &Path, text: &str) -> LayoutJob {
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
     let syntax = ss
         .find_syntax_by_extension(ext)
         .unwrap_or_else(|| ss.find_syntax_plain_text());
-    let theme = ts
-        .themes
-        .get("base16-ocean.dark")
-        .or_else(|| ts.themes.values().next())
-        .expect("theme");
     let mut h = HighlightLines::new(syntax, theme);
-    let mut out = Vec::new();
+    let mut job = LayoutJob::default();
+    let font = FontId::monospace(12.0);
     for line in LinesWithEndings::from(text) {
         match h.highlight_line(line, ss) {
             Ok(ranges) => {
                 for (style, piece) in ranges {
-                    out.push((syn_color(style), piece.to_string()));
+                    job.append(
+                        piece,
+                        0.0,
+                        TextFormat {
+                            font_id: font.clone(),
+                            color: syn_color(style),
+                            ..Default::default()
+                        },
+                    );
                 }
             }
-            Err(_) => out.push((ui_theme::TEXT, line.to_string())),
+            Err(_) => {
+                job.append(
+                    line,
+                    0.0,
+                    TextFormat {
+                        font_id: font.clone(),
+                        color: ui_theme::TEXT,
+                        ..Default::default()
+                    },
+                );
+            }
         }
     }
-    out
+    job
 }
 
 fn syn_color(style: SynStyle) -> Color32 {

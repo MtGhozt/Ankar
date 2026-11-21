@@ -1,11 +1,15 @@
-use super::backend::{CellMetrics, TerminalSession};
+use super::backend::{CellMetrics, TerminalSession, VisibleCell};
 use super::bindings::{map_key, KeyAction};
+use alacritty_terminal::index::{Column, Line, Point};
+use alacritty_terminal::selection::SelectionRange;
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::TermMode;
 use egui::epaint::RectShape;
+use egui::text::{LayoutJob, TextFormat};
 use egui::{
-    Align2, Color32, CornerRadius, FontId, Frame, Pos2, Rect, Sense, Shape, Stroke, Ui, Vec2,
+    Color32, CornerRadius, FontId, Frame, Pos2, Rect, Sense, Shape, Stroke, Ui, Vec2,
 };
+use std::collections::BTreeMap;
 
 const FONT_SIZE: f32 = 14.0;
 const FONT_FAMILY: egui::FontFamily = egui::FontFamily::Monospace;
@@ -47,7 +51,7 @@ fn handle_input(ui: &Ui, response: &egui::Response, session: &mut TerminalSessio
     }
 
     let modifiers = ui.input(|i| i.modifiers);
-    let mode = session.last_content().terminal_mode;
+    let mode = session.snapshot().mode;
     let events: Vec<egui::Event> = ui.input(|i| i.events.clone());
 
     for event in events {
@@ -60,7 +64,6 @@ fn handle_input(ui: &Ui, response: &egui::Response, session: &mut TerminalSessio
                 session.write(text.into_bytes());
             }
             egui::Event::Paste(text) => {
-                // Bracketed paste if supported.
                 if mode.contains(TermMode::BRACKETED_PASTE) {
                     let mut buf = b"\x1b[200~".to_vec();
                     buf.extend(text.as_bytes());
@@ -89,18 +92,13 @@ fn handle_input(ui: &Ui, response: &egui::Response, session: &mut TerminalSessio
                         ui.ctx().copy_text(text);
                     }
                 }
-                KeyAction::Paste => {
-                    // egui will emit Paste event when clipboard paste is triggered;
-                    // also try reading via input events — fallback no-op here.
-                }
+                KeyAction::Paste => {}
                 KeyAction::None => {}
             },
             egui::Event::MouseWheel { unit, delta, .. } => {
                 let lines = match unit {
                     egui::MouseWheelUnit::Line => delta.y.round() as i32,
-                    egui::MouseWheelUnit::Point => {
-                        (delta.y / FONT_SIZE).round() as i32
-                    }
+                    egui::MouseWheelUnit::Point => (delta.y / FONT_SIZE).round() as i32,
                     egui::MouseWheelUnit::Page => {
                         if delta.y > 0.0 {
                             10
@@ -153,86 +151,64 @@ fn paint_grid(
         colors.background,
     ))];
 
-    let display_offset = content.grid.display_offset() as i32;
-    let cursor_point = content.grid.cursor.point;
-    let app_cursor = content.terminal_mode.contains(TermMode::APP_CURSOR);
+    let display_offset = content.display_offset as i32;
+    let cursor_point = content.cursor;
+    let app_cursor = content.mode.contains(TermMode::APP_CURSOR);
+    let selection = content.selection;
 
-    for indexed in content.grid.display_iter() {
-        let flags = indexed.cell.flags;
-        if flags.contains(Flags::WIDE_CHAR_SPACER) {
-            continue;
-        }
+    // Group non-skipped cells by viewport row.
+    let mut by_line: BTreeMap<i32, Vec<&VisibleCell>> = BTreeMap::new();
+    for cell in &content.cells {
+        let row = cell.line + display_offset;
+        by_line.entry(row).or_default().push(cell);
+    }
 
-        let wide = flags.contains(Flags::WIDE_CHAR);
-        let inverse = flags.contains(Flags::INVERSE);
-        let dim = flags.intersects(Flags::DIM | Flags::DIM_BOLD);
-        let selected = content
-            .selectable_range
-            .is_some_and(|r| r.contains(indexed.point));
+    for (row, cells) in &by_line {
+        let y = origin.y + cell_h * (*row as f32);
+        paint_row_backgrounds(
+            &mut shapes,
+            origin.x,
+            y,
+            cell_w,
+            cell_h,
+            cells,
+            selection,
+            &colors,
+            cursor_point,
+        );
+        paint_row_text(
+            ui,
+            &mut shapes,
+            origin.x,
+            y,
+            cell_w,
+            cells,
+            selection,
+            &colors,
+            font_id,
+            app_cursor,
+            cursor_point,
+        );
+        paint_row_underlines(&mut shapes, origin.x, y, cell_w, cell_h, cells, &colors);
+    }
 
-        let x = origin.x + cell_w * indexed.point.column.0 as f32;
-        let line_num = indexed.point.line.0 + display_offset;
-        let y = origin.y + cell_h * line_num as f32;
-
-        let mut fg = colors.resolve(indexed.fg);
-        let mut bg = colors.resolve(indexed.bg);
-        let width = if wide { cell_w * 2.0 } else { cell_w };
-
-        if dim {
-            fg = fg.linear_multiply(0.7);
-        }
-        if inverse || selected {
-            std::mem::swap(&mut fg, &mut bg);
-        }
-
-        if bg != colors.background {
-            shapes.push(Shape::Rect(RectShape::filled(
-                Rect::from_min_size(Pos2::new(x, y), Vec2::new(width + 1.0, cell_h + 1.0)),
-                CornerRadius::ZERO,
-                bg,
-            )));
-        }
-
-        // Cursor.
-        if cursor_point == indexed.point {
-            shapes.push(Shape::Rect(RectShape::filled(
-                Rect::from_min_size(Pos2::new(x, y), Vec2::new(cell_w, cell_h)),
-                CornerRadius::ZERO,
-                colors.cursor,
-            )));
-            if app_cursor {
-                std::mem::swap(&mut fg, &mut bg);
-            } else {
-                fg = colors.background;
-            }
-        }
-
-        if indexed.c != ' ' && indexed.c != '\t' {
-            let text_shape = ui.fonts_mut(|fonts| {
-                Shape::text(
-                    fonts,
-                    Pos2::new(x + width / 2.0, y),
-                    Align2::CENTER_TOP,
-                    indexed.c,
-                    font_id.clone(),
-                    fg,
-                )
-            });
-            shapes.push(text_shape);
-        }
-
-        if flags.contains(Flags::UNDERLINE) {
-            let y2 = y + cell_h - 1.0;
-            shapes.push(Shape::LineSegment {
-                points: [Pos2::new(x, y2), Pos2::new(x + width, y2)],
-                stroke: Stroke::new(1.0, fg),
-            });
-        }
+    // Cursor when the cell was skipped (empty).
+    let cursor_row = cursor_point.line.0 + display_offset;
+    let cursor_on_skipped = !content.cells.iter().any(|c| {
+        c.line == cursor_point.line.0 && c.col as usize == cursor_point.column.0
+    });
+    if cursor_on_skipped {
+        let x = origin.x + cell_w * cursor_point.column.0 as f32;
+        let y = origin.y + cell_h * cursor_row as f32;
+        shapes.push(Shape::Rect(RectShape::filled(
+            Rect::from_min_size(Pos2::new(x, y), Vec2::new(cell_w, cell_h)),
+            CornerRadius::ZERO,
+            colors.cursor,
+        )));
     }
 
     painter.extend(shapes);
 
-    // Subtle border when focused.
     if response.has_focus() {
         ui.painter().rect_stroke(
             response.rect,
@@ -243,4 +219,204 @@ fn paint_grid(
     }
 
     let _ = Frame::NONE;
+}
+
+fn cell_colors(
+    cell: &VisibleCell,
+    selection: Option<SelectionRange>,
+    colors: &super::theme::TermColors,
+    app_cursor: bool,
+    cursor_point: Point,
+) -> (Color32, Color32, f32) {
+    let wide = cell.flags.contains(Flags::WIDE_CHAR);
+    let inverse = cell.flags.contains(Flags::INVERSE);
+    let dim = cell.flags.intersects(Flags::DIM | Flags::DIM_BOLD);
+    let point = Point::new(Line(cell.line), Column(cell.col as usize));
+    let selected = selection.is_some_and(|r| r.contains(point));
+
+    let mut fg = colors.resolve(cell.fg);
+    let mut bg = colors.resolve(cell.bg);
+    let width_cells = if wide { 2.0 } else { 1.0 };
+
+    if dim {
+        fg = fg.linear_multiply(0.7);
+    }
+    if inverse || selected {
+        std::mem::swap(&mut fg, &mut bg);
+    }
+
+    let at_cursor =
+        cursor_point.line.0 == cell.line && cursor_point.column.0 == cell.col as usize;
+    if at_cursor {
+        if app_cursor {
+            std::mem::swap(&mut fg, &mut bg);
+        } else {
+            fg = colors.background;
+        }
+    }
+
+    (fg, bg, width_cells)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paint_row_backgrounds(
+    shapes: &mut Vec<Shape>,
+    origin_x: f32,
+    y: f32,
+    cell_w: f32,
+    cell_h: f32,
+    cells: &[&VisibleCell],
+    selection: Option<SelectionRange>,
+    colors: &super::theme::TermColors,
+    cursor_point: Point,
+) {
+    let mut sorted: Vec<&VisibleCell> = cells.to_vec();
+    sorted.sort_by_key(|c| c.col);
+
+    let mut run_bg: Option<Color32> = None;
+    let mut run_start_x = 0.0;
+    let mut run_end_x = 0.0;
+
+    let flush = |shapes: &mut Vec<Shape>, bg: Color32, x0: f32, x1: f32| {
+        if bg != colors.background && x1 > x0 {
+            shapes.push(Shape::Rect(RectShape::filled(
+                Rect::from_min_max(Pos2::new(x0, y), Pos2::new(x1 + 1.0, y + cell_h + 1.0)),
+                CornerRadius::ZERO,
+                bg,
+            )));
+        }
+    };
+
+    for cell in &sorted {
+        let (_fg, bg, width_cells) = cell_colors(cell, selection, colors, false, cursor_point);
+        let x = origin_x + cell_w * cell.col as f32;
+        let w = cell_w * width_cells;
+
+        if cursor_point.line.0 == cell.line && cursor_point.column.0 == cell.col as usize {
+            shapes.push(Shape::Rect(RectShape::filled(
+                Rect::from_min_size(Pos2::new(x, y), Vec2::new(cell_w, cell_h)),
+                CornerRadius::ZERO,
+                colors.cursor,
+            )));
+        }
+
+        match run_bg {
+            Some(prev) if prev == bg && (x - run_end_x).abs() < 0.5 => {
+                run_end_x = x + w;
+            }
+            Some(prev) => {
+                flush(shapes, prev, run_start_x, run_end_x);
+                run_bg = Some(bg);
+                run_start_x = x;
+                run_end_x = x + w;
+            }
+            None => {
+                run_bg = Some(bg);
+                run_start_x = x;
+                run_end_x = x + w;
+            }
+        }
+    }
+    if let Some(bg) = run_bg {
+        flush(shapes, bg, run_start_x, run_end_x);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paint_row_text(
+    ui: &Ui,
+    shapes: &mut Vec<Shape>,
+    origin_x: f32,
+    y: f32,
+    cell_w: f32,
+    cells: &[&VisibleCell],
+    selection: Option<SelectionRange>,
+    colors: &super::theme::TermColors,
+    font_id: &FontId,
+    app_cursor: bool,
+    cursor_point: Point,
+) {
+    let mut sorted: Vec<&VisibleCell> = cells
+        .iter()
+        .copied()
+        .filter(|c| c.c != ' ' && c.c != '\t' && !c.flags.contains(Flags::WIDE_CHAR_SPACER))
+        .collect();
+    sorted.sort_by_key(|c| c.col);
+
+    if sorted.is_empty() {
+        return;
+    }
+
+    // One LayoutJob per contiguous same-fg run; absolute x keeps grid alignment
+    // across gaps from skipped default cells.
+    let mut i = 0;
+    while i < sorted.len() {
+        let start = sorted[i];
+        let (fg0, _bg, _) = cell_colors(start, selection, colors, app_cursor, cursor_point);
+        let mut job = LayoutJob::default();
+        job.wrap.max_width = f32::INFINITY;
+        job.wrap.break_anywhere = false;
+
+        let run_x = origin_x + cell_w * start.col as f32;
+        let mut expected_col = start.col;
+        let mut text = String::new();
+
+        while i < sorted.len() {
+            let cell = sorted[i];
+            if cell.col != expected_col {
+                break;
+            }
+            let (fg, _, width_cells) =
+                cell_colors(cell, selection, colors, app_cursor, cursor_point);
+            if fg != fg0 {
+                break;
+            }
+            text.push(cell.c);
+            expected_col = cell.col.saturating_add(width_cells as u16);
+            i += 1;
+        }
+
+        if text.is_empty() {
+            i += 1;
+            continue;
+        }
+
+        job.append(
+            &text,
+            0.0,
+            TextFormat {
+                font_id: font_id.clone(),
+                color: fg0,
+                ..Default::default()
+            },
+        );
+
+        let galley = ui.fonts_mut(|f| f.layout_job(job));
+        shapes.push(Shape::galley(Pos2::new(run_x, y), galley, fg0));
+    }
+}
+
+fn paint_row_underlines(
+    shapes: &mut Vec<Shape>,
+    origin_x: f32,
+    y: f32,
+    cell_w: f32,
+    cell_h: f32,
+    cells: &[&VisibleCell],
+    colors: &super::theme::TermColors,
+) {
+    for cell in cells {
+        if !cell.flags.contains(Flags::UNDERLINE) {
+            continue;
+        }
+        let wide = cell.flags.contains(Flags::WIDE_CHAR);
+        let width = if wide { cell_w * 2.0 } else { cell_w };
+        let x = origin_x + cell_w * cell.col as f32;
+        let y2 = y + cell_h - 1.0;
+        let fg = colors.resolve(cell.fg);
+        shapes.push(Shape::LineSegment {
+            points: [Pos2::new(x, y2), Pos2::new(x + width, y2)],
+            stroke: Stroke::new(1.0, fg),
+        });
+    }
 }

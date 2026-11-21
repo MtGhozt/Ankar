@@ -5,16 +5,19 @@ use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::{Column, Line, Point, Side};
 use alacritty_terminal::selection::{Selection, SelectionRange, SelectionType};
 use alacritty_terminal::sync::FairMutex;
-use alacritty_terminal::term::cell::Cell;
+use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::test::TermSize;
 use alacritty_terminal::term::{self, viewport_to_point, Term, TermMode};
-use alacritty_terminal::{tty, Grid};
+use alacritty_terminal::tty;
+use alacritty_terminal::vte::ansi::{Color, NamedColor};
 use egui::Context;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+const MAX_SCROLLBACK: usize = 50_000;
 
 #[derive(Clone, Copy, Debug)]
 pub struct CellMetrics {
@@ -74,12 +77,39 @@ impl From<TerminalSize> for WindowSize {
     }
 }
 
-pub struct RenderableContent {
-    pub grid: Grid<Cell>,
-    pub selectable_range: Option<SelectionRange>,
-    pub cursor: Cell,
-    pub terminal_mode: TermMode,
-    pub terminal_size: TerminalSize,
+/// One painted cell from the visible viewport (not full scrollback).
+#[derive(Clone, Debug)]
+pub struct VisibleCell {
+    pub line: i32,
+    pub col: u16,
+    pub c: char,
+    pub fg: Color,
+    pub bg: Color,
+    pub flags: Flags,
+}
+
+/// Reusable viewport snapshot — capacity ≈ cols×lines, cleared each sync.
+#[derive(Clone, Debug)]
+pub struct Snapshot {
+    pub cells: Vec<VisibleCell>,
+    pub cursor: Point,
+    pub display_offset: usize,
+    pub selection: Option<SelectionRange>,
+    pub mode: TermMode,
+    pub size: TerminalSize,
+}
+
+impl Default for Snapshot {
+    fn default() -> Self {
+        Self {
+            cells: Vec::new(),
+            cursor: Point::new(Line(0), Column(0)),
+            display_offset: 0,
+            selection: None,
+            mode: TermMode::empty(),
+            size: TerminalSize::default(),
+        }
+    }
 }
 
 pub struct TerminalSession {
@@ -90,10 +120,11 @@ pub struct TerminalSession {
     term: Arc<FairMutex<Term<EventProxy>>>,
     size: TerminalSize,
     notifier: Notifier,
-    last_content: RenderableContent,
+    snapshot: Snapshot,
     exited: Arc<AtomicBool>,
     last_output: Arc<std::sync::Mutex<Instant>>,
     bell: Arc<AtomicBool>,
+    visible: Arc<AtomicBool>,
     pub colors: TermColors,
 }
 
@@ -104,6 +135,7 @@ impl TerminalSession {
         program: &str,
         args: &[String],
         cwd: Option<PathBuf>,
+        scrollback_lines: usize,
     ) -> anyhow::Result<Self> {
         let pty_config = tty::Options {
             shell: Some(tty::Shell::new(program.to_string(), args.to_vec())),
@@ -111,22 +143,18 @@ impl TerminalSession {
             ..tty::Options::default()
         };
 
-        let config = term::Config::default();
+        let history = scrollback_lines.min(MAX_SCROLLBACK);
+        let config = term::Config {
+            scrolling_history: history,
+            ..term::Config::default()
+        };
         let terminal_size = TerminalSize::default();
         let pty = tty::new(&pty_config, terminal_size.into(), id)
             .map_err(|e| anyhow::anyhow!("failed to open PTY for {program}: {e}"))?;
 
         let (event_sender, event_receiver) = mpsc::channel();
         let event_proxy = EventProxy(event_sender);
-        let mut term = Term::new(config, &terminal_size, event_proxy.clone());
-
-        let initial = RenderableContent {
-            grid: term.grid().clone(),
-            selectable_range: None,
-            terminal_mode: *term.mode(),
-            terminal_size,
-            cursor: term.grid_mut().cursor_cell().clone(),
-        };
+        let term = Term::new(config, &terminal_size, event_proxy.clone());
 
         let term = Arc::new(FairMutex::new(term));
         let event_loop = EventLoop::new(term.clone(), event_proxy, pty, false, false)
@@ -141,6 +169,8 @@ impl TerminalSession {
         let bell_flag = bell.clone();
         let last_output = Arc::new(std::sync::Mutex::new(Instant::now()));
         let last_output_flag = last_output.clone();
+        let visible = Arc::new(AtomicBool::new(true));
+        let visible_flag = visible.clone();
         let title = program
             .rsplit(['\\', '/'])
             .next()
@@ -162,16 +192,22 @@ impl TerminalSession {
                         }
                         Event::Bell => {
                             bell_flag.store(true, Ordering::SeqCst);
-                            ctx.request_repaint();
+                            if visible_flag.load(Ordering::Relaxed) {
+                                ctx.request_repaint();
+                            }
                         }
                         Event::Wakeup => {
                             if let Ok(mut t) = last_output_flag.lock() {
                                 *t = Instant::now();
                             }
-                            ctx.request_repaint();
+                            if visible_flag.load(Ordering::Relaxed) {
+                                ctx.request_repaint_after(Duration::from_millis(8));
+                            }
                         }
                         _ => {
-                            ctx.request_repaint();
+                            if visible_flag.load(Ordering::Relaxed) {
+                                ctx.request_repaint_after(Duration::from_millis(8));
+                            }
                         }
                     }
                 }
@@ -183,12 +219,23 @@ impl TerminalSession {
             term,
             size: terminal_size,
             notifier,
-            last_content: initial,
+            snapshot: Snapshot::default(),
             exited,
             last_output,
             bell,
+            visible,
             colors: TermColors::default(),
         })
+    }
+
+    pub fn set_visible(&self, visible: bool) {
+        self.visible.store(visible, Ordering::SeqCst);
+    }
+
+    /// Drop viewport cells for background tabs so clones do not linger.
+    pub fn release_snapshot(&mut self) {
+        self.snapshot.cells.clear();
+        self.snapshot.cells.shrink_to(0);
     }
 
     pub fn is_exited(&self) -> bool {
@@ -247,26 +294,60 @@ impl TerminalSession {
         ));
     }
 
-    pub fn sync(&mut self) -> &RenderableContent {
-        let mut term = self.term.lock();
-        let selectable_range = term.selection.as_ref().and_then(|s| s.to_range(&term));
-        let cursor = term.grid_mut().cursor_cell().clone();
-        self.last_content.grid = term.grid().clone();
-        self.last_content.selectable_range = selectable_range;
-        self.last_content.cursor = cursor;
-        self.last_content.terminal_mode = *term.mode();
-        self.last_content.terminal_size = self.size;
-        &self.last_content
+    pub fn sync(&mut self) -> &Snapshot {
+        if !self.visible.load(Ordering::Relaxed) {
+            self.release_snapshot();
+            return &self.snapshot;
+        }
+
+        let term = self.term.lock();
+        let content = term.renderable_content();
+        let capacity = (self.size.num_cols as usize).saturating_mul(self.size.num_lines as usize);
+        self.snapshot.cells.clear();
+        if self.snapshot.cells.capacity() < capacity {
+            self.snapshot.cells.reserve(capacity - self.snapshot.cells.capacity());
+        }
+
+        let selection = content.selection;
+        for indexed in content.display_iter {
+            let flags = indexed.flags;
+            if flags.contains(Flags::WIDE_CHAR_SPACER) {
+                continue;
+            }
+            let selected = selection.is_some_and(|r| r.contains(indexed.point));
+            if is_default_skip(indexed.c, indexed.fg, indexed.bg, flags, selected) {
+                continue;
+            }
+            self.snapshot.cells.push(VisibleCell {
+                line: indexed.point.line.0,
+                col: indexed.point.column.0 as u16,
+                c: indexed.c,
+                fg: indexed.fg,
+                bg: indexed.bg,
+                flags,
+            });
+        }
+
+        self.snapshot.cursor = content.cursor.point;
+        self.snapshot.display_offset = content.display_offset;
+        self.snapshot.selection = selection;
+        self.snapshot.mode = content.mode;
+        self.snapshot.size = self.size;
+        &self.snapshot
     }
 
-    pub fn last_content(&self) -> &RenderableContent {
-        &self.last_content
+    pub fn snapshot(&self) -> &Snapshot {
+        &self.snapshot
     }
 
     pub fn start_selection(&mut self, x: f32, y: f32) {
         let mut term = self.term.lock();
         let point = selection_point(x, y, &self.size, term.grid().display_offset());
-        term.selection = Some(Selection::new(SelectionType::Simple, point, side_for(x, &self.size)));
+        term.selection = Some(Selection::new(
+            SelectionType::Simple,
+            point,
+            side_for(x, &self.size),
+        ));
     }
 
     pub fn update_selection(&mut self, x: f32, y: f32) {
@@ -285,24 +366,8 @@ impl TerminalSession {
     }
 
     pub fn selected_text(&self) -> String {
-        let content = &self.last_content;
-        let Some(range) = content.selectable_range else {
-            return String::new();
-        };
-        let mut out = String::new();
-        let mut last_line = None;
-        for indexed in content.grid.display_iter() {
-            if range.contains(indexed.point) {
-                if let Some(prev) = last_line {
-                    if indexed.point.line != prev {
-                        out.push('\n');
-                    }
-                }
-                out.push(indexed.c);
-                last_line = Some(indexed.point.line);
-            }
-        }
-        out
+        let term = self.term.lock();
+        term.selection_to_string().unwrap_or_default()
     }
 
     #[allow(dead_code)]
@@ -324,6 +389,15 @@ impl Drop for TerminalSession {
     fn drop(&mut self) {
         let _ = self.notifier.0.send(Msg::Shutdown);
     }
+}
+
+fn is_default_skip(c: char, _fg: Color, bg: Color, flags: Flags, selected: bool) -> bool {
+    if selected {
+        return false;
+    }
+    c == ' '
+        && flags.is_empty()
+        && bg == Color::Named(NamedColor::Background)
 }
 
 fn selection_point(x: f32, y: f32, size: &TerminalSize, display_offset: usize) -> Point {

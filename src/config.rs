@@ -29,7 +29,12 @@ pub fn migrate_legacy_dir() -> anyhow::Result<()> {
     Ok(())
 }
 
+fn default_scrollback_lines() -> usize {
+    3_000
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Config {
     pub default_shell: String,
     pub waiting_timeout_secs: u64,
@@ -38,6 +43,9 @@ pub struct Config {
     pub pinned_projects: Vec<String>,
     pub pinned_sessions: Vec<String>,
     pub launchers: Vec<Launcher>,
+    /// Scrollback lines kept per terminal. Hard-capped at 50_000 in the session.
+    #[serde(default = "default_scrollback_lines")]
+    pub scrollback_lines: usize,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -68,6 +76,7 @@ impl Default for Config {
                     args: vec![],
                 },
             ],
+            scrollback_lines: default_scrollback_lines(),
         }
     }
 }
@@ -125,6 +134,9 @@ font_size = {font_size}
 # Accent color (hex)
 accent = "{accent}"
 
+# Scrollback lines per terminal (default 3000; hard cap 50000)
+scrollback_lines = {scrollback_lines}
+
 # Pinned project folders (absolute paths)
 pinned_projects = []
 
@@ -146,6 +158,7 @@ args = []
             waiting_timeout_secs = self.waiting_timeout_secs,
             font_size = self.font_size,
             accent = self.accent,
+            scrollback_lines = self.scrollback_lines,
         );
         fs::write(path, body)?;
         Ok(())
