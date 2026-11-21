@@ -1,0 +1,28 @@
+[package]
+name = "nacar"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "A clean desktop terminal for Windows — no accounts, no telemetry, no AI."
+repository = "https://github.com/MtGhozt/nacar"
+readme = "README.md"
+keywords = ["terminal", "pty", "conpty", "egui"]
+categories = ["command-line-utilities", "gui"]
+
+[dependencies]
+eframe = { version = "0.37", default-features = false, features = [
+    "glow",
+    "default_fonts",
+    "clipboard",
+    "accesskit",
+] }
+egui = "0.37"
+alacritty_terminal = "0.26"
+anyhow = "1"
+log = "0.4"
+env_logger = "0.11"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
