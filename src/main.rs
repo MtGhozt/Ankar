@@ -1,4 +1,6 @@
 mod app;
+mod layout;
+mod shell;
 mod terminal;
 
 use anyhow::Context;

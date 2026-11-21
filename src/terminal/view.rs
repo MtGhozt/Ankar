@@ -13,7 +13,7 @@ const FONT_FAMILY: egui::FontFamily = egui::FontFamily::Monospace;
 pub struct TerminalView;
 
 impl TerminalView {
-    pub fn show(ui: &mut Ui, session: &mut TerminalSession) {
+    pub fn show(ui: &mut Ui, session: &mut TerminalSession, focused: bool) -> egui::Response {
         let available = ui.available_size();
         let (response, painter) = ui.allocate_painter(available, Sense::click_and_drag());
 
@@ -21,13 +21,15 @@ impl TerminalView {
         let metrics = measure_cell(ui, &font_id);
         session.resize(response.rect.width(), response.rect.height(), metrics);
 
-        // Focus when clicked.
-        if response.clicked() || response.dragged() {
+        if focused || response.clicked() || response.dragged() {
             response.request_focus();
         }
 
-        handle_input(ui, &response, session);
+        if focused {
+            handle_input(ui, &response, session);
+        }
         paint_grid(ui, &response, &painter, session, &font_id, metrics);
+        response
     }
 }
 
