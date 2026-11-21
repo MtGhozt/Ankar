@@ -38,7 +38,7 @@ pub fn run_launcher(
             launcher
                 .args
                 .iter()
-                .map(|a| format!("'{a}'"))
+                .map(|a| format!("'{}'", a.replace('\'', "''")))
                 .collect::<Vec<_>>()
                 .join(" ")
         )

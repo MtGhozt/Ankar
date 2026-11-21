@@ -81,6 +81,30 @@ impl AnkarApp {
             PaletteAction::PinActive => {
                 self.workspace.toggle_pin_active();
             }
+            PaletteAction::RestoreArchived(i) => {
+                if i < self.sidebar.archived.len() {
+                    let arch = self.sidebar.archived.remove(i);
+                    if let (Some(prog), args) = (arch.program.clone(), arch.args.clone()) {
+                        let _ = self.workspace.open_command_tab(
+                            ctx,
+                            &arch.name,
+                            &prog,
+                            &args,
+                            arch.cwd,
+                        );
+                    } else {
+                        let profile = self.workspace.profile_by_id(&arch.profile_id);
+                        let _ = self.workspace.open_tab(ctx, &profile, arch.cwd);
+                        if let Some(tab) = self.workspace.active_tab_mut() {
+                            tab.session_name = arch.name;
+                            tab.command = arch.command;
+                            tab.program = arch.program;
+                            tab.args = arch.args;
+                        }
+                    }
+                    self.workspace.mark_dirty();
+                }
+            }
         }
     }
 }
@@ -118,7 +142,26 @@ impl eframe::App for AnkarApp {
             }
         }
 
-        // Sync file viewer root with active project.
+        // Follow shell cwd from OSC title (focused pane of the active tab).
+        {
+            let mut cwd_dirty = false;
+            if let Some(tab) = self.workspace.active_tab_mut() {
+                let focused = tab.focused_pane;
+                if let Some(session) = tab.sessions.get(&focused) {
+                    if let Some(new_cwd) = session.cwd() {
+                        if tab.cwd.as_ref() != Some(&new_cwd) {
+                            tab.cwd = Some(new_cwd);
+                            cwd_dirty = true;
+                        }
+                    }
+                }
+            }
+            if cwd_dirty {
+                self.workspace.mark_dirty();
+            }
+        }
+
+        // Sync file viewer root with active project (home fallback inside set_root).
         let cwd = self.workspace.active_tab().and_then(|t| t.cwd.clone());
         self.files.set_root(cwd);
 
@@ -288,8 +331,12 @@ impl eframe::App for AnkarApp {
                     return;
                 }
                 let active = self.workspace.active_tab;
-                let focused_pane = self.workspace.tabs[active].focused_pane;
-                render_layout(ui, &mut self.workspace.tabs[active], focused_pane);
+                let font_size = self.config.font_size;
+                let ratio_changed =
+                    render_layout(ui, &mut self.workspace.tabs[active], font_size);
+                if ratio_changed {
+                    self.workspace.mark_dirty();
+                }
             });
 
         let ctx = ui.ctx().clone();
@@ -403,29 +450,63 @@ fn handle_shortcuts(
     });
 }
 
-fn render_layout(ui: &mut egui::Ui, tab: &mut crate::layout::Tab, focused: u64) {
-    render_node(ui, &tab.layout.clone(), tab, focused);
+/// Returns true if a split ratio changed (caller should mark workspace dirty).
+fn render_layout(ui: &mut egui::Ui, tab: &mut crate::layout::Tab, font_size: f32) -> bool {
+    let rect = ui.available_rect_before_wrap();
+    ui.allocate_rect(rect, egui::Sense::hover());
+    let focused = tab.focused_pane;
+    let crate::layout::Tab {
+        layout,
+        sessions,
+        focused_pane,
+        ..
+    } = tab;
+    let mut dirty = false;
+    render_node(
+        ui,
+        layout,
+        sessions,
+        focused_pane,
+        focused,
+        rect,
+        &[],
+        font_size,
+        &mut dirty,
+    );
+    dirty
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_node(
     ui: &mut egui::Ui,
-    node: &LayoutNode,
-    tab: &mut crate::layout::Tab,
+    node: &mut LayoutNode,
+    sessions: &mut std::collections::HashMap<u64, crate::terminal::TerminalSession>,
+    focused_pane: &mut u64,
     focused: u64,
+    rect: egui::Rect,
+    path: &[u8],
+    font_size: f32,
+    dirty: &mut bool,
 ) {
+    const DIVIDER_PX: f32 = 5.0;
     match node {
         LayoutNode::Leaf(id) => {
             let is_focused = *id == focused;
-            if let Some(session) = tab.sessions.get_mut(id) {
+            if let Some(session) = sessions.get_mut(id) {
                 let stroke = if is_focused {
                     egui::Stroke::new(1.0, ui_theme::ACCENT)
                 } else {
                     egui::Stroke::NONE
                 };
-                egui::Frame::NONE.stroke(stroke).show(ui, |ui| {
-                    let response = TerminalView::show(ui, session, is_focused);
+                let mut child = ui.new_child(
+                    egui::UiBuilder::new()
+                        .max_rect(rect)
+                        .layout(*ui.layout()),
+                );
+                egui::Frame::NONE.stroke(stroke).show(&mut child, |ui| {
+                    let response = TerminalView::show(ui, session, is_focused, font_size);
                     if response.clicked() {
-                        tab.focused_pane = *id;
+                        *focused_pane = *id;
                     }
                 });
             }
@@ -436,33 +517,124 @@ fn render_node(
             first,
             second,
         } => {
-            let available = ui.available_size();
-            match direction {
+            let (first_rect, divider_rect, second_rect) = match *direction {
                 SplitDir::Vertical => {
-                    let left_w = available.x * *ratio;
-                    ui.horizontal(|ui| {
-                        ui.allocate_ui(egui::vec2(left_w, available.y), |ui| {
-                            render_node(ui, first, tab, focused);
-                        });
-                        ui.separator();
-                        ui.allocate_ui(egui::vec2(available.x - left_w - 6.0, available.y), |ui| {
-                            render_node(ui, second, tab, focused);
-                        });
-                    });
+                    let split_x = rect.min.x + rect.width() * *ratio;
+                    let first_rect = egui::Rect::from_min_max(
+                        rect.min,
+                        egui::pos2(split_x - DIVIDER_PX * 0.5, rect.max.y),
+                    );
+                    let divider_rect = egui::Rect::from_min_max(
+                        egui::pos2(split_x - DIVIDER_PX * 0.5, rect.min.y),
+                        egui::pos2(split_x + DIVIDER_PX * 0.5, rect.max.y),
+                    );
+                    let second_rect = egui::Rect::from_min_max(
+                        egui::pos2(split_x + DIVIDER_PX * 0.5, rect.min.y),
+                        rect.max,
+                    );
+                    (first_rect, divider_rect, second_rect)
                 }
                 SplitDir::Horizontal => {
-                    let top_h = available.y * *ratio;
-                    ui.vertical(|ui| {
-                        ui.allocate_ui(egui::vec2(available.x, top_h), |ui| {
-                            render_node(ui, first, tab, focused);
-                        });
-                        ui.separator();
-                        ui.allocate_ui(egui::vec2(available.x, available.y - top_h - 6.0), |ui| {
-                            render_node(ui, second, tab, focused);
-                        });
-                    });
+                    let split_y = rect.min.y + rect.height() * *ratio;
+                    let first_rect = egui::Rect::from_min_max(
+                        rect.min,
+                        egui::pos2(rect.max.x, split_y - DIVIDER_PX * 0.5),
+                    );
+                    let divider_rect = egui::Rect::from_min_max(
+                        egui::pos2(rect.min.x, split_y - DIVIDER_PX * 0.5),
+                        egui::pos2(rect.max.x, split_y + DIVIDER_PX * 0.5),
+                    );
+                    let second_rect = egui::Rect::from_min_max(
+                        egui::pos2(rect.min.x, split_y + DIVIDER_PX * 0.5),
+                        rect.max,
+                    );
+                    (first_rect, divider_rect, second_rect)
+                }
+            };
+
+            let id = ui.scope_id().with(("split_div", path));
+            let response = ui.interact(divider_rect, id, egui::Sense::click_and_drag());
+            let hovering = response.hovered() || response.dragged();
+            if hovering {
+                let icon = match *direction {
+                    SplitDir::Vertical => egui::CursorIcon::ResizeHorizontal,
+                    SplitDir::Horizontal => egui::CursorIcon::ResizeVertical,
+                };
+                ui.ctx().set_cursor_icon(icon);
+            }
+            if response.dragged() {
+                if let Some(pos) = response.interact_pointer_pos() {
+                    let new_ratio = match *direction {
+                        SplitDir::Vertical => {
+                            ((pos.x - rect.min.x) / rect.width()).clamp(0.1, 0.9)
+                        }
+                        SplitDir::Horizontal => {
+                            ((pos.y - rect.min.y) / rect.height()).clamp(0.1, 0.9)
+                        }
+                    };
+                    if (new_ratio - *ratio).abs() > f32::EPSILON {
+                        *ratio = new_ratio;
+                        *dirty = true;
+                    }
                 }
             }
+            if response.double_clicked() {
+                *ratio = 0.5;
+                *dirty = true;
+            }
+            let div_color = if hovering {
+                ui_theme::ACCENT
+            } else {
+                egui::Color32::from_rgb(0x24, 0x24, 0x29)
+            };
+            if hovering {
+                ui.painter().rect_filled(divider_rect, 0.0, div_color);
+            } else {
+                let mid = match *direction {
+                    SplitDir::Vertical => {
+                        let x = divider_rect.center().x;
+                        egui::Rect::from_min_max(
+                            egui::pos2(x, divider_rect.min.y),
+                            egui::pos2(x + 1.0, divider_rect.max.y),
+                        )
+                    }
+                    SplitDir::Horizontal => {
+                        let y = divider_rect.center().y;
+                        egui::Rect::from_min_max(
+                            egui::pos2(divider_rect.min.x, y),
+                            egui::pos2(divider_rect.max.x, y + 1.0),
+                        )
+                    }
+                };
+                ui.painter().rect_filled(mid, 0.0, div_color);
+            }
+
+            let mut path_first = path.to_vec();
+            path_first.push(0);
+            render_node(
+                ui,
+                first,
+                sessions,
+                focused_pane,
+                focused,
+                first_rect,
+                &path_first,
+                font_size,
+                dirty,
+            );
+            let mut path_second = path.to_vec();
+            path_second.push(1);
+            render_node(
+                ui,
+                second,
+                sessions,
+                focused_pane,
+                focused,
+                second_rect,
+                &path_second,
+                font_size,
+                dirty,
+            );
         }
     }
 }

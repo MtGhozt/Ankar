@@ -13,6 +13,7 @@ pub enum PaletteAction {
     ToggleFiles,
     NewTab,
     PinActive,
+    RestoreArchived(usize),
 }
 
 #[derive(Default)]
@@ -101,10 +102,9 @@ impl CommandPalette {
                             ));
                         }
 
-                        for a in archived {
+                        for (i, a) in archived.iter().enumerate() {
                             let label = format!("Archived: {}", a.name);
-                            // Opening archived is handled via sidebar; list for discovery.
-                            items.push((label, PaletteAction::NewTab));
+                            items.push((label, PaletteAction::RestoreArchived(i)));
                         }
 
                         items.retain(|(label, _)| q.is_empty() || label.to_lowercase().contains(&q));

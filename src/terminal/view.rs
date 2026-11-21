@@ -1,7 +1,7 @@
 use super::backend::{CellMetrics, TerminalSession, VisibleCell};
 use super::bindings::{map_key, KeyAction};
 use alacritty_terminal::index::{Column, Line, Point};
-use alacritty_terminal::selection::SelectionRange;
+use alacritty_terminal::selection::{SelectionRange, SelectionType};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::TermMode;
 use egui::epaint::RectShape;
@@ -11,17 +11,21 @@ use egui::{
 };
 use std::collections::BTreeMap;
 
-const FONT_SIZE: f32 = 14.0;
 const FONT_FAMILY: egui::FontFamily = egui::FontFamily::Monospace;
 
 pub struct TerminalView;
 
 impl TerminalView {
-    pub fn show(ui: &mut Ui, session: &mut TerminalSession, focused: bool) -> egui::Response {
+    pub fn show(
+        ui: &mut Ui,
+        session: &mut TerminalSession,
+        focused: bool,
+        font_size: f32,
+    ) -> egui::Response {
         let available = ui.available_size();
         let (response, painter) = ui.allocate_painter(available, Sense::click_and_drag());
 
-        let font_id = FontId::new(FONT_SIZE, FONT_FAMILY);
+        let font_id = FontId::new(font_size.max(8.0), FONT_FAMILY);
         let metrics = measure_cell(ui, &font_id);
         session.resize(response.rect.width(), response.rect.height(), metrics);
 
@@ -41,7 +45,7 @@ impl TerminalView {
                     },
                 );
             });
-            handle_input(ui, &response, session);
+            handle_input(ui, &response, session, font_size);
         }
         paint_grid(ui, &response, &painter, session, &font_id, metrics);
         response
@@ -56,23 +60,37 @@ fn measure_cell(ui: &Ui, font_id: &FontId) -> CellMetrics {
     }
 }
 
-fn handle_input(ui: &Ui, response: &egui::Response, session: &mut TerminalSession) {
+fn handle_input(ui: &Ui, response: &egui::Response, session: &mut TerminalSession, font_size: f32) {
     if !response.has_focus() {
         return;
     }
 
     let modifiers = ui.input(|i| i.modifiers);
     let mode = session.snapshot().mode;
+    let mouse_reporting = mode.intersects(TermMode::MOUSE_MODE) && !modifiers.shift;
+
+    // --- Pointer: mouse report or local selection ---
+    if mouse_reporting {
+        handle_mouse_report(ui, response, session);
+    } else {
+        handle_selection_pointer(ui, response, session, font_size);
+    }
+
     let events: Vec<egui::Event> = ui.input(|i| i.events.clone());
 
     for event in events {
         match event {
             egui::Event::Text(text) => {
-                // Skip when Ctrl is held — handled via Key events.
                 if modifiers.ctrl || modifiers.command {
                     continue;
                 }
-                session.write(text.into_bytes());
+                if modifiers.alt {
+                    let mut buf = vec![0x1b];
+                    buf.extend(text.as_bytes());
+                    session.write(buf);
+                } else {
+                    session.write(text.into_bytes());
+                }
             }
             egui::Event::Paste(text) => {
                 if mode.contains(TermMode::BRACKETED_PASTE) {
@@ -91,7 +109,6 @@ fn handle_input(ui: &Ui, response: &egui::Response, session: &mut TerminalSessio
                     ui.ctx().copy_text(text);
                     session.clear_selection();
                 } else {
-                    // No selection → interrupt (Ctrl+C → 0x03), Windows Terminal style.
                     session.write(vec![0x03]);
                 }
             }
@@ -117,38 +134,185 @@ fn handle_input(ui: &Ui, response: &egui::Response, session: &mut TerminalSessio
                 }
                 KeyAction::None => {}
             },
-            egui::Event::MouseWheel { unit, delta, .. } => {
-                let lines = match unit {
-                    egui::MouseWheelUnit::Line => delta.y.round() as i32,
-                    egui::MouseWheelUnit::Point => (delta.y / FONT_SIZE).round() as i32,
-                    egui::MouseWheelUnit::Page => {
-                        if delta.y > 0.0 {
-                            10
-                        } else if delta.y < 0.0 {
-                            -10
-                        } else {
-                            0
-                        }
-                    }
-                };
-                if lines != 0 {
-                    session.scroll(lines);
-                }
+            egui::Event::MouseWheel { unit, delta, .. } if !mouse_reporting => {
+                handle_wheel(session, mode, unit, delta, font_size);
             }
+            _ => {}
+        }
+    }
+}
+
+fn handle_wheel(
+    session: &mut TerminalSession,
+    mode: TermMode,
+    unit: egui::MouseWheelUnit,
+    delta: Vec2,
+    font_size: f32,
+) {
+    let lines = match unit {
+        egui::MouseWheelUnit::Line => delta.y.round() as i32,
+        egui::MouseWheelUnit::Point => (delta.y / font_size).round() as i32,
+        egui::MouseWheelUnit::Page => {
+            if delta.y > 0.0 {
+                10
+            } else if delta.y < 0.0 {
+                -10
+            } else {
+                0
+            }
+        }
+    };
+    if lines == 0 {
+        return;
+    }
+
+    // Alternate screen + alternate scroll → send arrows instead of scrollback.
+    if mode.contains(TermMode::ALT_SCREEN) && mode.contains(TermMode::ALTERNATE_SCROLL) {
+        let arrow = if lines > 0 {
+            b"\x1b[A".as_slice()
+        } else {
+            b"\x1b[B".as_slice()
+        };
+        let notches = lines.unsigned_abs().saturating_mul(3);
+        let mut buf = Vec::with_capacity(notches as usize * arrow.len());
+        for _ in 0..notches {
+            buf.extend_from_slice(arrow);
+        }
+        session.write(buf);
+    } else {
+        session.scroll(lines);
+    }
+}
+
+fn handle_mouse_report(ui: &Ui, response: &egui::Response, session: &mut TerminalSession) {
+    let mode = session.snapshot().mode;
+    let events: Vec<egui::Event> = ui.input(|i| i.events.clone());
+    for event in events {
+        match event {
             egui::Event::PointerButton {
                 pos,
-                button: egui::PointerButton::Primary,
-                pressed: true,
+                button,
+                pressed,
                 ..
             } if response.rect.contains(pos) => {
                 let local = pos - response.rect.min;
-                session.start_selection(local.x, local.y);
+                let (col, row) = session.cell_at(local.x, local.y);
+                let btn = match button {
+                    egui::PointerButton::Primary => 0,
+                    egui::PointerButton::Middle => 1,
+                    egui::PointerButton::Secondary => 2,
+                    egui::PointerButton::Extra1 | egui::PointerButton::Extra2 => continue,
+                };
+                session.report_mouse(btn, col, row, pressed, false);
             }
-            egui::Event::PointerMoved(pos) if response.dragged() => {
+            egui::Event::PointerMoved(pos)
+                if response.rect.contains(pos)
+                    && mode.intersects(TermMode::MOUSE_DRAG | TermMode::MOUSE_MOTION) =>
+            {
                 let local = pos - response.rect.min;
-                session.update_selection(local.x, local.y);
+                let (col, row) = session.cell_at(local.x, local.y);
+                let pressed = ui.input(|i| i.pointer.any_down());
+                let btn = if ui.input(|i| i.pointer.button_down(egui::PointerButton::Primary)) {
+                    0
+                } else if ui.input(|i| i.pointer.button_down(egui::PointerButton::Middle)) {
+                    1
+                } else if ui.input(|i| i.pointer.button_down(egui::PointerButton::Secondary)) {
+                    2
+                } else if mode.contains(TermMode::MOUSE_MOTION) {
+                    3 // motion with no button (rare)
+                } else {
+                    continue;
+                };
+                if pressed || mode.contains(TermMode::MOUSE_MOTION) {
+                    session.report_mouse(btn, col, row, true, true);
+                }
+            }
+            egui::Event::MouseWheel { delta, .. } if response.hovered() => {
+                let Some(pos) = ui.input(|i| i.pointer.hover_pos()) else {
+                    continue;
+                };
+                if !response.rect.contains(pos) {
+                    continue;
+                }
+                let local = pos - response.rect.min;
+                let (col, row) = session.cell_at(local.x, local.y);
+                let btn = if delta.y > 0.0 { 64 } else { 65 };
+                session.report_mouse(btn, col, row, true, false);
             }
             _ => {}
+        }
+    }
+}
+
+fn handle_selection_pointer(
+    ui: &Ui,
+    response: &egui::Response,
+    session: &mut TerminalSession,
+    font_size: f32,
+) {
+    let modifiers = ui.input(|i| i.modifiers);
+
+    if response.secondary_clicked() {
+        let text = session.selected_text();
+        if !text.is_empty() {
+            ui.ctx().copy_text(text);
+            session.clear_selection();
+        } else {
+            ui.ctx()
+                .send_viewport_cmd(egui::ViewportCommand::RequestPaste);
+        }
+        return;
+    }
+
+    if response.triple_clicked() {
+        if let Some(pos) = response.interact_pointer_pos() {
+            let local = pos - response.rect.min;
+            session.start_selection(local.x, local.y, SelectionType::Lines);
+        }
+        return;
+    }
+    if response.double_clicked() {
+        if let Some(pos) = response.interact_pointer_pos() {
+            let local = pos - response.rect.min;
+            session.start_selection(local.x, local.y, SelectionType::Semantic);
+        }
+        return;
+    }
+
+    if response.drag_started() {
+        if let Some(pos) = response.interact_pointer_pos() {
+            let local = pos - response.rect.min;
+            if modifiers.shift && session.has_selection() {
+                session.update_selection(local.x, local.y);
+            } else {
+                session.start_selection(local.x, local.y, SelectionType::Simple);
+            }
+        }
+    } else if response.dragged() {
+        if let Some(pos) = ui.input(|i| i.pointer.interact_pos()) {
+            let local = pos - response.rect.min;
+            // Autoscroll when dragging past the top/bottom edge.
+            if pos.y < response.rect.min.y {
+                let steps = ((response.rect.min.y - pos.y) / font_size).ceil() as i32;
+                session.scroll(steps.max(1));
+            } else if pos.y > response.rect.max.y {
+                let steps = ((pos.y - response.rect.max.y) / font_size).ceil() as i32;
+                session.scroll(-steps.max(1));
+            }
+            session.update_selection(local.x, local.y);
+        }
+    } else if response.clicked() {
+        if let Some(pos) = response.interact_pointer_pos() {
+            let local = pos - response.rect.min;
+            if modifiers.shift {
+                if session.has_selection() {
+                    session.update_selection(local.x, local.y);
+                } else {
+                    session.start_selection(local.x, local.y, SelectionType::Simple);
+                }
+            } else {
+                session.clear_selection();
+            }
         }
     }
 }
@@ -178,7 +342,6 @@ fn paint_grid(
     let app_cursor = content.mode.contains(TermMode::APP_CURSOR);
     let selection = content.selection;
 
-    // Group non-skipped cells by viewport row.
     let mut by_line: BTreeMap<i32, Vec<&VisibleCell>> = BTreeMap::new();
     for cell in &content.cells {
         let row = cell.line + display_offset;
@@ -214,7 +377,6 @@ fn paint_grid(
         paint_row_underlines(&mut shapes, origin.x, y, cell_w, cell_h, cells, &colors);
     }
 
-    // Cursor when the cell was skipped (empty).
     let cursor_row = cursor_point.line.0 + display_offset;
     let cursor_on_skipped = !content.cells.iter().any(|c| {
         c.line == cursor_point.line.0 && c.col as usize == cursor_point.column.0
@@ -369,8 +531,6 @@ fn paint_row_text(
         return;
     }
 
-    // One LayoutJob per contiguous same-fg run; absolute x keeps grid alignment
-    // across gaps from skipped default cells.
     let mut i = 0;
     while i < sorted.len() {
         let start = sorted[i];

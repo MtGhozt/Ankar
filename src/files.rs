@@ -48,7 +48,11 @@ impl FileViewer {
         self.theme = Some(theme);
     }
 
+    /// Sync viewer root from the shell cwd. Does not clear navigation if the
+    /// user already browsed elsewhere under the same project — only when the
+    /// shell cwd itself changes.
     pub fn set_root(&mut self, root: Option<PathBuf>) {
+        let root = root.or_else(dirs::home_dir);
         if self.root != root {
             self.root = root;
             self.open_file = None;
@@ -57,6 +61,18 @@ impl FileViewer {
             self.highlighted_job = None;
             self.dir_cache.clear();
         }
+    }
+
+    pub fn go_parent(&mut self) {
+        if let Some(root) = self.root.clone() {
+            if let Some(parent) = root.parent() {
+                self.set_root(Some(parent.to_path_buf()));
+            }
+        }
+    }
+
+    pub fn go_home(&mut self) {
+        self.set_root(dirs::home_dir());
     }
 
     pub fn open_path(&mut self, path: PathBuf) {
@@ -99,11 +115,29 @@ impl FileViewer {
         });
         ui.separator();
 
+        if self.root.is_none() {
+            self.root = dirs::home_dir();
+        }
         let Some(root) = self.root.clone() else {
-            ui.label("No project folder for the active session.");
+            ui.label("No home directory available.");
             return;
         };
 
+        ui.horizontal(|ui| {
+            if ui.small_button("↑").on_hover_text("Parent folder").clicked() {
+                self.go_parent();
+            }
+            if ui.small_button("⌂").on_hover_text("Home").clicked() {
+                self.go_home();
+            }
+            ui.label(
+                RichText::new(root.display().to_string())
+                    .small()
+                    .color(ui_theme::TEXT_MUTED),
+            );
+        });
+
+        let root = self.root.clone().unwrap_or(root);
         let mut clicked: Option<PathBuf> = None;
         egui::ScrollArea::vertical()
             .id_salt("file_tree")

@@ -114,7 +114,7 @@ impl Workspace {
         profile: &ShellProfile,
         cwd: Option<PathBuf>,
     ) -> anyhow::Result<u64> {
-        let cwd = cwd.or_else(|| std::env::current_dir().ok());
+        let cwd = cwd.or_else(dirs::home_dir);
         let pane_id = self.alloc_id();
         let tab_id = self.alloc_id();
         let session = TerminalSession::spawn(

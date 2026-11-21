@@ -115,6 +115,21 @@ Invoke-Expression (&starship init powershell)
 
 Pick a theme that colors the cwd segment; alacritty_terminal already renders the ANSI colors Ankar receives.
 
+## Shell integration (opcional)
+
+Para que el visor de archivos siga los `cd` en PowerShell, agregá esto al final de `$PROFILE` (editándolo con el editor, p. ej. `cursor $PROFILE`, nunca con `Set-Content`), y **después** del init de oh-my-posh o starship si se usa:
+
+```powershell
+$__ankarPrompt = $function:prompt
+function prompt {
+  $loc = $executionContext.SessionState.Path.CurrentLocation
+  if ($loc.Provider.Name -eq 'FileSystem') { $Host.UI.RawUI.WindowTitle = $loc.ProviderPath }
+  & $__ankarPrompt
+}
+```
+
+(ConPTY traduce el cambio de título a OSC 0/2, y alacritty lo entrega como `Event::Title`.) Ankar no modifica el prompt por su cuenta.
+
 ## Privacy
 
 - No analytics, no accounts, no cloud sync

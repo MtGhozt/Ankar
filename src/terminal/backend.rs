@@ -14,7 +14,7 @@ use egui::Context;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 const MAX_SCROLLBACK: usize = 50_000;
@@ -27,8 +27,9 @@ pub struct CellMetrics {
 
 #[derive(Clone, Copy, Debug)]
 pub struct TerminalSize {
-    pub cell_width: u16,
-    pub cell_height: u16,
+    /// Glyph cell size in pixels (float — used for cols/selection math).
+    pub cell_width: f32,
+    pub cell_height: f32,
     pub num_cols: u16,
     pub num_lines: u16,
 }
@@ -36,8 +37,8 @@ pub struct TerminalSize {
 impl Default for TerminalSize {
     fn default() -> Self {
         Self {
-            cell_width: 8,
-            cell_height: 16,
+            cell_width: 8.0,
+            cell_height: 16.0,
             num_cols: 80,
             num_lines: 24,
         }
@@ -71,8 +72,8 @@ impl From<TerminalSize> for WindowSize {
         Self {
             num_lines: size.num_lines,
             num_cols: size.num_cols,
-            cell_width: size.cell_width,
-            cell_height: size.cell_height,
+            cell_width: size.cell_width.round().max(1.0) as u16,
+            cell_height: size.cell_height.round().max(1.0) as u16,
         }
     }
 }
@@ -122,9 +123,11 @@ pub struct TerminalSession {
     notifier: Notifier,
     snapshot: Snapshot,
     exited: Arc<AtomicBool>,
-    last_output: Arc<std::sync::Mutex<Instant>>,
+    last_output: Arc<Mutex<Instant>>,
     bell: Arc<AtomicBool>,
     visible: Arc<AtomicBool>,
+    /// Latest absolute directory from OSC title (shell integration).
+    cwd: Arc<Mutex<Option<PathBuf>>>,
     pub colors: TermColors,
 }
 
@@ -139,7 +142,7 @@ impl TerminalSession {
     ) -> anyhow::Result<Self> {
         let pty_config = tty::Options {
             shell: Some(tty::Shell::new(program.to_string(), args.to_vec())),
-            working_directory: cwd,
+            working_directory: cwd.clone(),
             ..tty::Options::default()
         };
 
@@ -167,10 +170,12 @@ impl TerminalSession {
         let exited_flag = exited.clone();
         let bell = Arc::new(AtomicBool::new(false));
         let bell_flag = bell.clone();
-        let last_output = Arc::new(std::sync::Mutex::new(Instant::now()));
+        let last_output = Arc::new(Mutex::new(Instant::now()));
         let last_output_flag = last_output.clone();
         let visible = Arc::new(AtomicBool::new(true));
         let visible_flag = visible.clone();
+        let cwd_state = Arc::new(Mutex::new(cwd));
+        let cwd_flag = cwd_state.clone();
         let title = program
             .rsplit(['\\', '/'])
             .next()
@@ -204,6 +209,14 @@ impl TerminalSession {
                                 ctx.request_repaint_after(Duration::from_millis(8));
                             }
                         }
+                        Event::Title(t) => {
+                            if let Some(path) = parse_cwd_title(t) {
+                                if let Ok(mut guard) = cwd_flag.lock() {
+                                    *guard = Some(path);
+                                }
+                                ctx.request_repaint();
+                            }
+                        }
                         _ => {
                             if visible_flag.load(Ordering::Relaxed) {
                                 ctx.request_repaint_after(Duration::from_millis(8));
@@ -224,6 +237,7 @@ impl TerminalSession {
             last_output,
             bell,
             visible,
+            cwd: cwd_state,
             colors: TermColors::default(),
         })
     }
@@ -247,6 +261,10 @@ impl TerminalSession {
         self.bell.swap(false, Ordering::SeqCst)
     }
 
+    pub fn cwd(&self) -> Option<PathBuf> {
+        self.cwd.lock().ok().and_then(|g| g.clone())
+    }
+
     pub fn write(&mut self, bytes: impl Into<Vec<u8>>) {
         let bytes = bytes.into();
         if bytes.is_empty() {
@@ -254,6 +272,7 @@ impl TerminalSession {
         }
         self.notifier.notify(bytes);
         let mut term = self.term.lock();
+        term.selection = None;
         term.scroll_display(Scroll::Bottom);
     }
 
@@ -266,22 +285,24 @@ impl TerminalSession {
     }
 
     pub fn resize(&mut self, pixel_w: f32, pixel_h: f32, metrics: CellMetrics) {
-        let cols = (pixel_w / metrics.width.floor()).floor() as u16;
-        let lines = (pixel_h / metrics.height.floor()).floor() as u16;
+        let cell_w = metrics.width.max(1.0);
+        let cell_h = metrics.height.max(1.0);
+        let cols = (pixel_w / cell_w).floor() as u16;
+        let lines = (pixel_h / cell_h).floor() as u16;
         if cols == 0 || lines == 0 {
             return;
         }
         if cols == self.size.num_cols
             && lines == self.size.num_lines
-            && metrics.width as u16 == self.size.cell_width
-            && metrics.height as u16 == self.size.cell_height
+            && (self.size.cell_width - cell_w).abs() < 0.01
+            && (self.size.cell_height - cell_h).abs() < 0.01
         {
             return;
         }
 
         self.size = TerminalSize {
-            cell_width: metrics.width.max(1.0) as u16,
-            cell_height: metrics.height.max(1.0) as u16,
+            cell_width: cell_w,
+            cell_height: cell_h,
             num_cols: cols,
             num_lines: lines,
         };
@@ -305,7 +326,9 @@ impl TerminalSession {
         let capacity = (self.size.num_cols as usize).saturating_mul(self.size.num_lines as usize);
         self.snapshot.cells.clear();
         if self.snapshot.cells.capacity() < capacity {
-            self.snapshot.cells.reserve(capacity - self.snapshot.cells.capacity());
+            self.snapshot
+                .cells
+                .reserve(capacity - self.snapshot.cells.capacity());
         }
 
         let selection = content.selection;
@@ -340,14 +363,10 @@ impl TerminalSession {
         &self.snapshot
     }
 
-    pub fn start_selection(&mut self, x: f32, y: f32) {
+    pub fn start_selection(&mut self, x: f32, y: f32, ty: SelectionType) {
         let mut term = self.term.lock();
         let point = selection_point(x, y, &self.size, term.grid().display_offset());
-        term.selection = Some(Selection::new(
-            SelectionType::Simple,
-            point,
-            side_for(x, &self.size),
-        ));
+        term.selection = Some(Selection::new(ty, point, side_for(x, &self.size)));
     }
 
     pub fn update_selection(&mut self, x: f32, y: f32) {
@@ -364,16 +383,63 @@ impl TerminalSession {
         term.selection = None;
     }
 
+    pub fn has_selection(&self) -> bool {
+        let term = self.term.lock();
+        term.selection
+            .as_ref()
+            .and_then(|s| s.to_range(&term))
+            .is_some()
+    }
+
     pub fn selected_text(&self) -> String {
         let term = self.term.lock();
         term.selection_to_string().unwrap_or_default()
     }
 
-    #[allow(dead_code)]
-    pub fn mark_output(&mut self) {
-        if let Ok(mut t) = self.last_output.lock() {
-            *t = Instant::now();
+    /// Cell under local pixel coords (0-based). Used for mouse reporting.
+    pub fn cell_at(&self, x: f32, y: f32) -> (u16, u16) {
+        let col = ((x / self.size.cell_width).floor() as i32)
+            .clamp(0, self.size.num_cols as i32 - 1) as u16;
+        let row = ((y / self.size.cell_height).floor() as i32)
+            .clamp(0, self.size.num_lines as i32 - 1) as u16;
+        (col, row)
+    }
+
+    pub fn report_mouse(
+        &mut self,
+        button: u8,
+        col: u16,
+        row: u16,
+        pressed: bool,
+        motion: bool,
+    ) {
+        let mode = self.snapshot.mode;
+        // 1-based coordinates for the protocol.
+        let x = col.saturating_add(1);
+        let y = row.saturating_add(1);
+        let mut b = button;
+        if motion {
+            b |= 32;
         }
+        let bytes = if mode.contains(TermMode::SGR_MOUSE) {
+            let ch = if pressed || motion { b'M' } else { b'm' };
+            format!("\x1b[<{b};{x};{y}{ch}").into_bytes()
+        } else {
+            // X10 classic — coords must fit in a byte after +32 (≤ 223).
+            if x > 223 || y > 223 {
+                return;
+            }
+            let release_or = if pressed || motion { b } else { 3 };
+            vec![
+                0x1b,
+                b'[',
+                b'M',
+                release_or.saturating_add(32),
+                (x as u8).saturating_add(32),
+                (y as u8).saturating_add(32),
+            ]
+        };
+        self.notifier.notify(bytes);
     }
 
     pub fn idle_for(&self) -> Duration {
@@ -390,6 +456,19 @@ impl Drop for TerminalSession {
     }
 }
 
+fn parse_cwd_title(title: &str) -> Option<PathBuf> {
+    let trimmed = title.trim().trim_matches('"').trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let path = PathBuf::from(trimmed);
+    if path.is_absolute() && path.is_dir() {
+        Some(path)
+    } else {
+        None
+    }
+}
+
 fn is_default_skip(c: char, _fg: Color, bg: Color, flags: Flags, selected: bool) -> bool {
     if selected {
         return false;
@@ -400,14 +479,18 @@ fn is_default_skip(c: char, _fg: Color, bg: Color, flags: Flags, selected: bool)
 }
 
 fn selection_point(x: f32, y: f32, size: &TerminalSize, display_offset: usize) -> Point {
-    let col = ((x / size.cell_width as f32) as usize).min(size.num_cols as usize - 1);
-    let line = ((y / size.cell_height as f32) as usize).min(size.num_lines as usize - 1);
+    let cols = size.num_cols.max(1) as usize;
+    let lines = size.num_lines.max(1) as usize;
+    let col = ((x / size.cell_width).floor() as isize)
+        .clamp(0, cols as isize - 1) as usize;
+    let line = ((y / size.cell_height).floor() as isize)
+        .clamp(0, lines as isize - 1) as usize;
     viewport_to_point(display_offset, Point::new(line, Column(col)))
 }
 
 fn side_for(x: f32, size: &TerminalSize) -> Side {
-    let cell_x = x as usize % size.cell_width as usize;
-    if cell_x > (size.cell_width as usize / 2) {
+    let cell_x = x.rem_euclid(size.cell_width);
+    if cell_x > size.cell_width * 0.5 {
         Side::Right
     } else {
         Side::Left

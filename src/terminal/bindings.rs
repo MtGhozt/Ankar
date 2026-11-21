@@ -24,6 +24,9 @@ pub fn map_key(key: Key, modifiers: Modifiers, mode: TermMode, pressed: bool) ->
     }
 
     if modifiers.ctrl && !modifiers.alt && !modifiers.shift {
+        if key == Key::Space {
+            return KeyAction::Bytes(vec![0x00]);
+        }
         if let Some(b) = ctrl_char(key) {
             return KeyAction::Bytes(vec![b]);
         }
