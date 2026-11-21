@@ -21,6 +21,13 @@ pub enum LayoutNode {
     },
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SessionStatus {
+    Active,
+    Waiting,
+    Finished,
+}
+
 pub struct Tab {
     pub id: u64,
     pub title: String,
@@ -29,6 +36,11 @@ pub struct Tab {
     pub layout: LayoutNode,
     pub sessions: HashMap<u64, TerminalSession>,
     pub focused_pane: u64,
+    pub command: Option<String>,
+    pub session_name: String,
+    pub pinned: bool,
+    pub project_key: String,
+    pub status: SessionStatus,
 }
 
 pub struct Workspace {
@@ -39,16 +51,24 @@ pub struct Workspace {
 }
 
 impl Workspace {
-    pub fn new(ctx: &Context) -> anyhow::Result<Self> {
+    pub fn new(ctx: &Context) -> anyhow::Result<(Self, Vec<crate::persist::ArchivedSession>)> {
         let profiles = crate::shell::list_profiles();
+        let (tabs, active_tab, archived, next_id) =
+            crate::persist::load_workspace(ctx, &profiles).unwrap_or_else(|e| {
+                log::warn!("session restore failed: {e}");
+                (Vec::new(), 0, Vec::new(), 1)
+            });
         let mut ws = Self {
-            tabs: Vec::new(),
-            active_tab: 0,
-            next_id: 1,
+            tabs,
+            active_tab,
+            next_id,
             profiles,
         };
-        ws.open_tab(ctx, &crate::shell::default_profile(), None)?;
-        Ok(ws)
+        if ws.tabs.is_empty() {
+            let profile = crate::shell::default_profile();
+            ws.open_tab(ctx, &profile, None)?;
+        }
+        Ok((ws, archived))
     }
 
     pub fn alloc_id(&mut self) -> u64 {
@@ -74,6 +94,8 @@ impl Workspace {
         )?;
         let mut sessions = HashMap::new();
         sessions.insert(pane_id, session);
+        let project_key = crate::persist::project_key_for(cwd.as_ref());
+        let session_name = crate::persist::project_name(cwd.as_ref());
         self.tabs.push(Tab {
             id: tab_id,
             title: profile.name.clone(),
@@ -82,9 +104,56 @@ impl Workspace {
             layout: LayoutNode::Leaf(pane_id),
             sessions,
             focused_pane: pane_id,
+            command: None,
+            session_name,
+            pinned: false,
+            project_key,
+            status: SessionStatus::Active,
         });
         self.active_tab = self.tabs.len() - 1;
         Ok(tab_id)
+    }
+
+    pub fn open_command_tab(
+        &mut self,
+        ctx: &Context,
+        name: &str,
+        program: &str,
+        args: &[String],
+        cwd: Option<PathBuf>,
+    ) -> anyhow::Result<u64> {
+        let pane_id = self.alloc_id();
+        let tab_id = self.alloc_id();
+        let session = TerminalSession::spawn(pane_id, ctx.clone(), program, args, cwd.clone())?;
+        let mut sessions = HashMap::new();
+        sessions.insert(pane_id, session);
+        let project_key = crate::persist::project_key_for(cwd.as_ref());
+        let cmd_display = std::iter::once(program.to_string())
+            .chain(args.iter().cloned())
+            .collect::<Vec<_>>()
+            .join(" ");
+        self.tabs.push(Tab {
+            id: tab_id,
+            title: name.to_string(),
+            profile_id: "command".into(),
+            cwd,
+            layout: LayoutNode::Leaf(pane_id),
+            sessions,
+            focused_pane: pane_id,
+            command: Some(cmd_display),
+            session_name: name.to_string(),
+            pinned: false,
+            project_key,
+            status: SessionStatus::Active,
+        });
+        self.active_tab = self.tabs.len() - 1;
+        Ok(tab_id)
+    }
+
+    pub fn toggle_pin_active(&mut self) {
+        if let Some(tab) = self.active_tab_mut() {
+            tab.pinned = !tab.pinned;
+        }
     }
 
     pub fn close_active_tab(&mut self) {

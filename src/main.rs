@@ -1,6 +1,9 @@
 mod app;
+mod config;
 mod layout;
+mod persist;
 mod shell;
+mod sidebar;
 mod terminal;
 
 use anyhow::Context;

@@ -1,18 +1,34 @@
+use crate::config::Config;
 use crate::layout::{LayoutNode, SplitDir, Workspace};
+use crate::persist;
+use crate::sidebar::{self, SidebarState};
 use crate::terminal::TerminalView;
-use egui::{Color32, Context, Frame, Key, Modifiers, RichText, Theme, Visuals};
+use egui::{Color32, Context, Frame, Key, RichText, Theme, Visuals};
 
 pub struct NacarApp {
     workspace: Workspace,
+    config: Config,
+    sidebar: SidebarState,
     show_profile_menu: bool,
 }
 
 impl NacarApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> anyhow::Result<Self> {
         apply_theme(&cc.egui_ctx);
-        let workspace = Workspace::new(&cc.egui_ctx)?;
+        let config = Config::load_or_create().unwrap_or_default();
+        let (mut workspace, archived) = Workspace::new(&cc.egui_ctx)?;
+        for tab in &mut workspace.tabs {
+            if config.pinned_sessions.contains(&tab.session_name) {
+                tab.pinned = true;
+            }
+        }
         Ok(Self {
             workspace,
+            config,
+            sidebar: SidebarState {
+                archived,
+                show: true,
+            },
             show_profile_menu: false,
         })
     }
@@ -20,7 +36,7 @@ impl NacarApp {
 
 impl eframe::App for NacarApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        handle_shortcuts(ui, &mut self.workspace, &mut self.show_profile_menu);
+        handle_shortcuts(ui, &mut self.workspace, &mut self.show_profile_menu, &mut self.sidebar);
 
         egui::Panel::top("tab_bar").show(ui, |ui| {
             ui.horizontal(|ui| {
@@ -31,12 +47,16 @@ impl eframe::App for NacarApp {
                 );
                 ui.separator();
 
-                let tab_count = self.workspace.tabs.len();
                 let mut switch_to = None;
                 let mut close_idx = None;
                 for (i, tab) in self.workspace.tabs.iter().enumerate() {
                     let selected = i == self.workspace.active_tab;
-                    let label = RichText::new(&tab.title).color(if selected {
+                    let title = if tab.pinned {
+                        format!("★ {}", tab.title)
+                    } else {
+                        tab.title.clone()
+                    };
+                    let label = RichText::new(title).color(if selected {
                         Color32::from_rgb(0xE8, 0xE8, 0xE8)
                     } else {
                         Color32::from_rgb(0x88, 0x88, 0x88)
@@ -71,12 +91,8 @@ impl eframe::App for NacarApp {
                 if ui.button("+").clicked() {
                     self.show_profile_menu = !self.show_profile_menu;
                 }
-
-                if tab_count == 0 {
-                    ui.label(
-                        RichText::new("No tabs — press Ctrl+T")
-                            .color(Color32::from_rgb(0x88, 0x88, 0x88)),
-                    );
+                if !self.sidebar.show && ui.button("Sessions").clicked() {
+                    self.sidebar.show = true;
                 }
             });
 
@@ -85,13 +101,26 @@ impl eframe::App for NacarApp {
                     let profiles = self.workspace.profiles.clone();
                     for profile in &profiles {
                         if ui.button(&profile.name).clicked() {
-                            let _ = self.workspace.open_tab(ui.ctx(), profile, None);
+                            let cwd = self
+                                .workspace
+                                .active_tab()
+                                .and_then(|t| t.cwd.clone());
+                            let _ = self.workspace.open_tab(ui.ctx(), profile, cwd);
                             self.show_profile_menu = false;
                         }
                     }
                 });
             }
         });
+
+        if self.sidebar.show {
+            egui::Panel::left("sidebar")
+                .resizable(true)
+                .default_size(240.0)
+                .show(ui, |ui| {
+                    sidebar::draw(ui, &mut self.workspace, &mut self.config, &mut self.sidebar);
+                });
+        }
 
         egui::CentralPanel::default()
             .frame(Frame::NONE.fill(Color32::from_rgb(0x12, 0x12, 0x14)))
@@ -107,9 +136,19 @@ impl eframe::App for NacarApp {
                 render_layout(ui, &mut self.workspace.tabs[active], focused);
             });
     }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        let _ = persist::save_workspace(&self.workspace, &self.sidebar.archived);
+        let _ = self.config.save();
+    }
 }
 
-fn handle_shortcuts(ui: &egui::Ui, workspace: &mut Workspace, show_menu: &mut bool) {
+fn handle_shortcuts(
+    ui: &egui::Ui,
+    workspace: &mut Workspace,
+    show_menu: &mut bool,
+    sidebar: &mut SidebarState,
+) {
     let ctx = ui.ctx().clone();
     let mut actions = Vec::new();
     ui.input(|i| {
@@ -130,7 +169,8 @@ fn handle_shortcuts(ui: &egui::Ui, workspace: &mut Workspace, show_menu: &mut bo
         match (key, modifiers.ctrl, modifiers.shift, modifiers.alt) {
             (Key::T, true, false, false) => {
                 let profile = crate::shell::default_profile();
-                let _ = workspace.open_tab(&ctx, &profile, None);
+                let cwd = workspace.active_tab().and_then(|t| t.cwd.clone());
+                let _ = workspace.open_tab(&ctx, &profile, cwd);
             }
             (Key::W, true, false, false) => {
                 if workspace.close_focused_pane() {
@@ -154,11 +194,19 @@ fn handle_shortcuts(ui: &egui::Ui, workspace: &mut Workspace, show_menu: &mut bo
             (Key::N, true, false, false) => {
                 *show_menu = !*show_menu;
             }
+            (Key::B, true, false, false) => {
+                sidebar.show = !sidebar.show;
+            }
+            (Key::P, true, false, false) => {
+                workspace.toggle_pin_active();
+            }
+            (Key::S, true, true, false) => {
+                let _ = persist::save_workspace(workspace, &sidebar.archived);
+            }
             _ => {}
         }
     }
 
-    // Number keys Ctrl+1..9 switch tabs
     ui.input(|i| {
         for n in 1..=9 {
             let key = match n {
@@ -202,14 +250,12 @@ fn render_node(
                 } else {
                     egui::Stroke::NONE
                 };
-                egui::Frame::NONE
-                    .stroke(stroke)
-                    .show(ui, |ui| {
-                        let response = TerminalView::show(ui, session, is_focused);
-                        if response.clicked() {
-                            tab.focused_pane = *id;
-                        }
-                    });
+                egui::Frame::NONE.stroke(stroke).show(ui, |ui| {
+                    let response = TerminalView::show(ui, session, is_focused);
+                    if response.clicked() {
+                        tab.focused_pane = *id;
+                    }
+                });
             }
         }
         LayoutNode::Split {
@@ -221,7 +267,6 @@ fn render_node(
             let available = ui.available_size();
             match direction {
                 SplitDir::Vertical => {
-                    // side by side
                     let left_w = available.x * *ratio;
                     ui.horizontal(|ui| {
                         ui.allocate_ui(egui::vec2(left_w, available.y), |ui| {
@@ -234,7 +279,6 @@ fn render_node(
                     });
                 }
                 SplitDir::Horizontal => {
-                    // stacked
                     let top_h = available.y * *ratio;
                     ui.vertical(|ui| {
                         ui.allocate_ui(egui::vec2(available.x, top_h), |ui| {
