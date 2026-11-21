@@ -5,16 +5,9 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 /// Track previous statuses so we only notify on transitions.
+#[derive(Default)]
 pub struct StatusTracker {
     prev: HashMap<u64, SessionStatus>,
-}
-
-impl Default for StatusTracker {
-    fn default() -> Self {
-        Self {
-            prev: HashMap::new(),
-        }
-    }
 }
 
 impl StatusTracker {

@@ -12,6 +12,7 @@ pub enum ShellKind {
 pub struct ShellProfile {
     pub id: String,
     pub name: String,
+    #[allow(dead_code)]
     pub kind: ShellKind,
     pub program: String,
     pub args: Vec<String>,
@@ -108,10 +109,12 @@ pub fn list_wsl_distros() -> Vec<String> {
 }
 
 fn decode_wsl_list(bytes: &[u8]) -> String {
-    if bytes.len() >= 2 && bytes.len() % 2 == 0 {
+    if bytes.len() >= 2 && bytes.len().is_multiple_of(2) {
         // Likely UTF-16LE (with or without BOM).
         let u16s: Vec<u16> = bytes
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|c| u16::from_le_bytes([c[0], c[1]]))
             .collect();
         let s = String::from_utf16_lossy(&u16s);

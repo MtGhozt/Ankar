@@ -83,7 +83,9 @@ pub struct RenderableContent {
 }
 
 pub struct TerminalSession {
+    #[allow(dead_code)]
     pub id: u64,
+    #[allow(dead_code)]
     pub title: String,
     term: Arc<FairMutex<Term<EventProxy>>>,
     size: TerminalSize,
@@ -213,12 +215,7 @@ impl TerminalSession {
         if lines == 0 {
             return;
         }
-        let scroll = if lines > 0 {
-            Scroll::Delta(lines)
-        } else {
-            Scroll::Delta(lines)
-        };
-        term.scroll_display(scroll);
+        term.scroll_display(Scroll::Delta(lines));
     }
 
     pub fn resize(&mut self, pixel_w: f32, pixel_h: f32, metrics: CellMetrics) {
@@ -281,6 +278,7 @@ impl TerminalSession {
         }
     }
 
+    #[allow(dead_code)]
     pub fn clear_selection(&mut self) {
         let mut term = self.term.lock();
         term.selection = None;
@@ -307,6 +305,7 @@ impl TerminalSession {
         out
     }
 
+    #[allow(dead_code)]
     pub fn mark_output(&mut self) {
         if let Ok(mut t) = self.last_output.lock() {
             *t = Instant::now();

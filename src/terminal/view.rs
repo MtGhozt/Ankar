@@ -225,7 +225,7 @@ fn paint_grid(
             let y2 = y + cell_h - 1.0;
             shapes.push(Shape::LineSegment {
                 points: [Pos2::new(x, y2), Pos2::new(x + width, y2)],
-                stroke: Stroke::new(1.0, fg).into(),
+                stroke: Stroke::new(1.0, fg),
             });
         }
     }

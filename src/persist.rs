@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct SavedWorkspace {
     pub active_tab: usize,
     pub tabs: Vec<SavedTab>,
@@ -67,16 +67,6 @@ pub struct ArchivedSession {
     pub profile_id: String,
     pub cwd: Option<PathBuf>,
     pub command: Option<String>,
-}
-
-impl Default for SavedWorkspace {
-    fn default() -> Self {
-        Self {
-            active_tab: 0,
-            tabs: Vec::new(),
-            archived: Vec::new(),
-        }
-    }
 }
 
 pub fn save_workspace(ws: &Workspace, archived: &[ArchivedSession]) -> anyhow::Result<()> {

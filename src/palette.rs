@@ -14,18 +14,10 @@ pub enum PaletteAction {
     PinActive,
 }
 
+#[derive(Default)]
 pub struct CommandPalette {
     pub open: bool,
     pub query: String,
-}
-
-impl Default for CommandPalette {
-    fn default() -> Self {
-        Self {
-            open: false,
-            query: String::new(),
-        }
-    }
 }
 
 impl CommandPalette {
@@ -73,12 +65,12 @@ impl CommandPalette {
                         }
 
                         let q = self.query.to_lowercase();
-                        let mut items: Vec<(String, PaletteAction)> = Vec::new();
-
-                        items.push(("New tab".into(), PaletteAction::NewTab));
-                        items.push(("Toggle sidebar".into(), PaletteAction::ToggleSidebar));
-                        items.push(("Toggle file viewer".into(), PaletteAction::ToggleFiles));
-                        items.push(("Pin active session".into(), PaletteAction::PinActive));
+                        let mut items: Vec<(String, PaletteAction)> = vec![
+                            ("New tab".into(), PaletteAction::NewTab),
+                            ("Toggle sidebar".into(), PaletteAction::ToggleSidebar),
+                            ("Toggle file viewer".into(), PaletteAction::ToggleFiles),
+                            ("Pin active session".into(), PaletteAction::PinActive),
+                        ];
 
                         for (i, tab) in workspace.tabs.iter().enumerate() {
                             let label = format!(
