@@ -1,7 +1,10 @@
 mod app;
 mod config;
+mod files;
+mod launchers;
 mod layout;
 mod notify;
+mod palette;
 mod persist;
 mod shell;
 mod sidebar;

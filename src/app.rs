@@ -1,5 +1,8 @@
 use crate::config::Config;
+use crate::files::FileViewer;
+use crate::launchers;
 use crate::layout::{LayoutNode, SplitDir, Workspace};
+use crate::palette::{CommandPalette, PaletteAction};
 use crate::persist;
 use crate::sidebar::{self, SidebarState};
 use crate::status::StatusTracker;
@@ -12,6 +15,8 @@ pub struct NacarApp {
     sidebar: SidebarState,
     show_profile_menu: bool,
     status: StatusTracker,
+    palette: CommandPalette,
+    files: FileViewer,
 }
 
 impl NacarApp {
@@ -33,7 +38,42 @@ impl NacarApp {
             },
             show_profile_menu: false,
             status: StatusTracker::default(),
+            palette: CommandPalette::default(),
+            files: FileViewer::default(),
         })
+    }
+
+    fn apply_palette_action(&mut self, ctx: &Context, action: PaletteAction) {
+        match action {
+            PaletteAction::FocusTab(i) => {
+                if i < self.workspace.tabs.len() {
+                    self.workspace.active_tab = i;
+                }
+            }
+            PaletteAction::OpenProfile(id) => {
+                let profile = self.workspace.profile_by_id(&id);
+                let cwd = self.workspace.active_tab().and_then(|t| t.cwd.clone());
+                let _ = self.workspace.open_tab(ctx, &profile, cwd);
+            }
+            PaletteAction::RunLauncher(launcher) => {
+                let cwd = self.workspace.active_tab().and_then(|t| t.cwd.clone());
+                let _ = launchers::run_launcher(ctx, &mut self.workspace, &launcher, cwd);
+            }
+            PaletteAction::ToggleSidebar => {
+                self.sidebar.show = !self.sidebar.show;
+            }
+            PaletteAction::ToggleFiles => {
+                self.files.show = !self.files.show;
+            }
+            PaletteAction::NewTab => {
+                let profile = crate::shell::default_profile();
+                let cwd = self.workspace.active_tab().and_then(|t| t.cwd.clone());
+                let _ = self.workspace.open_tab(ctx, &profile, cwd);
+            }
+            PaletteAction::PinActive => {
+                self.workspace.toggle_pin_active();
+            }
+        }
     }
 }
 
@@ -42,11 +82,21 @@ impl eframe::App for NacarApp {
         let focused = ui.input(|i| i.focused);
         self.status
             .tick(&mut self.workspace, &self.config, focused);
-        // Keep polling while sessions may go idle.
         ui.ctx()
             .request_repaint_after(std::time::Duration::from_secs(1));
 
-        handle_shortcuts(ui, &mut self.workspace, &mut self.show_profile_menu, &mut self.sidebar);
+        // Sync file viewer root with active project.
+        let cwd = self.workspace.active_tab().and_then(|t| t.cwd.clone());
+        self.files.set_root(cwd);
+
+        handle_shortcuts(
+            ui,
+            &mut self.workspace,
+            &mut self.show_profile_menu,
+            &mut self.sidebar,
+            &mut self.palette,
+            &mut self.files,
+        );
 
         egui::Panel::top("tab_bar").show(ui, |ui| {
             ui.horizontal(|ui| {
@@ -104,6 +154,9 @@ impl eframe::App for NacarApp {
                 if !self.sidebar.show && ui.button("Sessions").clicked() {
                     self.sidebar.show = true;
                 }
+                if ui.button("Files").clicked() {
+                    self.files.show = !self.files.show;
+                }
             });
 
             if self.show_profile_menu {
@@ -111,10 +164,7 @@ impl eframe::App for NacarApp {
                     let profiles = self.workspace.profiles.clone();
                     for profile in &profiles {
                         if ui.button(&profile.name).clicked() {
-                            let cwd = self
-                                .workspace
-                                .active_tab()
-                                .and_then(|t| t.cwd.clone());
+                            let cwd = self.workspace.active_tab().and_then(|t| t.cwd.clone());
                             let _ = self.workspace.open_tab(ui.ctx(), profile, cwd);
                             self.show_profile_menu = false;
                         }
@@ -123,12 +173,34 @@ impl eframe::App for NacarApp {
             }
         });
 
+        egui::Panel::bottom("launchers").show(ui, |ui| {
+            launchers::draw_bar(ui, &self.config, &mut self.workspace);
+        });
+
         if self.sidebar.show {
             egui::Panel::left("sidebar")
                 .resizable(true)
                 .default_size(240.0)
                 .show(ui, |ui| {
                     sidebar::draw(ui, &mut self.workspace, &mut self.config, &mut self.sidebar);
+                });
+        }
+
+        if self.files.show {
+            egui::Panel::right("files")
+                .resizable(true)
+                .default_size(320.0)
+                .show(ui, |ui| {
+                    // Detect selection changes and load file.
+                    let before = self.files.open_file.clone();
+                    self.files.draw(ui);
+                    if self.files.open_file != before {
+                        if let Some(path) = self.files.open_file.clone() {
+                            if path.is_file() {
+                                self.files.open_path(path);
+                            }
+                        }
+                    }
                 });
         }
 
@@ -142,9 +214,19 @@ impl eframe::App for NacarApp {
                     return;
                 }
                 let active = self.workspace.active_tab;
-                let focused = self.workspace.tabs[active].focused_pane;
-                render_layout(ui, &mut self.workspace.tabs[active], focused);
+                let focused_pane = self.workspace.tabs[active].focused_pane;
+                render_layout(ui, &mut self.workspace.tabs[active], focused_pane);
             });
+
+        let ctx = ui.ctx().clone();
+        if let Some(action) = self.palette.draw(
+            ui,
+            &self.workspace,
+            &self.config,
+            &self.sidebar.archived,
+        ) {
+            self.apply_palette_action(&ctx, action);
+        }
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
@@ -158,6 +240,8 @@ fn handle_shortcuts(
     workspace: &mut Workspace,
     show_menu: &mut bool,
     sidebar: &mut SidebarState,
+    palette: &mut CommandPalette,
+    files: &mut FileViewer,
 ) {
     let ctx = ui.ctx().clone();
     let mut actions = Vec::new();
@@ -177,6 +261,12 @@ fn handle_shortcuts(
 
     for (key, modifiers) in actions {
         match (key, modifiers.ctrl, modifiers.shift, modifiers.alt) {
+            (Key::K, true, false, false) => {
+                palette.open = !palette.open;
+                if !palette.open {
+                    palette.query.clear();
+                }
+            }
             (Key::T, true, false, false) => {
                 let profile = crate::shell::default_profile();
                 let cwd = workspace.active_tab().and_then(|t| t.cwd.clone());
@@ -212,6 +302,9 @@ fn handle_shortcuts(
             }
             (Key::S, true, true, false) => {
                 let _ = persist::save_workspace(workspace, &sidebar.archived);
+            }
+            (Key::F, true, false, false) => {
+                files.show = !files.show;
             }
             _ => {}
         }
