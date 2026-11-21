@@ -2,6 +2,7 @@ use crate::config::Config;
 use crate::layout::{LayoutNode, SplitDir, Workspace};
 use crate::persist;
 use crate::sidebar::{self, SidebarState};
+use crate::status::StatusTracker;
 use crate::terminal::TerminalView;
 use egui::{Color32, Context, Frame, Key, RichText, Theme, Visuals};
 
@@ -10,6 +11,7 @@ pub struct NacarApp {
     config: Config,
     sidebar: SidebarState,
     show_profile_menu: bool,
+    status: StatusTracker,
 }
 
 impl NacarApp {
@@ -30,12 +32,20 @@ impl NacarApp {
                 show: true,
             },
             show_profile_menu: false,
+            status: StatusTracker::default(),
         })
     }
 }
 
 impl eframe::App for NacarApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let focused = ui.input(|i| i.focused);
+        self.status
+            .tick(&mut self.workspace, &self.config, focused);
+        // Keep polling while sessions may go idle.
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_secs(1));
+
         handle_shortcuts(ui, &mut self.workspace, &mut self.show_profile_menu, &mut self.sidebar);
 
         egui::Panel::top("tab_bar").show(ui, |ui| {

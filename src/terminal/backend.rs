@@ -91,6 +91,7 @@ pub struct TerminalSession {
     last_content: RenderableContent,
     exited: Arc<AtomicBool>,
     last_output: Arc<std::sync::Mutex<Instant>>,
+    bell: Arc<AtomicBool>,
     pub colors: TermColors,
 }
 
@@ -134,6 +135,8 @@ impl TerminalSession {
 
         let exited = Arc::new(AtomicBool::new(false));
         let exited_flag = exited.clone();
+        let bell = Arc::new(AtomicBool::new(false));
+        let bell_flag = bell.clone();
         let last_output = Arc::new(std::sync::Mutex::new(Instant::now()));
         let last_output_flag = last_output.clone();
         let title = program
@@ -155,7 +158,11 @@ impl TerminalSession {
                         Event::PtyWrite(data) => {
                             pty_notifier.notify(data.as_bytes().to_vec());
                         }
-                        Event::Wakeup | Event::Bell => {
+                        Event::Bell => {
+                            bell_flag.store(true, Ordering::SeqCst);
+                            ctx.request_repaint();
+                        }
+                        Event::Wakeup => {
                             if let Ok(mut t) = last_output_flag.lock() {
                                 *t = Instant::now();
                             }
@@ -177,12 +184,18 @@ impl TerminalSession {
             last_content: initial,
             exited,
             last_output,
+            bell,
             colors: TermColors::default(),
         })
     }
 
     pub fn is_exited(&self) -> bool {
         self.exited.load(Ordering::SeqCst)
+    }
+
+    /// Returns true once if a BEL was received since the last call.
+    pub fn saw_bell(&self) -> bool {
+        self.bell.swap(false, Ordering::SeqCst)
     }
 
     pub fn write(&mut self, bytes: impl Into<Vec<u8>>) {
