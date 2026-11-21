@@ -1,3 +1,4 @@
+use crate::ui_theme;
 use egui::{Color32, RichText, Ui};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -98,7 +99,7 @@ impl FileViewer {
             ui.label(
                 RichText::new(path.display().to_string())
                     .small()
-                    .color(Color32::from_rgb(0x88, 0x88, 0x88)),
+                    .color(ui_theme::TEXT_MUTED),
             );
             egui::ScrollArea::both().id_salt("file_content").show(ui, |ui| {
                 if self.highlighted.is_empty() {
@@ -189,7 +190,7 @@ fn highlight(
                     out.push((syn_color(style), piece.to_string()));
                 }
             }
-            Err(_) => out.push((Color32::from_rgb(0xD0, 0xD0, 0xD0), line.to_string())),
+            Err(_) => out.push((ui_theme::TEXT, line.to_string())),
         }
     }
     out

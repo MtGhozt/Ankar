@@ -1,7 +1,8 @@
 use crate::config::{Config, Launcher};
 use crate::layout::Workspace;
 use crate::persist::ArchivedSession;
-use egui::{Color32, Key, RichText, Ui};
+use crate::ui_theme;
+use egui::{Key, RichText, Ui};
 
 #[derive(Clone, Debug)]
 pub enum PaletteAction {
@@ -46,16 +47,21 @@ impl CommandPalette {
             .fixed_pos(rect.min)
             .show(ui.ctx(), |ui| {
                 egui::Frame::NONE
-                    .fill(Color32::from_rgb(0x1A, 0x1A, 0x1E))
-                    .stroke(egui::Stroke::new(1.0, Color32::from_rgb(0x3A, 0x7C, 0xA5)))
+                    .fill(ui_theme::BG_ELEVATED)
+                    .stroke(egui::Stroke::new(1.0, ui_theme::BORDER))
                     .inner_margin(12.0)
                     .show(ui, |ui| {
                         ui.set_min_size(egui::vec2(width - 24.0, height - 24.0));
-                        ui.label(RichText::new("Command palette").strong());
+                        ui.label(
+                            RichText::new("Command palette")
+                                .strong()
+                                .color(ui_theme::TEXT),
+                        );
                         let resp = ui.add(
                             egui::TextEdit::singleline(&mut self.query)
                                 .desired_width(f32::INFINITY)
-                                .hint_text("Search sessions, projects, launchers…"),
+                                .hint_text("Search sessions, projects, launchers…")
+                                .text_color(ui_theme::TEXT),
                         );
                         resp.request_focus();
 
@@ -106,7 +112,7 @@ impl CommandPalette {
                         egui::ScrollArea::vertical().show(ui, |ui| {
                             for (label, act) in items {
                                 if ui
-                                    .selectable_label(false, RichText::new(label).color(Color32::from_rgb(0xD0, 0xD0, 0xD0)))
+                                    .selectable_label(false, RichText::new(label).color(ui_theme::TEXT))
                                     .clicked()
                                 {
                                     action = Some(act);

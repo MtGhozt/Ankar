@@ -1,6 +1,7 @@
 use crate::config::{Config, Launcher};
 use crate::layout::Workspace;
-use egui::{Color32, RichText, Ui};
+use crate::ui_theme;
+use egui::{RichText, Ui};
 use std::path::PathBuf;
 
 pub fn draw_bar(ui: &mut Ui, config: &Config, workspace: &mut Workspace) {
@@ -8,7 +9,7 @@ pub fn draw_bar(ui: &mut Ui, config: &Config, workspace: &mut Workspace) {
         ui.label(
             RichText::new("Launch")
                 .small()
-                .color(Color32::from_rgb(0x88, 0x88, 0x88)),
+                .color(ui_theme::TEXT_MUTED),
         );
         let launchers = config.launchers.clone();
         let cwd = workspace.active_tab().and_then(|t| t.cwd.clone());

@@ -10,6 +10,7 @@ mod shell;
 mod sidebar;
 mod status;
 mod terminal;
+mod ui_theme;
 
 use anyhow::Context;
 

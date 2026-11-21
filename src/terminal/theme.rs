@@ -1,3 +1,4 @@
+use crate::ui_theme;
 use alacritty_terminal::vte::ansi::{Color, NamedColor, Rgb};
 use egui::Color32;
 
@@ -14,10 +15,10 @@ pub struct TermColors {
 impl Default for TermColors {
     fn default() -> Self {
         Self {
-            background: Color32::from_rgb(0x12, 0x12, 0x14),
+            background: ui_theme::BG_TERM,
             foreground: Color32::from_rgb(0xE0, 0xE0, 0xE0),
-            cursor: Color32::from_rgb(0x3A, 0x7C, 0xA5),
-            accent: Color32::from_rgb(0x3A, 0x7C, 0xA5),
+            cursor: ui_theme::ACCENT,
+            accent: ui_theme::ACCENT,
             ansi: [
                 Color32::from_rgb(0x1C, 0x1C, 0x1E), // black
                 Color32::from_rgb(0xC7, 0x4E, 0x4E), // red

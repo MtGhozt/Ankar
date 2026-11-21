@@ -1,7 +1,8 @@
 use crate::config::Config;
 use crate::layout::{SessionStatus, Workspace};
 use crate::persist::{self, ArchivedSession};
-use egui::{Color32, RichText, Ui};
+use crate::ui_theme;
+use egui::{RichText, Ui};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
@@ -26,7 +27,11 @@ pub fn draw(
     sidebar: &mut SidebarState,
 ) {
     ui.horizontal(|ui| {
-        ui.label(RichText::new("Sessions").strong().color(Color32::from_rgb(0xE0, 0xE0, 0xE0)));
+        ui.label(
+            RichText::new("Sessions")
+                .strong()
+                .color(ui_theme::TEXT_STRONG),
+        );
         if ui.small_button("Hide").clicked() {
             sidebar.show = false;
         }
@@ -73,11 +78,7 @@ pub fn draw(
             if ui.small_button(pin_label).clicked() {
                 toggle_pin_project = Some(key.clone());
             }
-            ui.label(
-                RichText::new(display)
-                    .strong()
-                    .color(Color32::from_rgb(0xA8, 0xC4, 0xD8)),
-            );
+            ui.label(RichText::new(display).strong().color(ui_theme::TEXT));
         });
 
         // Pinned sessions first within group
@@ -116,7 +117,11 @@ pub fn draw(
 
     if !sidebar.archived.is_empty() {
         ui.separator();
-        ui.label(RichText::new("Archived").strong().color(Color32::from_rgb(0x88, 0x88, 0x88)));
+        ui.label(
+            RichText::new("Archived")
+                .strong()
+                .color(ui_theme::TEXT_MUTED),
+        );
         let mut restore = None;
         let mut forget = None;
         for (i, arch) in sidebar.archived.iter().enumerate() {
@@ -126,7 +131,7 @@ pub fn draw(
                 arch.command.as_deref().unwrap_or(arch.profile_id.as_str())
             );
             ui.horizontal(|ui| {
-                ui.label(RichText::new(label).small().color(Color32::from_rgb(0x77, 0x77, 0x77)));
+                ui.label(RichText::new(label).small().color(ui_theme::TEXT_MUTED));
                 if ui.small_button("open").clicked() {
                     restore = Some(i);
                 }
