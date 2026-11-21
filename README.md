@@ -1,4 +1,4 @@
-# nacar
+# ankar
 
 A clean desktop terminal for Windows. Fast, local-only, no accounts, no telemetry, no AI.
 
@@ -9,7 +9,7 @@ Built for running and organizing terminal agents (OpenCode, cursor-agent, gemini
 - Tabs and split panes (horizontal / vertical)
 - Shell profiles: PowerShell, cmd, WSL (distros via `wsl -l -q`)
 - Session sidebar grouped by project folder, with pins and archives
-- Session restore from `%APPDATA%\nacar\sessions.json`
+- Session restore from `%APPDATA%\ankar\sessions.json`
 - Status detection: active / waiting / finished + Windows toasts when unfocused
 - Configurable launchers on the bottom bar
 - Command palette (`Ctrl+K`)
@@ -24,11 +24,13 @@ Requirements:
 - Visual Studio Build Tools with C++ workload
 
 ```powershell
-git clone https://github.com/MtGhozt/nacar.git
-cd nacar
+git clone https://github.com/MtGhozt/ankar.git
+cd ankar
 cargo build --release
-.\target\release\nacar.exe
+.\target\release\ankar.exe
 ```
+
+If you previously used the `nacar` name, the first launch migrates `%APPDATA%\nacar\` → `%APPDATA%\ankar\` automatically.
 
 ## Keyboard shortcuts
 
@@ -51,9 +53,9 @@ cargo build --release
 
 ## Configuration
 
-On first run nacar creates:
+On first run ankar creates:
 
-`%APPDATA%\nacar\config.toml`
+`%APPDATA%\ankar\config.toml`
 
 Example:
 
@@ -81,11 +83,11 @@ command = "cursor-agent"
 args = []
 ```
 
-Session layout is stored in `%APPDATA%\nacar\sessions.json` (tabs, panes, folders, commands — not scrollback).
+Session layout is stored in `%APPDATA%\ankar\sessions.json` (tabs, panes, folders, commands — not scrollback).
 
 ## Colored paths in the prompt
 
-nacar does **not** rewrite your prompt. Use a prompt engine inside the shell:
+ankar does **not** rewrite your prompt. Use a prompt engine inside the shell:
 
 ### oh-my-posh (PowerShell)
 
@@ -104,7 +106,7 @@ winget install Starship.Starship
 Invoke-Expression (&starship init powershell)
 ```
 
-Pick a theme that colors the cwd segment; alacritty_terminal already renders the ANSI colors nacar receives.
+Pick a theme that colors the cwd segment; alacritty_terminal already renders the ANSI colors ankar receives.
 
 ## Privacy
 

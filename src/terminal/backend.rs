@@ -148,7 +148,7 @@ impl TerminalSession {
             .to_string();
 
         std::thread::Builder::new()
-            .name(format!("nacar-pty-{id}"))
+            .name(format!("ankar-pty-{id}"))
             .spawn(move || {
                 while let Ok(event) = event_receiver.recv() {
                     match &event {

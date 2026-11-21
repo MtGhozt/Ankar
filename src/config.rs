@@ -2,7 +2,8 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-pub const APP_NAME: &str = "nacar";
+pub const APP_NAME: &str = "ankar";
+const LEGACY_APP_NAME: &str = "nacar";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Config {
@@ -50,7 +51,22 @@ impl Default for Config {
 impl Config {
     pub fn config_dir() -> anyhow::Result<PathBuf> {
         let base = dirs::config_dir().ok_or_else(|| anyhow::anyhow!("no config dir"))?;
-        Ok(base.join(APP_NAME))
+        let dir = base.join(APP_NAME);
+        let legacy = base.join(LEGACY_APP_NAME);
+        // One-shot migration from the previous app name.
+        if !dir.exists() && legacy.exists() {
+            if let Err(err) = fs::rename(&legacy, &dir) {
+                log::warn!("rename of legacy config failed ({err}); copying instead");
+                copy_dir_recursive(&legacy, &dir)?;
+                let _ = fs::remove_dir_all(&legacy);
+            }
+            log::info!(
+                "migrated config from {} to {}",
+                legacy.display(),
+                dir.display()
+            );
+        }
+        Ok(dir)
     }
 
     pub fn config_path() -> anyhow::Result<PathBuf> {
@@ -85,8 +101,8 @@ impl Config {
 
     fn write_default_file(&self, path: &Path) -> anyhow::Result<()> {
         let body = format!(
-            r#"# nacar configuration
-# Location: %APPDATA%\nacar\config.toml
+            r#"# ankar configuration
+# Location: %APPDATA%\ankar\config.toml
 
 # Default shell profile id: powershell | cmd | wsl | wsl:<distro>
 default_shell = "{default_shell}"
@@ -125,4 +141,19 @@ args = []
         fs::write(path, body)?;
         Ok(())
     }
+}
+
+fn copy_dir_recursive(src: &Path, dst: &Path) -> anyhow::Result<()> {
+    fs::create_dir_all(dst)?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        if from.is_dir() {
+            copy_dir_recursive(&from, &to)?;
+        } else {
+            fs::copy(&from, &to)?;
+        }
+    }
+    Ok(())
 }

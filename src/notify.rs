@@ -7,11 +7,11 @@ pub fn session_status_changed(session_name: &str, status: SessionStatus, window_
     }
     let (summary, body) = match status {
         SessionStatus::Waiting => (
-            "nacar — waiting",
+            "ankar — waiting",
             format!("{session_name} is waiting for input"),
         ),
         SessionStatus::Finished => (
-            "nacar — finished",
+            "ankar — finished",
             format!("{session_name} has exited"),
         ),
         SessionStatus::Active => return,
@@ -19,7 +19,7 @@ pub fn session_status_changed(session_name: &str, status: SessionStatus, window_
     let _ = Notification::new()
         .summary(summary)
         .body(&body)
-        .appname("nacar")
+        .appname("ankar")
         .timeout(5000)
         .show();
 }

@@ -9,7 +9,7 @@ use crate::status::StatusTracker;
 use crate::terminal::TerminalView;
 use egui::{Color32, Context, Frame, Key, RichText, Theme, Visuals};
 
-pub struct NacarApp {
+pub struct AnkarApp {
     workspace: Workspace,
     config: Config,
     sidebar: SidebarState,
@@ -19,7 +19,7 @@ pub struct NacarApp {
     files: FileViewer,
 }
 
-impl NacarApp {
+impl AnkarApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> anyhow::Result<Self> {
         apply_theme(&cc.egui_ctx);
         let config = Config::load_or_create().unwrap_or_default();
@@ -77,7 +77,7 @@ impl NacarApp {
     }
 }
 
-impl eframe::App for NacarApp {
+impl eframe::App for AnkarApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let focused = ui.input(|i| i.focused);
         self.status
@@ -101,7 +101,7 @@ impl eframe::App for NacarApp {
         egui::Panel::top("tab_bar").show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.label(
-                    RichText::new("nacar")
+                    RichText::new("ankar")
                         .strong()
                         .color(Color32::from_rgb(0xE8, 0xE8, 0xE8)),
                 );

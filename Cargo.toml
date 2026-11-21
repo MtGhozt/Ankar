@@ -1,10 +1,10 @@
 [package]
-name = "nacar"
+name = "ankar"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
 description = "A clean desktop terminal for Windows — no accounts, no telemetry, no AI."
-repository = "https://github.com/MtGhozt/nacar"
+repository = "https://github.com/MtGhozt/ankar"
 readme = "README.md"
 keywords = ["terminal", "pty", "conpty", "egui"]
 categories = ["command-line-utilities", "gui"]

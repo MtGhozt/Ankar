@@ -20,16 +20,16 @@ fn main() -> anyhow::Result<()> {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1100.0, 700.0])
             .with_min_inner_size([640.0, 400.0])
-            .with_title("nacar"),
+            .with_title("ankar"),
         renderer: eframe::Renderer::Glow,
         ..Default::default()
     };
 
     eframe::run_native(
-        "nacar",
+        "ankar",
         native_options,
-        Box::new(|cc| Ok(Box::new(app::NacarApp::new(cc)?))),
+        Box::new(|cc| Ok(Box::new(app::AnkarApp::new(cc)?))),
     )
     .map_err(|e| anyhow::anyhow!("eframe failed: {e}"))
-    .context("failed to start nacar")
+    .context("failed to start ankar")
 }
