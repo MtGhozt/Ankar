@@ -871,27 +871,34 @@ fn draw_group_header(
     interactive: bool,
     mut on_toggle: impl FnMut(),
 ) {
-    ui.add_space(8.67);
-    let resp = ui
-        .horizontal(|ui| {
-            ui.add_space(7.33);
-            ui.set_min_height(18.0);
-            if interactive {
-                let chev = if collapsed {
-                    Icon::ChevronRight
-                } else {
-                    Icon::ChevronDown
-                };
-                ui.label(ui_theme::icon(chev, 12.0, ui_theme::TEXT_FAINT));
-            }
-            ui.label(
-                RichText::new(name)
-                    .size(ui_theme::SIZE_UI_SMALL)
-                    .color(ui_theme::TEXT_MUTED),
-            );
-        })
-        .response;
-    if interactive && resp.interact(Sense::click()).clicked() {
+    // midterm: group header 12px #838383 at x 13.33; compact before first row (+28 to title).
+    let row = ui.available_rect_before_wrap();
+    let (hdr_rect, resp) = ui.allocate_exact_size(Vec2::new(row.width(), 20.0), Sense::click());
+    let painter = ui.painter();
+    let mut x = hdr_rect.left() + 13.33;
+    if interactive {
+        let chev = if collapsed {
+            Icon::ChevronRight
+        } else {
+            Icon::ChevronDown
+        };
+        painter.text(
+            egui::pos2(hdr_rect.left() + 4.0, hdr_rect.center().y),
+            Align2::LEFT_CENTER,
+            chev.codepoint().to_string(),
+            FontId::new(12.0, FontFamily::Name(ui_theme::FONT_ICONS.into())),
+            ui_theme::TEXT_FAINT,
+        );
+        x = hdr_rect.left() + 18.0;
+    }
+    painter.text(
+        egui::pos2(x, hdr_rect.center().y),
+        Align2::LEFT_CENTER,
+        name,
+        FontId::new(ui_theme::SIZE_UI_SMALL, FontFamily::Proportional),
+        ui_theme::TEXT_MUTED,
+    );
+    if interactive && resp.clicked() {
         on_toggle();
     }
 }
@@ -913,6 +920,7 @@ fn draw_session_row(
     let Some(tab) = workspace.tabs.get(idx) else {
         return;
     };
+    const ROW_H: f32 = 45.33;
     let selected = idx == workspace.active_tab;
     let (agent_icon, agent_color, logo_key) = agent_visual(tab, config);
     let logo_tex = logo_key.and_then(|k| logos.get(ui.ctx(), k));
@@ -920,110 +928,160 @@ fn draw_session_row(
     let rel = relative_time(now.duration_since(tab.status_changed_at));
     let (sub, sub_color) = subtitle_for(tab);
 
-    ui.add_space(4.0);
-    let fill = if selected {
-        ui_theme::ROW_SELECTED
-    } else {
-        Color32::TRANSPARENT
-    };
+    let full = ui.available_rect_before_wrap();
+    let (row_rect, resp) = ui.allocate_exact_size(Vec2::new(full.width(), ROW_H), Sense::click());
 
-    let frame = Frame::NONE
-        .fill(fill)
-        .corner_radius(CornerRadius::same(ui_theme::RADIUS_ROW))
-        .inner_margin(Margin::symmetric(6, 4));
+    // Icon 26.7 box at x 10.67; glyph ≈18 centered. Title baseline ≈ icon_top + 20.
+    let icon_rect = Rect::from_min_size(
+        egui::pos2(row_rect.left() + 10.67, row_rect.top() + 4.0),
+        Vec2::splat(26.7),
+    );
+    let title_font = FontId::new(ui_theme::SIZE_UI, FontFamily::Proportional);
+    let sub_font = FontId::new(ui_theme::SIZE_UI_SMALL, FontFamily::Proportional);
+    let title_y = icon_rect.top() + 13.5;
+    let sub_y = title_y + 16.67;
+    let text_left = row_rect.left() + 42.67;
+    let time_right = row_rect.left() + (296.0_f32).min(row_rect.width() - 8.0);
+    let text_w = (time_right - text_left - 8.0).max(40.0);
 
-    let inner = frame.show(ui, |ui| {
-        ui.set_min_height(37.0);
-        ui.horizontal(|ui| {
-            let icon_box = Vec2::splat(26.7);
-            let (icon_rect, icon_resp) = ui.allocate_exact_size(icon_box, Sense::hover());
-            let glyph_rect = egui::Rect::from_center_size(icon_rect.center(), Vec2::splat(18.0));
-            if let Some(tex) = logo_tex.as_ref() {
-                ui.painter().image(
-                    tex.id(),
-                    glyph_rect,
-                    Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                    Color32::WHITE,
-                );
-            } else {
-                ui.painter().text(
-                    glyph_rect.center(),
-                    Align2::CENTER_CENTER,
-                    agent_icon.codepoint().to_string(),
-                    FontId::new(18.0, FontFamily::Name(ui_theme::FONT_ICONS.into())),
-                    agent_color,
-                );
-            }
-            let badge_center =
-                egui::pos2(icon_rect.right() - 3.0, icon_rect.top() + 4.0);
-            paint_status_badge(ui, badge_center, tab.status);
-
-            ui.add_space(4.0);
-            let time_w = 36.0;
-            let text_w = (ui.available_width() - time_w).max(40.0);
-            ui.vertical(|ui| {
-                ui.spacing_mut().item_spacing.y = 2.0;
-                let title_font = FontId::new(ui_theme::SIZE_UI, FontFamily::Proportional);
-                if sidebar.rename_idx == Some(idx) {
-                    let edit = ui.add(
-                        egui::TextEdit::singleline(&mut sidebar.rename_buf)
-                            .desired_width(text_w)
-                            .font(egui::TextStyle::Body),
-                    );
-                    edit.request_focus();
-                } else {
-                    let title = ellipsize(ui, &tab.session_name, title_font.clone(), text_w);
-                    ui.label(
-                        RichText::new(title)
-                            .size(ui_theme::SIZE_UI)
-                            .color(ui_theme::TEXT),
-                    );
-                }
-                let sub_font = FontId::new(ui_theme::SIZE_UI_SMALL, FontFamily::Proportional);
-                let sub_text = ellipsize(ui, &sub, sub_font.clone(), text_w);
-                ui.label(
-                    RichText::new(sub_text)
-                        .size(ui_theme::SIZE_UI_SMALL)
-                        .color(sub_color),
-                );
-            });
-
-            ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
-                let hovered = icon_resp.hovered()
-                    || ui.rect_contains_pointer(ui.max_rect().expand(2.0));
-                if hovered {
-                    if icon_btn(ui, Icon::Archive, ui_theme::TEXT_MUTED, 20.0)
-                        .on_hover_text("Archive")
-                        .clicked()
-                    {
-                        *archive_idx = Some(idx);
-                    }
-                    let pin_ic = if tab.pinned {
-                        Icon::PinOff
-                    } else {
-                        Icon::Pin
-                    };
-                    if icon_btn(ui, pin_ic, ui_theme::TEXT_MUTED, 20.0)
-                        .on_hover_text(if tab.pinned { "Unpin" } else { "Pin" })
-                        .clicked()
-                    {
-                        *toggle_pin = Some(idx);
-                    }
-                } else {
-                    ui.label(ui_theme::text_sub(rel));
-                }
-            });
-        });
-    });
-
-    let resp = inner.response.interact(Sense::click());
-    if resp.hovered() && !selected {
-        ui.painter().rect_filled(
-            resp.rect,
-            CornerRadius::same(ui_theme::RADIUS_ROW),
-            ui_theme::ROW_HOVER,
+    if sidebar.rename_idx == Some(idx) {
+        let edit_rect = Rect::from_min_size(
+            egui::pos2(text_left, title_y - 8.0),
+            Vec2::new(text_w, 18.0),
         );
+        let mut edit_ui = ui.new_child(
+            egui::UiBuilder::new()
+                .id_salt(("rename", idx))
+                .max_rect(edit_rect)
+                .layout(egui::Layout::left_to_right(Align::Center)),
+        );
+        let edit = edit_ui.add(
+            egui::TextEdit::singleline(&mut sidebar.rename_buf)
+                .desired_width(text_w)
+                .font(egui::TextStyle::Body),
+        );
+        edit.request_focus();
     }
+
+    {
+        let painter = ui.painter();
+        // Hover / selected inset x 6 (spec).
+        let bg = Rect::from_min_max(
+            egui::pos2(row_rect.left() + 6.0, row_rect.top() + 1.0),
+            egui::pos2(row_rect.right() - 2.0, row_rect.bottom() - 1.0),
+        );
+        if selected {
+            painter.rect_filled(
+                bg,
+                CornerRadius::same(ui_theme::RADIUS_ROW),
+                ui_theme::ROW_SELECTED,
+            );
+        } else if resp.hovered() {
+            painter.rect_filled(
+                bg,
+                CornerRadius::same(ui_theme::RADIUS_ROW),
+                ui_theme::ROW_HOVER,
+            );
+        }
+
+        let glyph_rect = Rect::from_center_size(icon_rect.center(), Vec2::splat(18.0));
+        if let Some(tex) = logo_tex.as_ref() {
+            painter.image(
+                tex.id(),
+                glyph_rect,
+                Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                Color32::WHITE,
+            );
+        } else {
+            painter.text(
+                glyph_rect.center(),
+                Align2::CENTER_CENTER,
+                agent_icon.codepoint().to_string(),
+                FontId::new(18.0, FontFamily::Name(ui_theme::FONT_ICONS.into())),
+                agent_color,
+            );
+        }
+        let badge_center = egui::pos2(icon_rect.right() - 2.0, icon_rect.top() + 3.0);
+        paint_status_badge(ui, badge_center, tab.status);
+
+        if sidebar.rename_idx != Some(idx) {
+            let title = ellipsize(ui, &tab.session_name, title_font.clone(), text_w);
+            painter.text(
+                egui::pos2(text_left, title_y),
+                Align2::LEFT_CENTER,
+                title,
+                title_font,
+                ui_theme::TEXT,
+            );
+        }
+        let sub_text = ellipsize(ui, &sub, sub_font.clone(), text_w);
+        painter.text(
+            egui::pos2(text_left, sub_y),
+            Align2::LEFT_CENTER,
+            sub_text,
+            sub_font.clone(),
+            sub_color,
+        );
+
+        // Time on the title baseline; hover reveals archive/pin.
+        if resp.hovered() {
+            let archive_r = Rect::from_center_size(
+                egui::pos2(time_right - 10.0, title_y),
+                Vec2::splat(18.0),
+            );
+            let pin_r = Rect::from_center_size(
+                egui::pos2(time_right - 30.0, title_y),
+                Vec2::splat(18.0),
+            );
+            let pin_ic = if tab.pinned {
+                Icon::PinOff
+            } else {
+                Icon::Pin
+            };
+            painter.text(
+                archive_r.center(),
+                Align2::CENTER_CENTER,
+                Icon::Archive.codepoint().to_string(),
+                FontId::new(14.0, FontFamily::Name(ui_theme::FONT_ICONS.into())),
+                ui_theme::TEXT_MUTED,
+            );
+            painter.text(
+                pin_r.center(),
+                Align2::CENTER_CENTER,
+                pin_ic.codepoint().to_string(),
+                FontId::new(14.0, FontFamily::Name(ui_theme::FONT_ICONS.into())),
+                ui_theme::TEXT_MUTED,
+            );
+        } else {
+            painter.text(
+                egui::pos2(time_right, title_y),
+                Align2::RIGHT_CENTER,
+                rel,
+                sub_font,
+                ui_theme::TEXT_MUTED,
+            );
+        }
+    }
+
+    if resp.hovered() {
+        let archive_r = Rect::from_center_size(
+            egui::pos2(time_right - 10.0, title_y),
+            Vec2::splat(18.0),
+        );
+        let pin_r = Rect::from_center_size(
+            egui::pos2(time_right - 30.0, title_y),
+            Vec2::splat(18.0),
+        );
+        let a = ui.interact(archive_r, ui.scope_id().with(("arch", idx)), Sense::click());
+        let p = ui.interact(pin_r, ui.scope_id().with(("pin", idx)), Sense::click());
+        if a.clicked() {
+            *archive_idx = Some(idx);
+        }
+        if p.clicked() {
+            *toggle_pin = Some(idx);
+        }
+    }
+
     if resp.clicked() {
         *activate = Some(idx);
     }
@@ -1050,10 +1108,7 @@ fn draw_session_row(
         }
     });
 
-    // Spin loader only when working row visible
     if tab.status == SessionStatus::Active && resp.rect.intersects(ui.clip_rect()) {
-        // Active = working in midterm terms when not waiting; spin only if we want "working"
-        // Prompt: working = loader-circle spinning. We treat Active as working.
         ui.ctx()
             .request_repaint_after(Duration::from_millis(100));
     }
@@ -1175,7 +1230,7 @@ fn subtitle_for(tab: &crate::layout::Tab) -> (String, Color32) {
                 ("Working".into(), ui_theme::TEXT_MUTED)
             }
         }
-        SessionStatus::Waiting => ("Waiting for input".into(), ui_theme::TEXT_MUTED),
+        SessionStatus::Waiting => ("Waiting".into(), ui_theme::TEXT_MUTED),
         SessionStatus::Finished => {
             if let Some(code) = tab.exit_code {
                 if code == 0 {
@@ -1191,28 +1246,21 @@ fn subtitle_for(tab: &crate::layout::Tab) -> (String, Color32) {
 }
 
 fn paint_status_badge(ui: &Ui, center: egui::Pos2, status: SessionStatus) {
+    // Spec: Done Ø8 #53BE6B; Working dashed ring Ø9 #909090; both with 1.5px sidebar_bg halo.
     let ring_bg = ui_theme::SIDEBAR_BG;
     let time = ui.input(|i| i.time) as f32;
     let painter = ui.painter();
     match status {
         SessionStatus::Active => {
-            painter.circle_filled(center, 6.0, ring_bg);
-            paint_dashed_ring(
-                painter,
-                center,
-                4.5,
-                ui_theme::WORKING_RING_DIM,
-                time,
-                1.0,
-                8,
-            );
+            painter.circle_filled(center, 4.5 + 1.5, ring_bg);
+            paint_working_spinner(painter, center, 4.5, ui_theme::WORKING_RING_DIM, time);
         }
         SessionStatus::Waiting => {
-            painter.circle_filled(center, 6.0, ring_bg);
+            painter.circle_filled(center, 4.0 + 1.5, ring_bg);
             painter.circle_filled(center, 4.0, ui_theme::WAITING);
         }
         SessionStatus::Finished => {
-            painter.circle_filled(center, 5.5, ring_bg);
+            painter.circle_filled(center, 4.0 + 1.5, ring_bg);
             painter.circle_filled(center, 4.0, ui_theme::STATUS_DOT_OK);
         }
     }
@@ -1306,28 +1354,3 @@ fn paint_working_spinner(
     }
 }
 
-fn paint_dashed_ring(
-    painter: &egui::Painter,
-    center: egui::Pos2,
-    radius: f32,
-    color: Color32,
-    time: f32,
-    stroke_width: f32,
-    n_dashes: u32,
-) {
-    let rot = time * 1.8;
-    let arc_span = std::f32::consts::TAU / n_dashes as f32;
-    let dash = arc_span * 0.55;
-    for i in 0..n_dashes {
-        let a0 = rot + i as f32 * arc_span;
-        let a1 = a0 + dash;
-        let steps = 3usize;
-        for s in 0..steps {
-            let t0 = a0 + (a1 - a0) * s as f32 / steps as f32;
-            let t1 = a0 + (a1 - a0) * (s + 1) as f32 / steps as f32;
-            let p0 = center + Vec2::new(t0.cos(), t0.sin()) * radius;
-            let p1 = center + Vec2::new(t1.cos(), t1.sin()) * radius;
-            painter.line_segment([p0, p1], Stroke::new(stroke_width, color));
-        }
-    }
-}
