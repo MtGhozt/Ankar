@@ -11,6 +11,7 @@ mod palette;
 mod persist;
 mod shell;
 mod sidebar;
+mod stats;
 mod status;
 mod terminal;
 mod ui_theme;
@@ -18,7 +19,7 @@ mod ui_theme;
 use anyhow::Context;
 
 /// Bumped whenever we need Matias to confirm he's running a fresh binary.
-const BUILD_MARK: &str = "midterm-r12";
+const BUILD_MARK: &str = "midterm-r13";
 
 /// Parse `--window-size WxH` (logical px) for midterm acceptance screenshots.
 fn parse_window_size(args: &[String]) -> Option<[f32; 2]> {
@@ -55,6 +56,12 @@ fn main() -> anyhow::Result<()> {
     }
 
     let args: Vec<String> = std::env::args().collect();
+    #[cfg(debug_assertions)]
+    if args.iter().any(|a| a == "--stats-probe") {
+        stats::run_stats_probe();
+        return Ok(());
+    }
+
     let window_size = match parse_window_size(&args) {
         Some(size) => {
             log::info!("window size override: {}x{} logical px", size[0], size[1]);

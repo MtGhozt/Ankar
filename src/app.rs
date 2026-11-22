@@ -6,12 +6,14 @@ use crate::logos::LogoAtlas;
 use crate::palette::{CommandPalette, PaletteAction};
 use crate::persist;
 use crate::sidebar::{self, SidebarState};
+use crate::stats::{AnkarStatsStore, StatsPanel};
 use crate::status::StatusTracker;
 use crate::terminal::TerminalView;
 use crate::ui_theme::{self, Icon};
 use egui::{
     Color32, Context, CornerRadius, Frame, Key, Modifiers, Sense, Stroke, Vec2,
 };
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 pub struct AnkarApp {
@@ -25,6 +27,8 @@ pub struct AnkarApp {
     palette: CommandPalette,
     files: FileViewer,
     logos: LogoAtlas,
+    stats: StatsPanel,
+    ankar_stats: Arc<Mutex<AnkarStatsStore>>,
 }
 
 impl AnkarApp {
@@ -40,6 +44,7 @@ impl AnkarApp {
                 tab.pinned = true;
             }
         }
+        let ankar_stats = Arc::new(Mutex::new(AnkarStatsStore::default()));
         Ok(Self {
             workspace,
             config,
@@ -55,6 +60,8 @@ impl AnkarApp {
             palette: CommandPalette::default(),
             files: FileViewer::default(),
             logos: LogoAtlas::default(),
+            stats: StatsPanel::new(ankar_stats.clone()),
+            ankar_stats,
         })
     }
 
@@ -87,6 +94,9 @@ impl AnkarApp {
             }
             PaletteAction::PinActive => {
                 self.workspace.toggle_pin_active();
+            }
+            PaletteAction::ToggleStats => {
+                self.stats.toggle();
             }
             PaletteAction::RestoreArchived(i) => {
                 if i < self.sidebar.archived.len() {
@@ -121,6 +131,9 @@ impl eframe::App for AnkarApp {
         let focused = ui.input(|i| i.focused);
         self.status
             .tick(&mut self.workspace, &self.config, focused);
+        if let Ok(mut store) = self.ankar_stats.lock() {
+            store.tick(&self.workspace);
+        }
         ui.ctx()
             .request_repaint_after(std::time::Duration::from_secs(1));
 
@@ -175,6 +188,7 @@ impl eframe::App for AnkarApp {
             &mut self.sidebar,
             &mut self.palette,
             &mut self.files,
+            &mut self.stats,
         );
 
         // Manual panel widths — egui's built-in SidePanel resize fought PanelState
@@ -310,7 +324,7 @@ impl eframe::App for AnkarApp {
             .frame(Frame::NONE.fill(ui_theme::SURFACE_1))
             .show_separator_line(false)
             .show(ui, |ui| {
-                draw_tab_bar(
+                let open_stats = draw_tab_bar(
                     ui,
                     &mut self.workspace,
                     &mut self.sidebar,
@@ -319,6 +333,9 @@ impl eframe::App for AnkarApp {
                     &self.config,
                     &mut self.logos,
                 );
+                if open_stats {
+                    self.stats.toggle();
+                }
             });
 
         if self.show_profile_menu {
@@ -415,9 +432,14 @@ impl eframe::App for AnkarApp {
         ) {
             self.apply_palette_action(&ctx, action);
         }
+
+        self.stats.draw(ui);
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        if let Ok(mut store) = self.ankar_stats.lock() {
+            store.flush();
+        }
         if self.workspace.should_persist() {
             let _ = persist::save_workspace(&self.workspace, &self.sidebar.archived);
         }
@@ -438,7 +460,7 @@ fn draw_tab_bar(
     show_menu: &mut bool,
     config: &Config,
     logos: &mut LogoAtlas,
-) {
+) -> bool {
     let bar_rect = ui.max_rect();
     let painter = ui.painter();
     // Bottom border (erased under the active tab later).
@@ -453,6 +475,7 @@ fn draw_tab_bar(
 
     let mut switch_to = None;
     let mut close_idx = None;
+    let mut open_stats = false;
     let active = workspace.active_tab;
     let mut last_tab_right = bar_rect.left();
 
@@ -623,11 +646,10 @@ fn draw_tab_bar(
             if tab_bar_right_icon(ui, Icon::Folder, "Files (Ctrl+Shift+F)").clicked() {
                 files.show = !files.show;
             }
-            let _ = tab_bar_right_icon(
-                ui,
-                Icon::ChartColumn,
-                "Activity (Ctrl+Shift+I · coming soon)",
-            );
+            if tab_bar_right_icon(ui, Icon::ChartColumn, "Agent usage (Ctrl+Shift+I)").clicked()
+            {
+                open_stats = true;
+            }
         });
     });
 
@@ -640,11 +662,12 @@ fn draw_tab_bar(
             if workspace.active_tab >= workspace.tabs.len() && !workspace.tabs.is_empty() {
                 workspace.active_tab = workspace.tabs.len() - 1;
             } else if i < workspace.active_tab {
-                workspace.active_tab = workspace.active_tab.saturating_sub(1);
+                workspace.active_tab -= 1;
             }
             workspace.mark_dirty();
         }
     }
+    open_stats
 }
 
 fn title_baseline_center(rect: egui::Rect, galley: &egui::Galley) -> f32 {
@@ -854,6 +877,7 @@ fn handle_shortcuts(
     sidebar: &mut SidebarState,
     palette: &mut CommandPalette,
     files: &mut FileViewer,
+    stats: &mut StatsPanel,
 ) {
     let ctx = ui.ctx().clone();
     let cs = Modifiers::COMMAND | Modifiers::SHIFT;
@@ -861,6 +885,9 @@ fn handle_shortcuts(
     let alt = Modifiers::ALT;
 
     ui.input_mut(|i| {
+        if i.consume_key(cs, Key::I) {
+            stats.toggle();
+        }
         if i.consume_key(cs, Key::T) {
             let profile = crate::shell::default_profile();
             let cwd = workspace.active_tab().and_then(|t| t.cwd.clone());

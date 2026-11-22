@@ -49,6 +49,7 @@ On first launch, Ankar copies `config.toml` and `sessions.json` from `%APPDATA%\
 | `Ctrl+Shift+K` | Command palette |
 | `Ctrl+Shift+B` | Toggle sessions sidebar |
 | `Ctrl+Shift+F` | Toggle file viewer |
+| `Ctrl+Shift+I` | Agent usage stats (local-only) |
 | `Ctrl+Shift+L` | Focus session search in sidebar |
 | `Ctrl+Shift+P` | Pin / unpin active session |
 | `Ctrl+Shift+N` | Profile picker |
