@@ -240,6 +240,9 @@ fn restore_tab(
         pinned: saved.pinned,
         project_key: project_key_for(cwd.as_ref()),
         status: crate::layout::SessionStatus::Active,
+        activity: None,
+        exit_code: None,
+        status_changed_at: std::time::Instant::now(),
     })
 }
 

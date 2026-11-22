@@ -5,6 +5,7 @@ mod config;
 mod files;
 mod launchers;
 mod layout;
+mod logos;
 mod notify;
 mod palette;
 mod persist;

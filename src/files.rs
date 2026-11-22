@@ -1,6 +1,6 @@
-use crate::ui_theme;
+use crate::ui_theme::{self, Icon};
 use egui::text::{LayoutJob, TextFormat};
-use egui::{Color32, FontId, RichText, Ui};
+use egui::{Color32, FontId, Sense, Ui, Vec2};
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::Read;
@@ -105,36 +105,65 @@ impl FileViewer {
 
     pub fn draw(&mut self, ui: &mut Ui) {
         ui.horizontal(|ui| {
-            ui.label(RichText::new("Files").strong());
-            if ui.small_button("↻").on_hover_text("Refresh tree").clicked() {
-                self.dir_cache.clear();
+            ui.set_min_height(28.0);
+            if let Some(root) = self.root.clone() {
+                ui.label(
+                    ui_theme::text_sub(root.display().to_string()),
+                );
             }
-            if ui.small_button("Close").clicked() {
-                self.show = false;
-            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let (rect, resp) = ui.allocate_exact_size(Vec2::splat(20.0), Sense::click());
+                if resp.hovered() {
+                    ui.painter().rect_filled(
+                        rect,
+                        egui::CornerRadius::same(ui_theme::RADIUS_KBD),
+                        ui_theme::HOVER,
+                    );
+                }
+                ui.painter().text(
+                    rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    Icon::X.codepoint().to_string(),
+                    egui::FontId::new(
+                        12.0,
+                        egui::FontFamily::Name(ui_theme::FONT_ICONS.into()),
+                    ),
+                    ui_theme::TEXT_MUTED,
+                );
+                if resp.clicked() {
+                    self.show = false;
+                }
+            });
         });
-        ui.separator();
+        let (sep, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 1.0), Sense::hover());
+        ui.painter().rect_filled(sep, 0.0, ui_theme::BORDER);
+        ui.add_space(4.0);
 
         if self.root.is_none() {
             self.root = dirs::home_dir();
         }
         let Some(root) = self.root.clone() else {
-            ui.label("No home directory available.");
+            ui.label(ui_theme::text_sub("No hay directorio home."));
             return;
         };
 
         ui.horizontal(|ui| {
-            if ui.small_button("↑").on_hover_text("Parent folder").clicked() {
+            if ui
+                .add(egui::Button::new(ui_theme::icon(Icon::ChevronRight, 12.0, ui_theme::TEXT_MUTED)).frame(false))
+                .on_hover_text("Parent")
+                .clicked()
+            {
+                // Use folder-up via go_parent — chevron as affordance
                 self.go_parent();
             }
-            if ui.small_button("⌂").on_hover_text("Home").clicked() {
+            if ui
+                .add(egui::Button::new(ui_theme::icon(Icon::Folder, 14.0, ui_theme::TEXT_MUTED)).frame(false))
+                .on_hover_text("Home")
+                .clicked()
+            {
                 self.go_home();
             }
-            ui.label(
-                RichText::new(root.display().to_string())
-                    .small()
-                    .color(ui_theme::TEXT_MUTED),
-            );
+            let _ = root;
         });
 
         let root = self.root.clone().unwrap_or(root);
@@ -151,12 +180,11 @@ impl FileViewer {
         }
 
         if let Some(path) = self.open_file.clone() {
-            ui.separator();
-            ui.label(
-                RichText::new(path.display().to_string())
-                    .small()
-                    .color(ui_theme::TEXT_MUTED),
-            );
+            ui.add_space(4.0);
+            let (sep2, _) =
+                ui.allocate_exact_size(Vec2::new(ui.available_width(), 1.0), Sense::hover());
+            ui.painter().rect_filled(sep2, 0.0, ui_theme::BORDER);
+            ui.label(ui_theme::text_sub(path.display().to_string()));
             egui::ScrollArea::both().id_salt("file_content").show(ui, |ui| {
                 if let Some(job) = self.highlighted_job.clone() {
                     ui.label(job);
@@ -212,17 +240,45 @@ fn draw_tree(
 
     for entry in items {
         if entry.is_dir {
-            let header = egui::CollapsingHeader::new(entry.name.clone());
-            let response = header.show(ui, |ui| {
+            let label = format!("{}  {}", Icon::Folder.codepoint(), entry.name);
+            egui::CollapsingHeader::new(
+                egui::RichText::new(label)
+                    .size(ui_theme::SIZE_TITLE)
+                    .color(ui_theme::TEXT),
+            )
+            .id_salt(entry.path.as_os_str())
+            .show(ui, |ui| {
                 draw_tree(ui, &entry.path, selected, clicked, cache);
             });
-            // Populate cache when first expanded (body runs only when open).
-            let _ = response;
-        } else if ui
-            .selectable_label(selected == Some(&entry.path), &entry.name)
-            .clicked()
-        {
-            *clicked = Some(entry.path);
+        } else {
+            let is_sel = selected == Some(&entry.path);
+            let fill = if is_sel {
+                ui_theme::SURFACE_SEL
+            } else {
+                Color32::TRANSPARENT
+            };
+            let row = egui::Frame::NONE
+                .fill(fill)
+                .corner_radius(egui::CornerRadius::same(ui_theme::RADIUS_ROW))
+                .inner_margin(egui::Margin::symmetric(6, 2))
+                .show(ui, |ui| {
+                    ui.set_min_height(22.0);
+                    ui.horizontal(|ui| {
+                        ui.label(ui_theme::icon(Icon::File, 14.0, ui_theme::TEXT_MUTED));
+                        ui.label(ui_theme::text_title(entry.name.clone()));
+                    });
+                });
+            let resp = row.response.interact(Sense::click());
+            if resp.hovered() && !is_sel {
+                ui.painter().rect_filled(
+                    resp.rect,
+                    egui::CornerRadius::same(ui_theme::RADIUS_ROW),
+                    ui_theme::HOVER,
+                );
+            }
+            if resp.clicked() {
+                *clicked = Some(entry.path);
+            }
         }
     }
 }
@@ -267,5 +323,6 @@ fn highlight_job(ss: &SyntaxSet, theme: &Theme, path: &Path, text: &str) -> Layo
 }
 
 fn syn_color(style: SynStyle) -> Color32 {
-    Color32::from_rgb(style.foreground.r, style.foreground.g, style.foreground.b)
+    // Dynamic colors from syntect theme — routed through ui_theme.
+    ui_theme::rgb(style.foreground.r, style.foreground.g, style.foreground.b)
 }

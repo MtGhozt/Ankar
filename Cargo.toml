@@ -27,6 +27,7 @@ toml = "0.8"
 dirs = "6"
 notify-rust = "4"
 syntect = { version = "5", default-features = false, features = ["default-fancy"] }
+image = { version = "0.25", default-features = false, features = ["png", "webp"] }
 
 [profile.release]
 lto = true

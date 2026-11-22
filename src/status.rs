@@ -2,7 +2,7 @@ use crate::config::Config;
 use crate::layout::{SessionStatus, Workspace};
 use crate::notify;
 use std::collections::HashMap;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Track previous statuses so we only notify on transitions.
 #[derive(Default)]
@@ -17,9 +17,17 @@ impl StatusTracker {
             let mut any_alive = false;
             let mut any_waiting = false;
             let mut all_exited = true;
+            let mut exit_code = None;
+            let mut activity = None;
 
             for session in tab.sessions.values() {
+                if let Some(a) = session.activity() {
+                    activity = Some(a);
+                }
                 if session.is_exited() {
+                    if exit_code.is_none() {
+                        exit_code = session.exit_code();
+                    }
                     continue;
                 }
                 all_exited = false;
@@ -27,6 +35,13 @@ impl StatusTracker {
                 if session.saw_bell() || session.idle_for() >= timeout {
                     any_waiting = true;
                 }
+            }
+
+            if let Some(a) = activity {
+                tab.activity = Some(a);
+            }
+            if let Some(code) = exit_code {
+                tab.exit_code = Some(code);
             }
 
             let new_status = if all_exited && !tab.sessions.is_empty() {
@@ -37,14 +52,19 @@ impl StatusTracker {
                 SessionStatus::Active
             };
 
-            let prev = self.prev.get(&tab.id).copied().unwrap_or(SessionStatus::Active);
-            if prev != new_status
-                && matches!(
+            let prev = self
+                .prev
+                .get(&tab.id)
+                .copied()
+                .unwrap_or(SessionStatus::Active);
+            if prev != new_status {
+                tab.status_changed_at = Instant::now();
+                if matches!(
                     new_status,
                     SessionStatus::Waiting | SessionStatus::Finished
-                )
-            {
-                notify::session_status_changed(&tab.session_name, new_status, window_focused);
+                ) {
+                    notify::session_status_changed(&tab.session_name, new_status, window_focused);
+                }
             }
             self.prev.insert(tab.id, new_status);
             tab.status = new_status;

@@ -128,6 +128,9 @@ pub struct TerminalSession {
     visible: Arc<AtomicBool>,
     /// Latest absolute directory from OSC title (shell integration).
     cwd: Arc<Mutex<Option<PathBuf>>>,
+    /// Latest non-cwd window title (agent activity).
+    activity: Arc<Mutex<Option<String>>>,
+    exit_code: Arc<Mutex<Option<i32>>>,
     pub colors: TermColors,
 }
 
@@ -176,6 +179,10 @@ impl TerminalSession {
         let visible_flag = visible.clone();
         let cwd_state = Arc::new(Mutex::new(cwd));
         let cwd_flag = cwd_state.clone();
+        let activity_state = Arc::new(Mutex::new(None::<String>));
+        let activity_flag = activity_state.clone();
+        let exit_code_state = Arc::new(Mutex::new(None::<i32>));
+        let exit_code_flag = exit_code_state.clone();
         let title = program
             .rsplit(['\\', '/'])
             .next()
@@ -187,7 +194,17 @@ impl TerminalSession {
             .spawn(move || {
                 while let Ok(event) = event_receiver.recv() {
                     match &event {
-                        Event::Exit | Event::ChildExit(_) => {
+                        Event::Exit => {
+                            exited_flag.store(true, Ordering::SeqCst);
+                            ctx.request_repaint();
+                            break;
+                        }
+                        Event::ChildExit(status) => {
+                            if let Some(code) = status.code() {
+                                if let Ok(mut g) = exit_code_flag.lock() {
+                                    *g = Some(code);
+                                }
+                            }
                             exited_flag.store(true, Ordering::SeqCst);
                             ctx.request_repaint();
                             break;
@@ -214,8 +231,15 @@ impl TerminalSession {
                                 if let Ok(mut guard) = cwd_flag.lock() {
                                     *guard = Some(path);
                                 }
-                                ctx.request_repaint();
+                            } else {
+                                let trimmed = t.trim();
+                                if !trimmed.is_empty() {
+                                    if let Ok(mut guard) = activity_flag.lock() {
+                                        *guard = Some(trimmed.to_string());
+                                    }
+                                }
                             }
+                            ctx.request_repaint();
                         }
                         _ => {
                             if visible_flag.load(Ordering::Relaxed) {
@@ -238,6 +262,8 @@ impl TerminalSession {
             bell,
             visible,
             cwd: cwd_state,
+            activity: activity_state,
+            exit_code: exit_code_state,
             colors: TermColors::default(),
         })
     }
@@ -263,6 +289,14 @@ impl TerminalSession {
 
     pub fn cwd(&self) -> Option<PathBuf> {
         self.cwd.lock().ok().and_then(|g| g.clone())
+    }
+
+    pub fn activity(&self) -> Option<String> {
+        self.activity.lock().ok().and_then(|g| g.clone())
+    }
+
+    pub fn exit_code(&self) -> Option<i32> {
+        self.exit_code.lock().ok().and_then(|g| *g)
     }
 
     pub fn write(&mut self, bytes: impl Into<Vec<u8>>) {
@@ -461,8 +495,20 @@ fn parse_cwd_title(title: &str) -> Option<PathBuf> {
     if trimmed.is_empty() {
         return None;
     }
+    // Strip common PowerShell / oh-my-posh suffixes.
+    let trimmed = trimmed
+        .split(['\n', '|', '—', '–'])
+        .next()
+        .unwrap_or(trimmed)
+        .trim();
     let path = PathBuf::from(trimmed);
-    if path.is_absolute() && path.is_dir() {
+    // Absolute Windows / Unix paths count as cwd even if the dir check races.
+    let looks_abs = path.is_absolute()
+        || (trimmed.len() >= 3
+            && trimmed.as_bytes()[1] == b':'
+            && (trimmed.as_bytes()[2] == b'\\' || trimmed.as_bytes()[2] == b'/'))
+        || trimmed.starts_with("\\\\");
+    if looks_abs {
         Some(path)
     } else {
         None

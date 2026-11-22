@@ -1,14 +1,17 @@
 use crate::config::Config;
 use crate::files::FileViewer;
 use crate::launchers;
-use crate::layout::{LayoutNode, SplitDir, Workspace};
+use crate::layout::{LayoutNode, SessionStatus, SplitDir, Workspace};
+use crate::logos::LogoAtlas;
 use crate::palette::{CommandPalette, PaletteAction};
 use crate::persist;
 use crate::sidebar::{self, SidebarState};
 use crate::status::StatusTracker;
 use crate::terminal::TerminalView;
-use crate::ui_theme;
-use egui::{Context, Frame, Key, Modifiers, RichText};
+use crate::ui_theme::{self, Icon};
+use egui::{
+    Color32, Context, CornerRadius, Frame, Key, Modifiers, Sense, Stroke, Vec2,
+};
 use std::time::Duration;
 
 pub struct AnkarApp {
@@ -21,6 +24,7 @@ pub struct AnkarApp {
     status: StatusTracker,
     palette: CommandPalette,
     files: FileViewer,
+    logos: LogoAtlas,
 }
 
 impl AnkarApp {
@@ -40,14 +44,17 @@ impl AnkarApp {
             workspace,
             config,
             config_load_failed,
-            sidebar: SidebarState {
-                archived,
-                show: true,
+            sidebar: {
+                let mut s = SidebarState::default();
+                s.archived = archived;
+                s.show = true;
+                s
             },
             show_profile_menu: false,
             status: StatusTracker::default(),
             palette: CommandPalette::default(),
             files: FileViewer::default(),
+            logos: LogoAtlas::default(),
         })
     }
 
@@ -117,7 +124,6 @@ impl eframe::App for AnkarApp {
         ui.ctx()
             .request_repaint_after(std::time::Duration::from_secs(1));
 
-        // Autosave structural changes every 30s.
         if self.workspace.dirty
             && self.workspace.last_autosave.elapsed() >= Duration::from_secs(30)
         {
@@ -130,7 +136,6 @@ impl eframe::App for AnkarApp {
             }
         }
 
-        // Mark which sessions are on the active tab; drop snapshots for the rest.
         let active = self.workspace.active_tab;
         for (i, tab) in self.workspace.tabs.iter_mut().enumerate() {
             let tab_visible = i == active;
@@ -142,7 +147,6 @@ impl eframe::App for AnkarApp {
             }
         }
 
-        // Follow shell cwd from OSC title (focused pane of the active tab).
         {
             let mut cwd_dirty = false;
             if let Some(tab) = self.workspace.active_tab_mut() {
@@ -161,7 +165,6 @@ impl eframe::App for AnkarApp {
             }
         }
 
-        // Sync file viewer root with active project (home fallback inside set_root).
         let cwd = self.workspace.active_tab().and_then(|t| t.cwd.clone());
         self.files.set_root(cwd);
 
@@ -174,141 +177,69 @@ impl eframe::App for AnkarApp {
             &mut self.files,
         );
 
-        egui::Panel::top("tab_bar")
-            .frame(
-                egui::Frame::new()
-                    .fill(ui_theme::BG_APP)
-                    .inner_margin(egui::Margin::symmetric(8, 4)),
-            )
-            .show_separator_line(true)
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label(
-                        RichText::new("Ankar")
-                            .strong()
-                            .color(ui_theme::TEXT_STRONG),
-                    );
-                    ui.separator();
-
-                    let mut switch_to = None;
-                    let mut close_idx = None;
-                    for (i, tab) in self.workspace.tabs.iter().enumerate() {
-                        let selected = i == self.workspace.active_tab;
-                        let title = if tab.pinned {
-                            format!("★ {}", tab.title)
-                        } else {
-                            tab.title.clone()
-                        };
-                        let label = RichText::new(title).color(if selected {
-                            ui_theme::TEXT_STRONG
-                        } else {
-                            ui_theme::TEXT_MUTED
-                        });
-                        let tab_resp = ui.selectable_label(selected, label);
-                        if selected {
-                            let rect = tab_resp.rect;
-                            ui.painter().hline(
-                                rect.left()..=rect.right(),
-                                rect.bottom() - 1.0,
-                                egui::Stroke::new(1.5, ui_theme::ACCENT),
-                            );
-                        }
-                        if tab_resp.clicked() {
-                            switch_to = Some(i);
-                        }
-                        if ui
-                            .small_button(RichText::new("×").color(ui_theme::TEXT_MUTED))
-                            .clicked()
-                        {
-                            close_idx = Some(i);
-                        }
-                    }
-                    if let Some(i) = switch_to {
-                        self.workspace.active_tab = i;
-                    }
-                    if let Some(i) = close_idx {
-                        if i < self.workspace.tabs.len() {
-                            self.workspace.tabs.remove(i);
-                            if self.workspace.active_tab >= self.workspace.tabs.len()
-                                && !self.workspace.tabs.is_empty()
-                            {
-                                self.workspace.active_tab = self.workspace.tabs.len() - 1;
-                            } else if i < self.workspace.active_tab {
-                                self.workspace.active_tab =
-                                    self.workspace.active_tab.saturating_sub(1);
-                            }
-                        }
-                    }
-
-                    if ui.button("+").clicked() {
-                        self.show_profile_menu = !self.show_profile_menu;
-                    }
-                    if !self.sidebar.show && ui.button("Sessions").clicked() {
-                        self.sidebar.show = true;
-                    }
-                    if ui.button("Files").clicked() {
-                        self.files.show = !self.files.show;
-                    }
-                });
-
-                if self.show_profile_menu {
-                    ui.horizontal_wrapped(|ui| {
-                        let profiles = self.workspace.profiles.clone();
-                        for profile in &profiles {
-                            if ui.button(&profile.name).clicked() {
-                                let cwd = self.workspace.active_tab().and_then(|t| t.cwd.clone());
-                                let _ = self.workspace.open_tab(ui.ctx(), profile, cwd);
-                                self.show_profile_menu = false;
-                            }
-                        }
-                    });
-                }
-            });
-
-        egui::Panel::bottom("launchers")
-            .frame(
-                egui::Frame::new()
-                    .fill(ui_theme::BG_APP)
-                    .inner_margin(egui::Margin::symmetric(8, 4)),
-            )
-            .show_separator_line(true)
-            .show(ui, |ui| {
-                launchers::draw_bar(ui, &self.config, &mut self.workspace);
-            });
-
+        // Sidebar first → full height; tab bar only over content (midterm).
         if self.sidebar.show {
-            egui::Panel::left("sidebar")
+            let mut width_dirty = false;
+            // id "sidebar_v3" resets egui memory if v2 still remembered a bad width.
+            let desired = Config::clamp_sidebar_width(self.config.sidebar_width);
+            egui::Panel::left("sidebar_v3")
                 .resizable(true)
-                .default_size(240.0)
+                .default_size(desired)
+                .min_size(200.0)
+                .max_size(320.0)
                 .frame(
-                    egui::Frame::new()
-                        .fill(ui_theme::BG_APP)
-                        .inner_margin(egui::Margin::same(8)),
+                    Frame::NONE
+                        .fill(ui_theme::SURFACE_1)
+                        .inner_margin(egui::Margin {
+                            left: 12,
+                            right: 10,
+                            top: 8,
+                            bottom: 8,
+                        }),
                 )
                 .show_separator_line(true)
                 .show(ui, |ui| {
+                    // Keep all sidebar painting inside the panel clip (avoids left cut-off).
+                    let clip = ui.max_rect();
+                    ui.set_clip_rect(clip);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                        if icon_square(ui, Icon::PanelLeft, "Ocultar sidebar (Ctrl+Shift+B)")
+                            .clicked()
+                        {
+                            self.sidebar.show = false;
+                        }
+                    });
                     sidebar::draw(
                         ui,
                         &mut self.workspace,
                         &mut self.config,
                         &mut self.sidebar,
+                        &mut self.logos,
                         !self.config_load_failed,
                     );
+                    let w = Config::clamp_sidebar_width(ui.max_rect().width());
+                    if (w - self.config.sidebar_width).abs() > 1.0 {
+                        self.config.sidebar_width = w;
+                        width_dirty = true;
+                    }
                 });
+            if width_dirty && !self.config_load_failed {
+                let _ = self.config.save();
+            }
         }
 
         if self.files.show {
             egui::Panel::right("files")
                 .resizable(true)
-                .default_size(320.0)
+                .default_size(280.0)
                 .frame(
-                    egui::Frame::new()
-                        .fill(ui_theme::BG_APP)
-                        .inner_margin(egui::Margin::same(8)),
+                    Frame::NONE
+                        .fill(ui_theme::SURFACE_1)
+                        .inner_margin(egui::Margin::same(8))
+                        .stroke(Stroke::new(1.0, ui_theme::BORDER)),
                 )
-                .show_separator_line(true)
+                .show_separator_line(false)
                 .show(ui, |ui| {
-                    // Detect selection changes and load file.
                     let before = self.files.open_file.clone();
                     self.files.draw(ui);
                     if self.files.open_file != before {
@@ -321,19 +252,103 @@ impl eframe::App for AnkarApp {
                 });
         }
 
+        // Tab bar over content only
+        egui::Panel::top("tab_bar")
+            .exact_size(36.0)
+            .frame(Frame::NONE.fill(ui_theme::SURFACE_1))
+            .show_separator_line(false)
+            .show(ui, |ui| {
+                draw_tab_bar(
+                    ui,
+                    &mut self.workspace,
+                    &mut self.sidebar,
+                    &mut self.files,
+                    &mut self.show_profile_menu,
+                    &self.config,
+                    &mut self.logos,
+                );
+            });
+
+        if self.show_profile_menu {
+            egui::Area::new(egui::Id::unique("profile_menu"))
+                .order(egui::Order::Foreground)
+                .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-8.0, 40.0))
+                .show(ui.ctx(), |ui| {
+                    Frame::NONE
+                        .fill(ui_theme::SURFACE_1)
+                        .stroke(Stroke::new(1.0, ui_theme::BORDER))
+                        .corner_radius(CornerRadius::same(ui_theme::RADIUS_POPUP))
+                        .shadow(ui_theme::popup_shadow())
+                        .inner_margin(8.0)
+                        .show(ui, |ui| {
+                            ui.set_min_width(180.0);
+                            ui.label(ui_theme::text_sub("Perfiles"));
+                            let profiles = self.workspace.profiles.clone();
+                            for profile in &profiles {
+                                if ui
+                                    .add(
+                                        egui::Button::new(ui_theme::text_title(
+                                            profile.name.clone(),
+                                        ))
+                                        .frame(false),
+                                    )
+                                    .clicked()
+                                {
+                                    let cwd =
+                                        self.workspace.active_tab().and_then(|t| t.cwd.clone());
+                                    let _ = self.workspace.open_tab(ui.ctx(), profile, cwd);
+                                    self.show_profile_menu = false;
+                                }
+                            }
+                            ui.separator();
+                            ui.label(ui_theme::text_sub("Launchers"));
+                            let launchers = self.config.launchers.clone();
+                            let cwd = self.workspace.active_tab().and_then(|t| t.cwd.clone());
+                            for launcher in &launchers {
+                                if ui
+                                    .add(
+                                        egui::Button::new(ui_theme::text_title(
+                                            launcher.name.clone(),
+                                        ))
+                                        .frame(false),
+                                    )
+                                    .clicked()
+                                {
+                                    let _ = launchers::run_launcher(
+                                        ui.ctx(),
+                                        &mut self.workspace,
+                                        launcher,
+                                        cwd.clone(),
+                                    );
+                                    self.show_profile_menu = false;
+                                }
+                            }
+                        });
+                });
+            if ui.input(|i| i.pointer.any_click()) {
+                // keep open if clicking inside — simplified: Esc closes
+            }
+            if ui.input(|i| i.key_pressed(Key::Escape)) {
+                self.show_profile_menu = false;
+            }
+        }
+
         egui::CentralPanel::default()
-            .frame(Frame::NONE.fill(ui_theme::BG_TERM))
+            .frame(Frame::NONE.fill(ui_theme::BG))
             .show(ui, |ui| {
                 if self.workspace.tabs.is_empty() {
                     ui.centered_and_justified(|ui| {
-                        ui.label("Open a tab with Ctrl+Shift+T or the + button.");
+                        ui.label(ui_theme::text_sub(
+                            "Abrí una pestaña con Ctrl+Shift+T o el botón +.",
+                        ));
                     });
                     return;
                 }
                 let active = self.workspace.active_tab;
                 let font_size = self.config.font_size;
+                let dim = self.config.dim_inactive_panes;
                 let ratio_changed =
-                    render_layout(ui, &mut self.workspace.tabs[active], font_size);
+                    render_layout(ui, &mut self.workspace.tabs[active], font_size, dim);
                 if ratio_changed {
                     self.workspace.mark_dirty();
                 }
@@ -360,6 +375,284 @@ impl eframe::App for AnkarApp {
     }
 }
 
+fn draw_tab_bar(
+    ui: &mut egui::Ui,
+    workspace: &mut Workspace,
+    sidebar: &mut SidebarState,
+    files: &mut FileViewer,
+    show_menu: &mut bool,
+    config: &Config,
+    logos: &mut LogoAtlas,
+) {
+    let bar_rect = ui.max_rect();
+    // Bottom border line (gap under active tab painted later)
+    ui.painter().hline(
+        bar_rect.x_range(),
+        bar_rect.bottom() - 0.5,
+        Stroke::new(1.0, ui_theme::BORDER),
+    );
+
+    ui.horizontal(|ui| {
+        ui.set_min_height(36.0);
+        ui.spacing_mut().item_spacing.x = 0.0;
+
+        if !sidebar.show
+            && icon_square(ui, Icon::PanelLeft, "Mostrar sidebar (Ctrl+Shift+B)").clicked()
+        {
+            sidebar.show = true;
+        }
+
+        let n = workspace.tabs.len().max(1);
+        let actions_w = 28.0 * 3.0 + 8.0;
+        let avail = (ui.available_width() - actions_w).max(110.0);
+        let tab_w = (avail / n as f32).clamp(110.0, 260.0);
+
+        let mut switch_to = None;
+        let mut close_idx = None;
+        let active = workspace.active_tab;
+
+        for (i, tab) in workspace.tabs.iter().enumerate() {
+            let selected = i == active;
+            let (icon, color, logo_key) = tab_agent_visual(tab, config);
+            let logo_tex = logo_key.and_then(|k| logos.get(ui.ctx(), k));
+            let fill = if selected {
+                ui_theme::BG
+            } else {
+                ui_theme::SURFACE_1
+            };
+            let text_color = if selected {
+                ui_theme::TEXT
+            } else {
+                ui_theme::TAB_INACTIVE_TEXT
+            };
+
+            // Full-height tab rect flush with panel (avoids the "cut" bar look).
+            let (rect, resp) =
+                ui.allocate_exact_size(Vec2::new(tab_w, ui.available_height().max(36.0)), Sense::click());
+            ui.painter()
+                .rect_filled(rect, CornerRadius::ZERO, fill);
+
+            if i > 0 {
+                ui.painter().vline(
+                    rect.left(),
+                    rect.y_range(),
+                    Stroke::new(1.0, ui_theme::BORDER),
+                );
+            }
+
+            if resp.hovered() && !selected {
+                ui.painter()
+                    .rect_filled(rect, CornerRadius::ZERO, ui_theme::HOVER);
+            }
+
+            // Active tab blends into terminal: erase bottom hairline.
+            if selected {
+                ui.painter().rect_filled(
+                    egui::Rect::from_min_max(
+                        egui::pos2(rect.left(), rect.bottom() - 2.0),
+                        egui::pos2(rect.right(), rect.bottom() + 1.0),
+                    ),
+                    CornerRadius::ZERO,
+                    ui_theme::BG,
+                );
+            }
+
+            let mut x = rect.left() + 12.0;
+            let cy = rect.center().y;
+
+            match tab.status {
+                SessionStatus::Waiting => {
+                    ui.painter()
+                        .circle_filled(egui::pos2(x + 3.0, cy), 3.0, ui_theme::WARN);
+                    x += 10.0;
+                }
+                SessionStatus::Finished => {
+                    ui.painter()
+                        .circle_filled(egui::pos2(x + 3.0, cy), 3.0, ui_theme::OK);
+                    x += 10.0;
+                }
+                SessionStatus::Active => {}
+            }
+
+            if let Some(tex) = logo_tex.as_ref() {
+                let img = egui::Rect::from_center_size(egui::pos2(x + 7.0, cy), Vec2::splat(14.0));
+                ui.painter().image(
+                    tex.id(),
+                    img,
+                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                    Color32::WHITE,
+                );
+            } else {
+                ui.painter().text(
+                    egui::pos2(x, cy),
+                    egui::Align2::LEFT_CENTER,
+                    icon.codepoint().to_string(),
+                    egui::FontId::new(14.0, egui::FontFamily::Name(ui_theme::FONT_ICONS.into())),
+                    color,
+                );
+            }
+            x += 18.0;
+
+            let title = if tab.session_name.is_empty() {
+                tab.title.clone()
+            } else {
+                tab.session_name.clone()
+            };
+            ui.painter().text(
+                egui::pos2(x, cy),
+                egui::Align2::LEFT_CENTER,
+                title,
+                egui::FontId::proportional(ui_theme::SIZE_TITLE),
+                if resp.hovered() {
+                    ui_theme::TEXT
+                } else {
+                    text_color
+                },
+            );
+
+            // Close: stable id, consume click so the tab doesn't also activate (flicker).
+            let show_close = resp.hovered() || selected;
+            let close_rect = egui::Rect::from_center_size(
+                egui::pos2(rect.right() - 14.0, cy),
+                Vec2::splat(20.0),
+            );
+            let close_id = ui.scope_id().with("tab_close").with(tab.id);
+            let close_resp = ui.interact(close_rect, close_id, Sense::click());
+            if show_close {
+                if close_resp.hovered() {
+                    ui.painter().rect_filled(
+                        close_rect,
+                        CornerRadius::same(ui_theme::RADIUS_KBD),
+                        ui_theme::PRESSED,
+                    );
+                }
+                ui.painter().text(
+                    close_rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    Icon::X.codepoint().to_string(),
+                    egui::FontId::new(
+                        12.0,
+                        egui::FontFamily::Name(ui_theme::FONT_ICONS.into()),
+                    ),
+                    ui_theme::TEXT_MUTED,
+                );
+            }
+            if close_resp.clicked() {
+                close_idx = Some(i);
+            } else if resp.middle_clicked() {
+                close_idx = Some(i);
+            } else if resp.clicked() && !close_resp.hovered() {
+                switch_to = Some(i);
+            }
+        }
+
+        if let Some(i) = switch_to {
+            workspace.active_tab = i;
+        }
+        if let Some(i) = close_idx {
+            if i < workspace.tabs.len() {
+                workspace.tabs.remove(i);
+                if workspace.active_tab >= workspace.tabs.len() && !workspace.tabs.is_empty() {
+                    workspace.active_tab = workspace.tabs.len() - 1;
+                } else if i < workspace.active_tab {
+                    workspace.active_tab = workspace.active_tab.saturating_sub(1);
+                }
+                workspace.mark_dirty();
+            }
+        }
+
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            // Stats panel lives in prompt 05 — show the affordance so it's discoverable.
+            let _ = icon_square(
+                ui,
+                Icon::ChartColumn,
+                "Estadísticas (próximamente · Ctrl+Shift+I)",
+            );
+            if icon_square(ui, Icon::Folder, "Archivos (Ctrl+Shift+F)").clicked() {
+                files.show = !files.show;
+            }
+            let plus = icon_square(ui, Icon::Plus, "Nueva terminal (Ctrl+Shift+T)");
+            if plus.clicked() {
+                let profile = crate::shell::default_profile();
+                let cwd = workspace.active_tab().and_then(|t| t.cwd.clone());
+                let _ = workspace.open_tab(ui.ctx(), &profile, cwd);
+            }
+            if plus.secondary_clicked() {
+                *show_menu = !*show_menu;
+            }
+        });
+    });
+}
+
+fn tab_agent_visual(
+    tab: &crate::layout::Tab,
+    config: &Config,
+) -> (Icon, Color32, Option<&'static str>) {
+    let name = tab.session_name.to_lowercase();
+    let cmd = tab.command.as_deref().unwrap_or("").to_lowercase();
+    let hay = format!("{name} {cmd}");
+    for launcher in &config.launchers {
+        let ln = launcher.name.to_lowercase();
+        if hay.contains(&ln) || name == ln {
+            let ic = Icon::from_name(&launcher.icon).unwrap_or(Icon::Bot);
+            let color =
+                ui_theme::parse_hex_color(&launcher.color).unwrap_or(ui_theme::TEXT_MUTED);
+            let key = match launcher.logo_key() {
+                "opencode" => Some("opencode"),
+                "openai" | "codex" => Some("openai"),
+                "claude" | "anthropic" => Some("claude"),
+                "grok" => Some("grok"),
+                "antigravity" => Some("antigravity"),
+                "cursor" | "cursor-agent" => Some("cursor"),
+                "copilot" | "github-copilot" => Some("copilot"),
+                _ => None,
+            };
+            return (ic, color, key);
+        }
+    }
+    if hay.contains("claude") {
+        return (Icon::Sparkles, ui_theme::rgb(0xD9, 0x77, 0x57), Some("claude"));
+    }
+    if hay.contains("opencode") {
+        return (Icon::Sparkles, ui_theme::rgb(0xD9, 0x77, 0x57), Some("opencode"));
+    }
+    if hay.contains("codex") || hay.contains("openai") {
+        return (Icon::Bot, ui_theme::rgb(0x10, 0xA3, 0x7F), Some("openai"));
+    }
+    if hay.contains("cursor") {
+        return (Icon::Bot, ui_theme::rgb(0x5A, 0xA0, 0xF2), Some("cursor"));
+    }
+    if hay.contains("grok") {
+        return (Icon::Bot, ui_theme::TEXT, Some("grok"));
+    }
+    if hay.contains("antigravity") {
+        return (Icon::Bot, ui_theme::rgb(0x5A, 0xA0, 0xF2), Some("antigravity"));
+    }
+    if hay.contains("copilot") {
+        return (Icon::Bot, ui_theme::TEXT, Some("copilot"));
+    }
+    if tab.command.is_some() {
+        return (Icon::Bot, ui_theme::TEXT_MUTED, None);
+    }
+    (Icon::Terminal, ui_theme::TEXT_MUTED, None)
+}
+
+fn icon_square(ui: &mut egui::Ui, kind: Icon, tip: &str) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(Vec2::splat(28.0), Sense::click());
+    if resp.hovered() {
+        ui.painter()
+            .rect_filled(rect, CornerRadius::same(ui_theme::RADIUS_KBD), ui_theme::HOVER);
+    }
+    ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        kind.codepoint().to_string(),
+        egui::FontId::new(14.0, egui::FontFamily::Name(ui_theme::FONT_ICONS.into())),
+        ui_theme::TEXT_MUTED,
+    );
+    resp.on_hover_text(tip)
+}
+
 fn handle_shortcuts(
     ui: &egui::Ui,
     workspace: &mut Workspace,
@@ -373,7 +666,6 @@ fn handle_shortcuts(
     let cmd = Modifiers::COMMAND;
     let alt = Modifiers::ALT;
 
-    // Most-specific (Ctrl+Shift) first so consume_key matching stays correct.
     ui.input_mut(|i| {
         if i.consume_key(cs, Key::T) {
             let profile = crate::shell::default_profile();
@@ -394,6 +686,10 @@ fn handle_shortcuts(
         }
         if i.consume_key(cs, Key::F) {
             files.show = !files.show;
+        }
+        if i.consume_key(cs, Key::L) {
+            sidebar.show = true;
+            sidebar.search_focus = true;
         }
         if i.consume_key(cs, Key::P) {
             workspace.toggle_pin_active();
@@ -451,7 +747,12 @@ fn handle_shortcuts(
 }
 
 /// Returns true if a split ratio changed (caller should mark workspace dirty).
-fn render_layout(ui: &mut egui::Ui, tab: &mut crate::layout::Tab, font_size: f32) -> bool {
+fn render_layout(
+    ui: &mut egui::Ui,
+    tab: &mut crate::layout::Tab,
+    font_size: f32,
+    dim_inactive: bool,
+) -> bool {
     let rect = ui.available_rect_before_wrap();
     ui.allocate_rect(rect, egui::Sense::hover());
     let focused = tab.focused_pane;
@@ -471,6 +772,7 @@ fn render_layout(ui: &mut egui::Ui, tab: &mut crate::layout::Tab, font_size: f32
         rect,
         &[],
         font_size,
+        dim_inactive,
         &mut dirty,
     );
     dirty
@@ -486,29 +788,33 @@ fn render_node(
     rect: egui::Rect,
     path: &[u8],
     font_size: f32,
+    dim_inactive: bool,
     dirty: &mut bool,
 ) {
-    const DIVIDER_PX: f32 = 5.0;
+    const DIVIDER_HIT: f32 = 5.0;
     match node {
         LayoutNode::Leaf(id) => {
             let is_focused = *id == focused;
             if let Some(session) = sessions.get_mut(id) {
-                let stroke = if is_focused {
-                    egui::Stroke::new(1.0, ui_theme::ACCENT)
-                } else {
-                    egui::Stroke::NONE
-                };
                 let mut child = ui.new_child(
                     egui::UiBuilder::new()
                         .max_rect(rect)
                         .layout(*ui.layout()),
                 );
-                egui::Frame::NONE.stroke(stroke).show(&mut child, |ui| {
+                // Edge-to-edge: padding created a visible black frame around TUIs.
+                Frame::NONE.fill(ui_theme::BG).show(&mut child, |ui| {
                     let response = TerminalView::show(ui, session, is_focused, font_size);
                     if response.clicked() {
                         *focused_pane = *id;
                     }
                 });
+                if dim_inactive && !is_focused {
+                    ui.painter().rect_filled(
+                        rect,
+                        CornerRadius::ZERO,
+                        Color32::from_black_alpha(70),
+                    );
+                }
             }
         }
         LayoutNode::Split {
@@ -522,14 +828,14 @@ fn render_node(
                     let split_x = rect.min.x + rect.width() * *ratio;
                     let first_rect = egui::Rect::from_min_max(
                         rect.min,
-                        egui::pos2(split_x - DIVIDER_PX * 0.5, rect.max.y),
+                        egui::pos2(split_x - DIVIDER_HIT * 0.5, rect.max.y),
                     );
                     let divider_rect = egui::Rect::from_min_max(
-                        egui::pos2(split_x - DIVIDER_PX * 0.5, rect.min.y),
-                        egui::pos2(split_x + DIVIDER_PX * 0.5, rect.max.y),
+                        egui::pos2(split_x - DIVIDER_HIT * 0.5, rect.min.y),
+                        egui::pos2(split_x + DIVIDER_HIT * 0.5, rect.max.y),
                     );
                     let second_rect = egui::Rect::from_min_max(
-                        egui::pos2(split_x + DIVIDER_PX * 0.5, rect.min.y),
+                        egui::pos2(split_x + DIVIDER_HIT * 0.5, rect.min.y),
                         rect.max,
                     );
                     (first_rect, divider_rect, second_rect)
@@ -538,14 +844,14 @@ fn render_node(
                     let split_y = rect.min.y + rect.height() * *ratio;
                     let first_rect = egui::Rect::from_min_max(
                         rect.min,
-                        egui::pos2(rect.max.x, split_y - DIVIDER_PX * 0.5),
+                        egui::pos2(rect.max.x, split_y - DIVIDER_HIT * 0.5),
                     );
                     let divider_rect = egui::Rect::from_min_max(
-                        egui::pos2(rect.min.x, split_y - DIVIDER_PX * 0.5),
-                        egui::pos2(rect.max.x, split_y + DIVIDER_PX * 0.5),
+                        egui::pos2(rect.min.x, split_y - DIVIDER_HIT * 0.5),
+                        egui::pos2(rect.max.x, split_y + DIVIDER_HIT * 0.5),
                     );
                     let second_rect = egui::Rect::from_min_max(
-                        egui::pos2(rect.min.x, split_y + DIVIDER_PX * 0.5),
+                        egui::pos2(rect.min.x, split_y + DIVIDER_HIT * 0.5),
                         rect.max,
                     );
                     (first_rect, divider_rect, second_rect)
@@ -583,31 +889,27 @@ fn render_node(
                 *dirty = true;
             }
             let div_color = if hovering {
-                ui_theme::ACCENT
+                ui_theme::DIVIDER_ACTIVE
             } else {
-                egui::Color32::from_rgb(0x24, 0x24, 0x29)
+                ui_theme::DIVIDER
             };
-            if hovering {
-                ui.painter().rect_filled(divider_rect, 0.0, div_color);
-            } else {
-                let mid = match *direction {
-                    SplitDir::Vertical => {
-                        let x = divider_rect.center().x;
-                        egui::Rect::from_min_max(
-                            egui::pos2(x, divider_rect.min.y),
-                            egui::pos2(x + 1.0, divider_rect.max.y),
-                        )
-                    }
-                    SplitDir::Horizontal => {
-                        let y = divider_rect.center().y;
-                        egui::Rect::from_min_max(
-                            egui::pos2(divider_rect.min.x, y),
-                            egui::pos2(divider_rect.max.x, y + 1.0),
-                        )
-                    }
-                };
-                ui.painter().rect_filled(mid, 0.0, div_color);
-            }
+            let mid = match *direction {
+                SplitDir::Vertical => {
+                    let x = divider_rect.center().x;
+                    egui::Rect::from_min_max(
+                        egui::pos2(x, divider_rect.min.y),
+                        egui::pos2(x + 1.0, divider_rect.max.y),
+                    )
+                }
+                SplitDir::Horizontal => {
+                    let y = divider_rect.center().y;
+                    egui::Rect::from_min_max(
+                        egui::pos2(divider_rect.min.x, y),
+                        egui::pos2(divider_rect.max.x, y + 1.0),
+                    )
+                }
+            };
+            ui.painter().rect_filled(mid, 0.0, div_color);
 
             let mut path_first = path.to_vec();
             path_first.push(0);
@@ -620,6 +922,7 @@ fn render_node(
                 first_rect,
                 &path_first,
                 font_size,
+                dim_inactive,
                 dirty,
             );
             let mut path_second = path.to_vec();
@@ -633,6 +936,7 @@ fn render_node(
                 second_rect,
                 &path_second,
                 font_size,
+                dim_inactive,
                 dirty,
             );
         }

@@ -2,40 +2,38 @@ use crate::ui_theme;
 use alacritty_terminal::vte::ansi::{Color, NamedColor, Rgb};
 use egui::Color32;
 
-/// Warp-like dark palette with a single steel-blue accent.
+/// Midterm-coherent dark palette: muted greens/ambers, blue accent cursor.
 #[derive(Clone, Debug)]
 pub struct TermColors {
     pub background: Color32,
     pub foreground: Color32,
     pub cursor: Color32,
-    pub accent: Color32,
     pub ansi: [Color32; 16],
 }
 
 impl Default for TermColors {
     fn default() -> Self {
         Self {
-            background: ui_theme::BG_TERM,
-            foreground: Color32::from_rgb(0xE0, 0xE0, 0xE0),
+            background: ui_theme::BG,
+            foreground: Color32::from_rgb(0xE6, 0xE6, 0xE6),
             cursor: ui_theme::ACCENT,
-            accent: ui_theme::ACCENT,
             ansi: [
-                Color32::from_rgb(0x1C, 0x1C, 0x1E), // black
-                Color32::from_rgb(0xC7, 0x4E, 0x4E), // red
-                Color32::from_rgb(0x6A, 0xA8, 0x4F), // green
-                Color32::from_rgb(0xC4, 0xA0, 0x35), // yellow
-                Color32::from_rgb(0x3A, 0x7C, 0xA5), // blue (accent)
-                Color32::from_rgb(0x9B, 0x6B, 0x9E), // magenta
-                Color32::from_rgb(0x4E, 0xA8, 0xA4), // cyan
-                Color32::from_rgb(0xD0, 0xD0, 0xD0), // white
-                Color32::from_rgb(0x5A, 0x5A, 0x5E), // bright black
-                Color32::from_rgb(0xE0, 0x6C, 0x6C), // bright red
-                Color32::from_rgb(0x8B, 0xC4, 0x6F), // bright green
-                Color32::from_rgb(0xE0, 0xC0, 0x55), // bright yellow
-                Color32::from_rgb(0x5A, 0x9C, 0xC5), // bright blue
-                Color32::from_rgb(0xB8, 0x88, 0xBB), // bright magenta
-                Color32::from_rgb(0x6E, 0xC8, 0xC4), // bright cyan
-                Color32::from_rgb(0xF0, 0xF0, 0xF0), // bright white
+                Color32::from_rgb(0x3A, 0x3A, 0x3A), // black
+                Color32::from_rgb(0xE5, 0x69, 0x5B), // red
+                Color32::from_rgb(0x7F, 0xB9, 0x8E), // green
+                Color32::from_rgb(0xE1, 0xC1, 0x6B), // yellow
+                Color32::from_rgb(0x5A, 0xA0, 0xF2), // blue
+                Color32::from_rgb(0xC7, 0x92, 0xEA), // magenta
+                Color32::from_rgb(0x6C, 0xC5, 0xC9), // cyan
+                Color32::from_rgb(0xD4, 0xD4, 0xD4), // white
+                Color32::from_rgb(0x6E, 0x6E, 0x6E), // bright black
+                Color32::from_rgb(0xFF, 0x8A, 0x7A), // bright red
+                Color32::from_rgb(0x9A, 0xD3, 0xA8), // bright green
+                Color32::from_rgb(0xF0, 0xD5, 0x8A), // bright yellow
+                Color32::from_rgb(0x82, 0xB8, 0xFF), // bright blue
+                Color32::from_rgb(0xDD, 0xB1, 0xF5), // bright magenta
+                Color32::from_rgb(0x93, 0xDD, 0xE0), // bright cyan
+                Color32::from_rgb(0xF2, 0xF2, 0xF2), // bright white
             ],
         }
     }
@@ -50,7 +48,6 @@ impl TermColors {
                 if (index as usize) < self.ansi.len() {
                     self.ansi[index as usize]
                 } else {
-                    // 256-color cube / grayscale approximation
                     indexed_256(index)
                 }
             }

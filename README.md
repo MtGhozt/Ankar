@@ -11,10 +11,12 @@ Built for running and organizing terminal agents (OpenCode, cursor-agent, gemini
 - Session sidebar grouped by project folder, with pins and archives
 - Session restore from `%APPDATA%\ankar\sessions.json`
 - Status detection: active / waiting / finished + Windows toasts when unfocused
-- Configurable launchers on the bottom bar
+- Midterm-style UI: pure black terminal, gray chrome, project-grouped session sidebar
+- Configurable launchers (sidebar icon row + palette; Lucide icon + color per launcher)
 - Command palette (`Ctrl+Shift+K`)
 - Read-only project file viewer with syntect highlighting
 - Zero network calls from the app itself
+- Fonts: Inter (UI) + Lucide subset (icons) — see `assets/fonts/LICENSES.md`
 
 ## Install / build
 
@@ -47,6 +49,7 @@ On first launch, Ankar copies `config.toml` and `sessions.json` from `%APPDATA%\
 | `Ctrl+Shift+K` | Command palette |
 | `Ctrl+Shift+B` | Toggle sessions sidebar |
 | `Ctrl+Shift+F` | Toggle file viewer |
+| `Ctrl+Shift+L` | Focus session search in sidebar |
 | `Ctrl+Shift+P` | Pin / unpin active session |
 | `Ctrl+Shift+N` | Profile picker |
 | `Ctrl+1`…`9` | Switch tab |
@@ -70,27 +73,37 @@ default_shell = "powershell"
 # Seconds without PTY output before a live session is "waiting"
 waiting_timeout_secs = 30
 
-font_size = 14.0
-accent = "#3A7CA5"
+font_size = 13.0
+accent = "#4D9FFB"
 
-# Scrollback lines per terminal (default 3000; hard cap 50000)
-scrollback_lines = 3000
+# Scrollback lines per terminal (default 2000; hard cap 50000)
+scrollback_lines = 2000
+
+sidebar_width = 280.0
+dim_inactive_panes = true
 
 pinned_projects = []
 pinned_sessions = []
+collapsed_groups = []
 
 [[launchers]]
 name = "opencode"
 command = "opencode"
 args = []
+icon = "sparkles"
+color = "#D97757"
 
 [[launchers]]
 name = "cursor-agent"
 command = "cursor-agent"
 args = []
+icon = "bot"
+color = "#8A8A8A"
 ```
 
 Session layout is stored in `%APPDATA%\ankar\sessions.json` (tabs, panes, folders, commands — not scrollback).
+
+Bundled fonts under `assets/fonts/` — Inter (OFL-1.1) and Lucide icon subset (ISC). Details in [`assets/fonts/LICENSES.md`](assets/fonts/LICENSES.md).
 
 ## Colored paths in the prompt
 

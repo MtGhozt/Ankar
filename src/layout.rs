@@ -3,6 +3,7 @@ use crate::terminal::TerminalSession;
 use egui::Context;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::time::Instant;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SplitDir {
@@ -44,6 +45,10 @@ pub struct Tab {
     pub pinned: bool,
     pub project_key: String,
     pub status: SessionStatus,
+    /// Last non-cwd OSC title (agent activity line).
+    pub activity: Option<String>,
+    pub exit_code: Option<i32>,
+    pub status_changed_at: Instant,
 }
 
 pub struct Workspace {
@@ -144,6 +149,9 @@ impl Workspace {
             pinned: false,
             project_key,
             status: SessionStatus::Active,
+            activity: None,
+            exit_code: None,
+            status_changed_at: Instant::now(),
         });
         self.active_tab = self.tabs.len() - 1;
         self.mark_dirty();
@@ -190,6 +198,9 @@ impl Workspace {
             pinned: false,
             project_key,
             status: SessionStatus::Active,
+            activity: None,
+            exit_code: None,
+            status_changed_at: Instant::now(),
         });
         self.active_tab = self.tabs.len() - 1;
         self.mark_dirty();

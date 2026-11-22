@@ -12,6 +12,9 @@ use egui::{
 use std::collections::BTreeMap;
 
 const FONT_FAMILY: egui::FontFamily = egui::FontFamily::Monospace;
+/// Keep close to glyph height so TUI apps (OpenCode, etc.) align mouse + boxes.
+/// Pixel-snapping below still removes hairline gaps between rows.
+const LINE_HEIGHT: f32 = 1.0;
 
 pub struct TerminalView;
 
@@ -29,23 +32,35 @@ impl TerminalView {
         let metrics = measure_cell(ui, &font_id);
         session.resize(response.rect.width(), response.rect.height(), metrics);
 
-        if focused || response.clicked() || response.dragged() {
+        // Only take focus on click/drag — never every frame, or sidebar search
+        // and other TextEdits can never keep the keyboard.
+        if response.clicked() || response.dragged() {
+            response.request_focus();
+        } else if focused
+            && !response.has_focus()
+            && !ui.ctx().egui_wants_keyboard_input()
+            && ui.ctx().memory(|m| m.focused().is_none())
+        {
+            // Active pane with nothing else focused → claim keys once.
             response.request_focus();
         }
 
-        if focused && response.has_focus() {
-            ui.memory_mut(|m| {
-                m.set_focus_lock_filter(
-                    response.id,
-                    egui::EventFilter {
-                        tab: true,
-                        horizontal_arrows: true,
-                        vertical_arrows: true,
-                        escape: true,
-                    },
-                );
-            });
-            handle_input(ui, &response, session, font_size);
+        if focused {
+            if response.has_focus() {
+                ui.memory_mut(|m| {
+                    m.set_focus_lock_filter(
+                        response.id,
+                        egui::EventFilter {
+                            tab: true,
+                            horizontal_arrows: true,
+                            vertical_arrows: true,
+                            escape: true,
+                        },
+                    );
+                });
+            }
+            // Keys only when the terminal widget has focus (sidebar search can keep it).
+            handle_input(ui, &response, session, font_size, response.has_focus());
         }
         paint_grid(ui, &response, &painter, session, &font_id, metrics);
         response
@@ -54,26 +69,34 @@ impl TerminalView {
 
 fn measure_cell(ui: &Ui, font_id: &FontId) -> CellMetrics {
     let galley = ui.fonts_mut(|f| f.layout_no_wrap("W".to_owned(), font_id.clone(), Color32::WHITE));
-    CellMetrics {
-        width: galley.size().x.max(1.0),
-        height: galley.size().y.max(1.0),
-    }
+    let ppp = ui.ctx().pixels_per_point();
+    // Round to whole physical pixels so truecolor rows / box-drawing join without gaps.
+    let width = ((galley.size().x.max(1.0) * ppp).round() / ppp).max(1.0 / ppp);
+    let height =
+        ((galley.size().y.max(1.0) * LINE_HEIGHT * ppp).round() / ppp).max(1.0 / ppp);
+    CellMetrics { width, height }
 }
 
-fn handle_input(ui: &Ui, response: &egui::Response, session: &mut TerminalSession, font_size: f32) {
-    if !response.has_focus() {
-        return;
-    }
-
+fn handle_input(
+    ui: &Ui,
+    response: &egui::Response,
+    session: &mut TerminalSession,
+    font_size: f32,
+    keyboard_focus: bool,
+) {
     let modifiers = ui.input(|i| i.modifiers);
     let mode = session.snapshot().mode;
     let mouse_reporting = mode.intersects(TermMode::MOUSE_MODE) && !modifiers.shift;
 
-    // --- Pointer: mouse report or local selection ---
+    // Pointer always when this pane is the interaction target.
     if mouse_reporting {
         handle_mouse_report(ui, response, session);
-    } else {
+    } else if keyboard_focus || response.clicked() || response.dragged() {
         handle_selection_pointer(ui, response, session, font_size);
+    }
+
+    if !keyboard_focus {
+        return;
     }
 
     let events: Vec<egui::Event> = ui.input(|i| i.events.clone());
@@ -340,6 +363,8 @@ fn paint_grid(
     let display_offset = content.display_offset as i32;
     let cursor_point = content.cursor;
     let app_cursor = content.mode.contains(TermMode::APP_CURSOR);
+    // TUIs (OpenCode, etc.) draw their own cursor on the alternate screen.
+    let alt_screen = content.mode.contains(TermMode::ALT_SCREEN);
     let selection = content.selection;
 
     let mut by_line: BTreeMap<i32, Vec<&VisibleCell>> = BTreeMap::new();
@@ -348,8 +373,11 @@ fn paint_grid(
         by_line.entry(row).or_default().push(cell);
     }
 
+    let ppp = ui.ctx().pixels_per_point();
+    let snap = |v: f32| (v * ppp).round() / ppp;
+
     for (row, cells) in &by_line {
-        let y = origin.y + cell_h * (*row as f32);
+        let y = snap(origin.y + cell_h * (*row as f32));
         paint_row_backgrounds(
             &mut shapes,
             origin.x,
@@ -360,6 +388,18 @@ fn paint_grid(
             selection,
             &colors,
             cursor_point,
+            ppp,
+            !alt_screen,
+        );
+        paint_row_box_drawing(
+            &mut shapes,
+            origin.x,
+            y,
+            cell_w,
+            cell_h,
+            cells,
+            selection,
+            &colors,
         );
         paint_row_text(
             ui,
@@ -373,36 +413,160 @@ fn paint_grid(
             font_id,
             app_cursor,
             cursor_point,
+            !alt_screen,
         );
         paint_row_underlines(&mut shapes, origin.x, y, cell_w, cell_h, cells, &colors);
     }
 
-    let cursor_row = cursor_point.line.0 + display_offset;
-    let cursor_on_skipped = !content.cells.iter().any(|c| {
-        c.line == cursor_point.line.0 && c.col as usize == cursor_point.column.0
-    });
-    if cursor_on_skipped {
-        let x = origin.x + cell_w * cursor_point.column.0 as f32;
-        let y = origin.y + cell_h * cursor_row as f32;
-        shapes.push(Shape::Rect(RectShape::filled(
-            Rect::from_min_size(Pos2::new(x, y), Vec2::new(cell_w, cell_h)),
-            CornerRadius::ZERO,
-            colors.cursor,
-        )));
+    if !alt_screen {
+        let cursor_row = cursor_point.line.0 + display_offset;
+        let cursor_on_skipped = !content.cells.iter().any(|c| {
+            c.line == cursor_point.line.0 && c.col as usize == cursor_point.column.0
+        });
+        let window_focused = ui.input(|i| i.focused);
+        if cursor_on_skipped {
+            let x = snap(origin.x + cell_w * cursor_point.column.0 as f32);
+            let y = snap(origin.y + cell_h * cursor_row as f32);
+            paint_cursor(&mut shapes, x, y, cell_w, cell_h, colors.cursor, window_focused);
+        }
     }
 
     painter.extend(shapes);
 
-    if response.has_focus() {
-        ui.painter().rect_stroke(
-            response.rect,
-            CornerRadius::ZERO,
-            Stroke::new(1.0, colors.accent.gamma_multiply(0.5)),
-            egui::StrokeKind::Inside,
-        );
-    }
-
     let _ = Frame::NONE;
+}
+
+fn paint_cursor(
+    shapes: &mut Vec<Shape>,
+    x: f32,
+    y: f32,
+    cell_w: f32,
+    cell_h: f32,
+    color: Color32,
+    window_focused: bool,
+) {
+    // 2 px bar cursor (midterm); outline-only when window unfocused.
+    let bar = Rect::from_min_size(Pos2::new(x, y), Vec2::new(2.0, cell_h));
+    if window_focused {
+        shapes.push(Shape::Rect(RectShape::filled(bar, CornerRadius::ZERO, color)));
+    } else {
+        shapes.push(Shape::Rect(RectShape::stroke(
+            Rect::from_min_size(Pos2::new(x, y), Vec2::new(cell_w, cell_h)),
+            CornerRadius::ZERO,
+            Stroke::new(1.0, color),
+            egui::StrokeKind::Inside,
+        )));
+    }
+}
+
+fn is_box_drawing(c: char) -> bool {
+    matches!(
+        c,
+        '\u{2500}'..='\u{257F}' | '\u{2580}'..='\u{259F}'
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paint_row_box_drawing(
+    shapes: &mut Vec<Shape>,
+    origin_x: f32,
+    y: f32,
+    cell_w: f32,
+    cell_h: f32,
+    cells: &[&VisibleCell],
+    selection: Option<SelectionRange>,
+    colors: &super::theme::TermColors,
+) {
+    for cell in cells {
+        if !is_box_drawing(cell.c) {
+            continue;
+        }
+        let (fg, _bg, width_cells) = cell_colors(
+            cell,
+            selection,
+            colors,
+            false,
+            Point::new(Line(0), Column(0)),
+            false,
+        );
+        let x = origin_x + cell_w * cell.col as f32;
+        let w = cell_w * width_cells;
+        let cx = x + w * 0.5;
+        let cy = y + cell_h * 0.5;
+        let stroke = Stroke::new(1.25, fg);
+        let hline = |shapes: &mut Vec<Shape>, x0: f32, x1: f32| {
+            shapes.push(Shape::LineSegment {
+                points: [Pos2::new(x0, cy), Pos2::new(x1, cy)],
+                stroke,
+            });
+        };
+        let vline = |shapes: &mut Vec<Shape>, y0: f32, y1: f32| {
+            shapes.push(Shape::LineSegment {
+                points: [Pos2::new(cx, y0), Pos2::new(cx, y1)],
+                stroke,
+            });
+        };
+        match cell.c {
+            '─' | '━' => hline(shapes, x, x + w),
+            '│' | '┃' => vline(shapes, y, y + cell_h),
+            '┌' | '╭' => {
+                hline(shapes, cx, x + w);
+                vline(shapes, cy, y + cell_h);
+            }
+            '┐' | '╮' => {
+                hline(shapes, x, cx);
+                vline(shapes, cy, y + cell_h);
+            }
+            '└' | '╰' => {
+                hline(shapes, cx, x + w);
+                vline(shapes, y, cy);
+            }
+            '┘' | '╯' => {
+                hline(shapes, x, cx);
+                vline(shapes, y, cy);
+            }
+            '├' => {
+                hline(shapes, cx, x + w);
+                vline(shapes, y, y + cell_h);
+            }
+            '┤' => {
+                hline(shapes, x, cx);
+                vline(shapes, y, y + cell_h);
+            }
+            '▀' => {
+                shapes.push(Shape::Rect(RectShape::filled(
+                    Rect::from_min_size(Pos2::new(x, y), Vec2::new(w, cell_h * 0.5)),
+                    CornerRadius::ZERO,
+                    fg,
+                )));
+            }
+            '▄' => {
+                shapes.push(Shape::Rect(RectShape::filled(
+                    Rect::from_min_size(
+                        Pos2::new(x, y + cell_h * 0.5),
+                        Vec2::new(w, cell_h * 0.5),
+                    ),
+                    CornerRadius::ZERO,
+                    fg,
+                )));
+            }
+            '█' => {
+                shapes.push(Shape::Rect(RectShape::filled(
+                    Rect::from_min_size(Pos2::new(x, y), Vec2::new(w, cell_h)),
+                    CornerRadius::ZERO,
+                    fg,
+                )));
+            }
+            _ => {
+                // Fallback: full cell block so unknown box glyphs still join.
+                shapes.push(Shape::Rect(RectShape::filled(
+                    Rect::from_min_size(Pos2::new(x, y), Vec2::new(w, cell_h)),
+                    CornerRadius::ZERO,
+                    fg.gamma_multiply(0.35),
+                )));
+            }
+        }
+    }
 }
 
 fn cell_colors(
@@ -411,6 +575,7 @@ fn cell_colors(
     colors: &super::theme::TermColors,
     app_cursor: bool,
     cursor_point: Point,
+    apply_host_cursor: bool,
 ) -> (Color32, Color32, f32) {
     let wide = cell.flags.contains(Flags::WIDE_CHAR);
     let inverse = cell.flags.contains(Flags::INVERSE);
@@ -429,13 +594,17 @@ fn cell_colors(
         std::mem::swap(&mut fg, &mut bg);
     }
 
-    let at_cursor =
-        cursor_point.line.0 == cell.line && cursor_point.column.0 == cell.col as usize;
-    if at_cursor {
-        if app_cursor {
-            std::mem::swap(&mut fg, &mut bg);
-        } else {
-            fg = colors.background;
+    // Only invert/blank for our host cursor on the primary screen.
+    // On ALT_SCREEN the TUI already painted the cursor via cell attrs.
+    if apply_host_cursor {
+        let at_cursor =
+            cursor_point.line.0 == cell.line && cursor_point.column.0 == cell.col as usize;
+        if at_cursor {
+            if app_cursor {
+                std::mem::swap(&mut fg, &mut bg);
+            } else {
+                fg = colors.background;
+            }
         }
     }
 
@@ -453,7 +622,10 @@ fn paint_row_backgrounds(
     selection: Option<SelectionRange>,
     colors: &super::theme::TermColors,
     cursor_point: Point,
+    ppp: f32,
+    paint_host_cursor: bool,
 ) {
+    let snap = |v: f32| (v * ppp).round() / ppp;
     let mut sorted: Vec<&VisibleCell> = cells.to_vec();
     sorted.sort_by_key(|c| c.col);
 
@@ -461,10 +633,15 @@ fn paint_row_backgrounds(
     let mut run_start_x = 0.0;
     let mut run_end_x = 0.0;
 
+    // Overlap by 1 physical px so adjacent rows/cols have no hairline gaps.
+    let overlap = 1.0 / ppp;
     let flush = |shapes: &mut Vec<Shape>, bg: Color32, x0: f32, x1: f32| {
         if bg != colors.background && x1 > x0 {
             shapes.push(Shape::Rect(RectShape::filled(
-                Rect::from_min_max(Pos2::new(x0, y), Pos2::new(x1 + 1.0, y + cell_h + 1.0)),
+                Rect::from_min_max(
+                    Pos2::new(snap(x0), y),
+                    Pos2::new(snap(x1) + overlap, y + cell_h + overlap),
+                ),
                 CornerRadius::ZERO,
                 bg,
             )));
@@ -472,16 +649,16 @@ fn paint_row_backgrounds(
     };
 
     for cell in &sorted {
-        let (_fg, bg, width_cells) = cell_colors(cell, selection, colors, false, cursor_point);
+        let (_fg, bg, width_cells) =
+            cell_colors(cell, selection, colors, false, cursor_point, paint_host_cursor);
         let x = origin_x + cell_w * cell.col as f32;
         let w = cell_w * width_cells;
 
-        if cursor_point.line.0 == cell.line && cursor_point.column.0 == cell.col as usize {
-            shapes.push(Shape::Rect(RectShape::filled(
-                Rect::from_min_size(Pos2::new(x, y), Vec2::new(cell_w, cell_h)),
-                CornerRadius::ZERO,
-                colors.cursor,
-            )));
+        if paint_host_cursor
+            && cursor_point.line.0 == cell.line
+            && cursor_point.column.0 == cell.col as usize
+        {
+            paint_cursor(shapes, snap(x), y, cell_w, cell_h, colors.cursor, true);
         }
 
         match run_bg {
@@ -519,11 +696,17 @@ fn paint_row_text(
     font_id: &FontId,
     app_cursor: bool,
     cursor_point: Point,
+    apply_host_cursor: bool,
 ) {
     let mut sorted: Vec<&VisibleCell> = cells
         .iter()
         .copied()
-        .filter(|c| c.c != ' ' && c.c != '\t' && !c.flags.contains(Flags::WIDE_CHAR_SPACER))
+        .filter(|c| {
+            c.c != ' '
+                && c.c != '\t'
+                && !c.flags.contains(Flags::WIDE_CHAR_SPACER)
+                && !is_box_drawing(c.c)
+        })
         .collect();
     sorted.sort_by_key(|c| c.col);
 
@@ -534,7 +717,14 @@ fn paint_row_text(
     let mut i = 0;
     while i < sorted.len() {
         let start = sorted[i];
-        let (fg0, _bg, _) = cell_colors(start, selection, colors, app_cursor, cursor_point);
+        let (fg0, _bg, _) = cell_colors(
+            start,
+            selection,
+            colors,
+            app_cursor,
+            cursor_point,
+            apply_host_cursor,
+        );
         let mut job = LayoutJob::default();
         job.wrap.max_width = f32::INFINITY;
         job.wrap.break_anywhere = false;
@@ -548,8 +738,14 @@ fn paint_row_text(
             if cell.col != expected_col {
                 break;
             }
-            let (fg, _, width_cells) =
-                cell_colors(cell, selection, colors, app_cursor, cursor_point);
+            let (fg, _, width_cells) = cell_colors(
+                cell,
+                selection,
+                colors,
+                app_cursor,
+                cursor_point,
+                apply_host_cursor,
+            );
             if fg != fg0 {
                 break;
             }

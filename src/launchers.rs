@@ -1,25 +1,6 @@
-use crate::config::{Config, Launcher};
+use crate::config::Launcher;
 use crate::layout::Workspace;
-use crate::ui_theme;
-use egui::{RichText, Ui};
 use std::path::PathBuf;
-
-pub fn draw_bar(ui: &mut Ui, config: &Config, workspace: &mut Workspace) {
-    ui.horizontal(|ui| {
-        ui.label(
-            RichText::new("Launch")
-                .small()
-                .color(ui_theme::TEXT_MUTED),
-        );
-        let launchers = config.launchers.clone();
-        let cwd = workspace.active_tab().and_then(|t| t.cwd.clone());
-        for launcher in &launchers {
-            if ui.button(&launcher.name).clicked() {
-                let _ = run_launcher(ui.ctx(), workspace, launcher, cwd.clone());
-            }
-        }
-    });
-}
 
 pub fn run_launcher(
     ctx: &egui::Context,
