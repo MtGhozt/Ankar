@@ -4,7 +4,10 @@ use crate::layout::{SessionStatus, Workspace};
 use crate::logos::LogoAtlas;
 use crate::persist::{self, ArchivedSession};
 use crate::ui_theme::{self, Icon};
-use egui::{Color32, CornerRadius, Frame, RichText, Sense, Stroke, TextureHandle, Ui, Vec2};
+use egui::{
+    Align, Align2, Color32, CornerRadius, FontFamily, FontId, Frame, Margin, Rect, RichText,
+    Sense, Stroke, TextureHandle, Ui, Vec2,
+};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -72,9 +75,19 @@ pub fn draw(
     sidebar: &mut SidebarState,
     logos: &mut LogoAtlas,
     allow_config_save: bool,
-    _sidebar_rect: egui::Rect,
+    sidebar_rect: Rect,
 ) {
     let _ = sidebar.now();
+    let painter = ui.painter().clone();
+    let divider_launcher_y = sidebar_rect.bottom() - 92.0;
+    let divider_archived_y = sidebar_rect.bottom() - 46.0;
+    let filter_bottom_y = sidebar_rect.top() + 151.33;
+    let archived_list_h = if sidebar.show_archived {
+        (sidebar.archived.len() as f32 * 28.0).min(160.0) + 8.0
+    } else {
+        0.0
+    };
+    let scroll_h = (divider_launcher_y - filter_bottom_y - archived_list_h).max(60.0);
     let mut activate = None;
     let mut archive_idx = None;
     let mut close_idx = None;
@@ -94,48 +107,69 @@ pub fn draw(
         let gap = 6.0;
         let main_w = (avail - square - gap).max(80.0);
 
-        let new_resp = Frame::NONE
-            .fill(ui_theme::SURFACE_2)
-            .corner_radius(CornerRadius::same(ui_theme::RADIUS_CTRL))
-            .inner_margin(egui::Margin::symmetric(10, 0))
+        let new_inner = Frame::NONE
+            .fill(ui_theme::BUTTON_BG)
+            .corner_radius(CornerRadius::same(ui_theme::RADIUS_ROW))
+            .inner_margin(Margin::symmetric(10, 0))
             .show(ui, |ui| {
                 ui.set_min_size(Vec2::new(main_w, 30.0));
                 ui.set_max_height(30.0);
                 ui.horizontal_centered(|ui| {
-                    ui.label(ui_theme::icon(Icon::SquarePen, 14.0, ui_theme::TEXT));
+                    ui.label(ui_theme::icon(Icon::SquarePen, 16.0, ui_theme::TEXT));
                     ui.add_space(6.0);
-                    ui.label(ui_theme::text_title("Nueva terminal"));
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(ui_theme::text_kbd("⌃⇧T"));
+                    ui.label(ui_theme::text_title("New session"));
+                    ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                        let shortcut = if ui.available_width() > 52.0 {
+                            "Ctrl+Shift+T"
+                        } else {
+                            "⇧^T"
+                        };
+                        ui.label(
+                            RichText::new(shortcut)
+                                .size(ui_theme::SIZE_UI)
+                                .color(ui_theme::TEXT_MUTED),
+                        );
                     });
                 });
             })
-            .response
-            .interact(Sense::click())
-            .on_hover_cursor(egui::CursorIcon::PointingHand);
+            .response;
+        let new_resp = ui.interact(new_inner.rect, search_field_id().with("new_session"), Sense::click());
+        paint_button_top_highlight(&painter, new_resp.rect, ui_theme::RADIUS_ROW);
         if new_resp.hovered() {
-            ui.painter().rect_filled(
+            painter.rect_filled(
                 new_resp.rect,
-                CornerRadius::same(ui_theme::RADIUS_CTRL),
-                ui_theme::HOVER,
+                CornerRadius::same(ui_theme::RADIUS_ROW),
+                ui_theme::ROW_HOVER,
             );
+            paint_button_top_highlight(&painter, new_resp.rect, ui_theme::RADIUS_ROW);
         }
         if new_resp.clicked() {
             new_session = true;
         }
 
-        let folder_resp = Frame::NONE
-            .fill(ui_theme::SURFACE_2)
-            .corner_radius(CornerRadius::same(ui_theme::RADIUS_CTRL))
+        let folder_inner = Frame::NONE
+            .fill(ui_theme::BUTTON_BG)
+            .corner_radius(CornerRadius::same(ui_theme::RADIUS_ROW))
             .show(ui, |ui| {
                 ui.set_min_size(Vec2::splat(30.0));
                 ui.centered_and_justified(|ui| {
-                    ui.label(ui_theme::icon(Icon::FolderPlus, 14.0, ui_theme::TEXT));
+                    ui.label(ui_theme::icon(Icon::FolderPlus, 17.0, ui_theme::TEXT_MUTED));
                 });
             })
-            .response
-            .interact(Sense::click())
-            .on_hover_text("Nueva sesión en la carpeta activa");
+            .response;
+        let folder_id = search_field_id().with("new_in_folder");
+        let folder_resp = ui
+            .interact(folder_inner.rect, folder_id, Sense::click())
+            .on_hover_text("New session in active folder");
+        paint_button_top_highlight(&painter, folder_resp.rect, ui_theme::RADIUS_ROW);
+        if folder_resp.hovered() {
+            painter.rect_filled(
+                folder_resp.rect,
+                CornerRadius::same(ui_theme::RADIUS_ROW),
+                ui_theme::ROW_HOVER,
+            );
+            paint_button_top_highlight(&painter, folder_resp.rect, ui_theme::RADIUS_ROW);
+        }
         if folder_resp.clicked() {
             new_in_folder = true;
         }
@@ -146,25 +180,27 @@ pub fn draw(
     // --- Search ---
     let search_id = search_field_id();
     let search_frame = Frame::NONE
-        .fill(ui_theme::SURFACE_SUNKEN)
-        .stroke(Stroke::new(1.0, ui_theme::BORDER))
-        .corner_radius(CornerRadius::same(ui_theme::RADIUS_CTRL))
-        .inner_margin(egui::Margin::symmetric(8, 0))
+        .fill(ui_theme::INPUT_BG)
+        .stroke(Stroke::new(1.0, ui_theme::INPUT_BORDER))
+        .corner_radius(CornerRadius::same(ui_theme::RADIUS_ROW))
+        .inner_margin(Margin::symmetric(8, 0))
         .show(ui, |ui| {
-            ui.set_min_height(30.0);
-            ui.set_max_height(30.0);
-            ui.horizontal(|ui| {
-                ui.set_min_height(30.0);
-                ui.label(ui_theme::icon(Icon::Search, 14.0, ui_theme::TEXT_MUTED));
+            ui.set_min_height(29.33);
+            ui.set_max_height(29.33);
+            ui.with_layout(egui::Layout::left_to_right(Align::Center), |ui| {
+                ui.set_min_height(29.33);
+                ui.label(ui_theme::icon(Icon::Search, 12.5, ui_theme::TEXT_MUTED));
                 ui.add_space(4.0);
-                // Chip first (RTL) so TextEdit gets a stable remaining width.
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    kbd_chip(ui, "⌃⇧L");
+                ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                    kbd_chip(ui, "/");
                     let edit = egui::TextEdit::singleline(&mut sidebar.search)
                         .id(search_id)
                         .frame(Frame::NONE)
+                        .margin(Margin::ZERO)
+                        .align(Align2::LEFT_CENTER)
                         .desired_width(ui.available_width())
-                        .hint_text("Buscar sesiones")
+                        .hint_text(RichText::new("Search agents").color(ui_theme::TEXT_MUTED))
+                        .font(FontId::new(ui_theme::SIZE_UI, FontFamily::Proportional))
                         .text_color(ui_theme::TEXT);
                     let resp = ui.add(edit);
                     if sidebar.search_focus {
@@ -175,10 +211,10 @@ pub fn draw(
                         sidebar.search.clear();
                         resp.surrender_focus();
                     }
-                    // Clicking empty search chrome focuses the field.
-                    if resp.clicked() || (ui.rect_contains_pointer(ui.max_rect())
-                        && ui.input(|i| i.pointer.primary_clicked())
-                        && !resp.has_focus())
+                    if resp.clicked()
+                        || (ui.rect_contains_pointer(ui.max_rect())
+                            && ui.input(|i| i.pointer.primary_clicked())
+                            && !resp.has_focus())
                     {
                         resp.request_focus();
                     }
@@ -204,49 +240,7 @@ pub fn draw(
         .filter(|t| t.status == SessionStatus::Active)
         .count();
 
-    // --- Segmented filter (short labels so they fit a narrow sidebar) ---
-    Frame::NONE
-        .fill(ui_theme::SURFACE_SUNKEN)
-        .stroke(Stroke::new(1.0, ui_theme::BORDER))
-        .corner_radius(CornerRadius::same(ui_theme::RADIUS_CTRL))
-        .inner_margin(2.0)
-        .show(ui, |ui| {
-            ui.set_min_height(28.0);
-            let w = (ui.available_width() / 3.0).max(1.0);
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 0.0;
-                segment(
-                    ui,
-                    w,
-                    sidebar.filter == SessionFilter::All,
-                    "Todas",
-                    n_all,
-                    None,
-                    None,
-                    || sidebar.filter = SessionFilter::All,
-                );
-                segment(
-                    ui,
-                    w,
-                    sidebar.filter == SessionFilter::Waiting,
-                    "Esp.",
-                    n_waiting,
-                    Some((Icon::Circle, ui_theme::WARN)),
-                    Some("Esperando"),
-                    || sidebar.filter = SessionFilter::Waiting,
-                );
-                segment(
-                    ui,
-                    w,
-                    sidebar.filter == SessionFilter::Working,
-                    "Trab.",
-                    n_working,
-                    Some((Icon::LoaderCircle, ui_theme::TEXT_MUTED)),
-                    Some("Trabajando"),
-                    || sidebar.filter = SessionFilter::Working,
-                );
-            });
-        });
+    draw_filter_bar(ui, &mut sidebar.filter, n_all, n_waiting, n_working);
 
     ui.add_space(8.0);
 
@@ -276,30 +270,18 @@ pub fn draw(
         if tab.pinned {
             pinned.push(i);
         } else {
-            let key = if tab.project_key.is_empty() || tab.project_key == "(no project)" {
-                "otras".into()
-            } else {
-                tab.project_key.clone()
-            };
+            let key = project_group_key(&tab.project_key);
             groups.entry(key).or_default().push(i);
         }
     }
 
-    // Pin launchers + archived to the bottom (midterm).
-    let footer_h = if sidebar.show_archived {
-        28.0 + 8.0 + (sidebar.archived.len() as f32 * 28.0).min(160.0) + 40.0
-    } else {
-        28.0 + 8.0 + 40.0
-    };
-    let list_h = (ui.available_height() - footer_h - 8.0).max(60.0);
-
     egui::ScrollArea::vertical()
         .id_salt("sidebar_sessions")
-        .max_height(list_h)
+        .max_height(scroll_h)
         .auto_shrink([false, false])
         .show(ui, |ui| {
             if !pinned.is_empty() {
-                draw_group_header(ui, "fijadas", false, false, || {});
+                draw_group_header(ui, "pinned", false, false, || {});
                 for i in &pinned {
                     draw_session_row(
                         ui,
@@ -330,14 +312,7 @@ pub fn draw(
 
             for key in keys {
                 let indices = groups.get(&key).cloned().unwrap_or_default();
-                let display = if key == "otras" {
-                    "otras".into()
-                } else {
-                    PathBuf::from(&key)
-                        .file_name()
-                        .map(|s| s.to_string_lossy().into_owned())
-                        .unwrap_or_else(|| key.clone())
-                };
+                let display = group_display_name(&key);
                 let collapsed = config.collapsed_groups.iter().any(|g| g == &key);
                 let key_clone = key.clone();
                 draw_group_header(ui, &display, collapsed, true, || {
@@ -366,31 +341,46 @@ pub fn draw(
             }
         });
 
-    // Fill remaining space so the footer sits at the bottom.
-    let leftover = (ui.available_height() - footer_h).max(0.0);
-    if leftover > 0.0 {
-        ui.add_space(leftover);
-    }
-
-    // --- Footer ---
-    let (sep_rect, _) = ui.allocate_exact_size(
-        Vec2::new(ui.available_width(), 1.0),
-        Sense::hover(),
+    // --- Footer (absolute y from sidebar_rect) ---
+    painter.hline(
+        sidebar_rect.x_range(),
+        divider_launcher_y,
+        Stroke::new(1.0, ui_theme::SIDEBAR_DIVIDER),
     );
-    ui.painter()
-        .rect_filled(sep_rect, 0.0, ui_theme::BORDER);
-    ui.add_space(8.0);
+    painter.hline(
+        sidebar_rect.x_range(),
+        divider_archived_y,
+        Stroke::new(1.0, ui_theme::SIDEBAR_DIVIDER),
+    );
 
-    // Launcher logos — hover shows name + install status + command
-    ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing = Vec2::splat(6.0);
+    let launcher_rect = Rect::from_min_max(
+        egui::pos2(sidebar_rect.left(), divider_launcher_y + 1.0),
+        egui::pos2(sidebar_rect.right(), divider_archived_y - 1.0),
+    );
+    ui.scope_builder(egui::UiBuilder::new().max_rect(launcher_rect), |ui| {
+        ui.set_width(ui.available_width());
         let launchers = config.launchers.clone();
         let cwd = workspace.active_tab().and_then(|t| t.cwd.clone());
+        let mut x = sidebar_rect.left() + 16.67;
+        let y_center = launcher_rect.center().y;
         for launcher in &launchers {
+            let pos = egui::pos2(x, y_center - 11.0);
+            let btn_rect = Rect::from_min_size(pos, Vec2::splat(22.0));
             let tip = logos.launcher_tooltip(&launcher.name, &launcher.command, &launcher.args);
             let installed = logos.is_installed(&launcher.command);
             let tex = logos.get(ui.ctx(), launcher.logo_key());
-            let resp = logo_or_icon_btn(ui, tex.as_ref(), launcher, installed).on_hover_text(tip);
+            paint_launcher_button(ui, btn_rect, tex.as_ref(), launcher, installed);
+            let resp = ui
+                .interact(btn_rect, ui.scope_id().with(&launcher.name), Sense::click())
+                .on_hover_text(tip);
+            if resp.hovered() {
+                ui.painter().rect_filled(
+                    btn_rect,
+                    CornerRadius::same(ui_theme::RADIUS_KBD),
+                    ui_theme::ROW_HOVER,
+                );
+                paint_launcher_button(ui, btn_rect, tex.as_ref(), launcher, installed);
+            }
             if resp.clicked() {
                 if installed {
                     let _ = launchers::run_launcher(ui.ctx(), workspace, launcher, cwd.clone());
@@ -402,85 +392,105 @@ pub fn draw(
                         format!("{} {}", launcher.command, launcher.args.join(" "))
                     };
                     let script = format!(
-                        "Write-Host '{name} no está instalado.' -ForegroundColor Yellow; Write-Host \"Comando: {cmd}\" -ForegroundColor Cyan",
+                        "Write-Host '{name} is not installed.' -ForegroundColor Yellow; Write-Host \"Command: {cmd}\" -ForegroundColor Cyan",
                         name = launcher.name.replace('\'', "''"),
                         cmd = cmd_line.replace('"', "'"),
                     );
                     let args = vec!["-NoLogo".into(), "-NoExit".into(), "-Command".into(), script];
                     let _ = workspace.open_command_tab(
                         ui.ctx(),
-                        &format!("{} (faltante)", launcher.name),
+                        &format!("{} (missing)", launcher.name),
                         &ps.program,
                         &args,
                         cwd.clone(),
                     );
                 }
             }
+            x += 35.0;
         }
     });
 
-    ui.add_space(6.0);
+    let archived_rect = Rect::from_min_max(
+        egui::pos2(sidebar_rect.left(), divider_archived_y + 1.0),
+        egui::pos2(sidebar_rect.right(), sidebar_rect.bottom()),
+    );
+    ui.scope_builder(egui::UiBuilder::new().max_rect(archived_rect), |ui| {
+        ui.set_width(ui.available_width());
+        let arch_count = sidebar.archived.len();
+        let row_h = 28.0;
+        ui.add_space(4.0);
+        let arch_resp = ui
+            .horizontal(|ui| {
+                ui.add_space(5.33);
+                ui.label(ui_theme::icon(Icon::Archive, 18.0, ui_theme::TEXT_MUTED));
+                ui.label(
+                    RichText::new("Archived")
+                        .size(ui_theme::SIZE_UI)
+                        .color(ui_theme::TEXT_MUTED),
+                );
+                ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                    ui.add_space(6.0);
+                    if arch_count > 0 {
+                        ui.label(
+                            RichText::new(format!("{arch_count}"))
+                                .size(ui_theme::SIZE_UI_SMALL)
+                                .color(ui_theme::TEXT_MUTED),
+                        );
+                    }
+                });
+            })
+            .response
+            .interact(Sense::click());
+        if arch_resp.clicked() {
+            sidebar.show_archived = !sidebar.show_archived;
+        }
 
-    // Archived row
-    let arch_count = sidebar.archived.len();
-    let arch_resp = ui
-        .horizontal(|ui| {
-            ui.label(ui_theme::icon(Icon::Archive, 14.0, ui_theme::TEXT_MUTED));
-            ui.label(ui_theme::text_title(format!("Archivadas {arch_count}")).color(ui_theme::TEXT_MUTED));
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(ui_theme::icon(Icon::ChevronRight, 12.0, ui_theme::TEXT_FAINT));
-            });
-        })
-        .response
-        .interact(Sense::click());
-    if arch_resp.clicked() {
-        sidebar.show_archived = !sidebar.show_archived;
-    }
-
-    if sidebar.show_archived {
-        egui::ScrollArea::vertical()
-            .id_salt("sidebar_archived")
-            .max_height(160.0)
-            .show(ui, |ui| {
-                for i in 0..sidebar.archived.len() {
-                    let name = sidebar.archived[i].name.clone();
-                    ui.horizontal(|ui| {
-                        ui.label(ui_theme::text_sub(name));
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if sidebar.confirm_delete == Some(i) {
-                                if ui
-                                    .add(egui::Button::new(ui_theme::text_kbd("Sí")).frame(false))
-                                    .clicked()
-                                {
-                                    forget = Some(i);
-                                    sidebar.confirm_delete = None;
+        if sidebar.show_archived {
+            let list_max = (archived_rect.height() - row_h - 8.0).max(40.0);
+            egui::ScrollArea::vertical()
+                .id_salt("sidebar_archived")
+                .max_height(list_max)
+                .show(ui, |ui| {
+                    for i in 0..sidebar.archived.len() {
+                        let name = sidebar.archived[i].name.clone();
+                        ui.horizontal(|ui| {
+                            ui.label(ui_theme::text_sub(name));
+                            ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                                if sidebar.confirm_delete == Some(i) {
+                                    if ui
+                                        .add(egui::Button::new(ui_theme::text_kbd("Yes")).frame(false))
+                                        .clicked()
+                                    {
+                                        forget = Some(i);
+                                        sidebar.confirm_delete = None;
+                                    }
+                                    if ui
+                                        .add(egui::Button::new(ui_theme::text_kbd("No")).frame(false))
+                                        .clicked()
+                                    {
+                                        sidebar.confirm_delete = None;
+                                    }
+                                    ui.label(ui_theme::text_kbd("Delete?"));
+                                } else {
+                                    if icon_btn(ui, Icon::Trash2, ui_theme::TEXT_MUTED, 20.0)
+                                        .on_hover_text("Delete")
+                                        .clicked()
+                                    {
+                                        sidebar.confirm_delete = Some(i);
+                                    }
+                                    if icon_btn(ui, Icon::ArchiveRestore, ui_theme::TEXT_MUTED, 20.0)
+                                        .on_hover_text("Restore")
+                                        .clicked()
+                                    {
+                                        restore = Some(i);
+                                    }
                                 }
-                                if ui
-                                    .add(egui::Button::new(ui_theme::text_kbd("No")).frame(false))
-                                    .clicked()
-                                {
-                                    sidebar.confirm_delete = None;
-                                }
-                                ui.label(ui_theme::text_kbd("¿Borrar?"));
-                            } else {
-                                if icon_btn(ui, Icon::Trash2, ui_theme::TEXT_MUTED, 20.0)
-                                    .on_hover_text("Borrar")
-                                    .clicked()
-                                {
-                                    sidebar.confirm_delete = Some(i);
-                                }
-                                if icon_btn(ui, Icon::ArchiveRestore, ui_theme::TEXT_MUTED, 20.0)
-                                    .on_hover_text("Restaurar")
-                                    .clicked()
-                                {
-                                    restore = Some(i);
-                                }
-                            }
+                            });
                         });
-                    });
-                }
-            });
-    }
+                    }
+                });
+        }
+    });
 
     // --- Apply deferred actions ---
     if let Some(key) = toggle_group {
@@ -610,57 +620,157 @@ fn matches_filter(status: SessionStatus, filter: SessionFilter) -> bool {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn segment(
+fn project_group_key(project_key: &str) -> String {
+    if project_key.is_empty() || project_key == "(no project)" {
+        return "other".into();
+    }
+    PathBuf::from(project_key)
+        .file_name()
+        .map(|s| s.to_string_lossy().to_lowercase())
+        .unwrap_or_else(|| "other".into())
+}
+
+fn group_display_name(key: &str) -> String {
+    if key == "other" {
+        "other".into()
+    } else {
+        key.to_string()
+    }
+}
+
+fn draw_filter_bar(
     ui: &mut Ui,
-    width: f32,
-    selected: bool,
-    label: &str,
-    count: usize,
-    leading: Option<(Icon, Color32)>,
-    tip: Option<&str>,
-    mut on_click: impl FnMut(),
+    filter: &mut SessionFilter,
+    n_all: usize,
+    n_waiting: usize,
+    n_working: usize,
 ) {
-    let fill = if selected {
-        ui_theme::SURFACE_SEL
-    } else {
-        Color32::TRANSPARENT
-    };
-    let text_color = if selected {
-        ui_theme::TEXT
-    } else {
-        ui_theme::TEXT_MUTED
-    };
-    let mut resp = Frame::NONE
-        .fill(fill)
+    if n_working > 0 {
+        ui.ctx()
+            .request_repaint_after(Duration::from_millis(100));
+    }
+    let time = ui.input(|i| i.time) as f32;
+    Frame::NONE
+        .fill(ui_theme::INPUT_BG)
+        .stroke(Stroke::new(1.0, ui_theme::INPUT_BORDER))
         .corner_radius(CornerRadius::same(ui_theme::RADIUS_ROW))
-        .inner_margin(egui::Margin::symmetric(4, 2))
+        .inner_margin(2.0)
         .show(ui, |ui| {
-            ui.set_min_width((width - 4.0).max(1.0));
-            ui.set_max_width((width - 2.0).max(1.0));
-            ui.set_max_height(24.0);
-            ui.horizontal_centered(|ui| {
-                if let Some((ic, c)) = leading {
-                    ui.label(ui_theme::icon(ic, 10.0, c));
-                }
-                ui.label(RichText::new(label).size(ui_theme::SIZE_SUB).color(text_color));
-                if count > 0 {
-                    ui.label(
-                        RichText::new(format!(" {count}"))
-                            .size(ui_theme::SIZE_SUB)
-                            .color(ui_theme::TEXT_MUTED),
+            ui.set_min_height(28.0);
+            let bar_rect = ui.max_rect();
+            let inner = bar_rect.shrink(2.0);
+            let seg_w = inner.width() / 3.0;
+            let painter = ui.painter();
+            let font = FontId::new(ui_theme::SIZE_UI, FontFamily::Proportional);
+            let font_small = FontId::new(ui_theme::SIZE_UI_SMALL, FontFamily::Proportional);
+            let segments = [
+                (SessionFilter::All, "All", n_all, 0u8),
+                (SessionFilter::Waiting, "Waiting", n_waiting, 1u8),
+                (SessionFilter::Working, "Working", n_working, 2u8),
+            ];
+            for (idx, (seg_filter, label, count, _)) in segments.iter().enumerate() {
+                let seg_rect = Rect::from_min_size(
+                    inner.min + Vec2::new(idx as f32 * seg_w, 0.0),
+                    Vec2::new(seg_w, inner.height()),
+                );
+                let selected = *filter == *seg_filter;
+                if selected {
+                    painter.rect_filled(
+                        seg_rect,
+                        CornerRadius::same(5),
+                        ui_theme::SEGMENT_ACTIVE,
                     );
                 }
-            });
-        })
-        .response
-        .interact(Sense::click());
-    if let Some(t) = tip {
-        resp = resp.on_hover_text(t);
-    }
-    if resp.clicked() {
-        on_click();
-    }
+                let id = ui.scope_id().with(format!("filter_{idx}"));
+                let resp = ui.interact(seg_rect, id, Sense::click());
+                if resp.clicked() {
+                    *filter = *seg_filter;
+                }
+                let text_color = if selected {
+                    ui_theme::TEXT
+                } else {
+                    ui_theme::TEXT_MUTED
+                };
+                let mut x = seg_rect.left() + 8.0;
+                let y_mid = seg_rect.center().y;
+                match seg_filter {
+                    SessionFilter::All => {
+                        painter.text(
+                            egui::pos2(x, y_mid),
+                            Align2::LEFT_CENTER,
+                            label,
+                            font.clone(),
+                            text_color,
+                        );
+                        x += painter
+                            .layout_no_wrap(label.to_string(), font.clone(), text_color)
+                            .size()
+                            .x;
+                        if *count > 0 {
+                            let c = format!(" {count}");
+                            painter.text(
+                                egui::pos2(x, y_mid),
+                                Align2::LEFT_CENTER,
+                                c,
+                                font_small.clone(),
+                                ui_theme::TEXT_MUTED,
+                            );
+                        }
+                    }
+                    SessionFilter::Waiting => {
+                        painter.circle_filled(
+                            egui::pos2(seg_rect.center().x - 14.0, y_mid),
+                            3.5,
+                            ui_theme::FILTER_WAITING_DOT,
+                        );
+                        painter.text(
+                            egui::pos2(seg_rect.center().x + 4.0, y_mid),
+                            Align2::LEFT_CENTER,
+                            label,
+                            font.clone(),
+                            text_color,
+                        );
+                        if *count > 0 {
+                            painter.text(
+                                egui::pos2(seg_rect.right() - 10.0, y_mid),
+                                Align2::RIGHT_CENTER,
+                                format!("{count}"),
+                                font_small.clone(),
+                                ui_theme::TEXT_MUTED,
+                            );
+                        }
+                    }
+                    SessionFilter::Working => {
+                        let ring_center = egui::pos2(seg_rect.center().x - 10.0, y_mid - 2.0);
+                        paint_dashed_ring(
+                            painter,
+                            ring_center,
+                            6.5,
+                            ui_theme::WORKING_RING,
+                            time,
+                            1.25,
+                            8,
+                        );
+                        painter.text(
+                            egui::pos2(seg_rect.center().x + 10.0, y_mid),
+                            Align2::LEFT_CENTER,
+                            label,
+                            font.clone(),
+                            text_color,
+                        );
+                        if *count > 0 {
+                            painter.text(
+                                egui::pos2(seg_rect.right() - 10.0, y_mid),
+                                Align2::RIGHT_CENTER,
+                                format!("{count}"),
+                                font_small.clone(),
+                                ui_theme::TEXT_MUTED,
+                            );
+                        }
+                    }
+                }
+            }
+        });
 }
 
 fn draw_group_header(
@@ -670,20 +780,24 @@ fn draw_group_header(
     interactive: bool,
     mut on_toggle: impl FnMut(),
 ) {
-    ui.add_space(12.0);
+    ui.add_space(8.67);
     let resp = ui
         .horizontal(|ui| {
-            ui.set_min_height(24.0);
+            ui.add_space(7.33);
+            ui.set_min_height(18.0);
             if interactive {
                 let chev = if collapsed {
                     Icon::ChevronRight
                 } else {
                     Icon::ChevronDown
                 };
-                // Only show chevron on hover via memory — paint faint always for simplicity.
                 ui.label(ui_theme::icon(chev, 12.0, ui_theme::TEXT_FAINT));
             }
-            ui.label(ui_theme::text_sub(name.to_string()));
+            ui.label(
+                RichText::new(name)
+                    .size(ui_theme::SIZE_UI_SMALL)
+                    .color(ui_theme::TEXT_MUTED),
+            );
         })
         .response;
     if interactive && resp.interact(Sense::click()).clicked() {
@@ -715,9 +829,9 @@ fn draw_session_row(
     let rel = relative_time(now.duration_since(tab.status_changed_at));
     let (sub, sub_color) = subtitle_for(tab);
 
-    ui.add_space(2.0);
+    ui.add_space(4.0);
     let fill = if selected {
-        ui_theme::SURFACE_SEL
+        ui_theme::ROW_SELECTED
     } else {
         Color32::TRANSPARENT
     };
@@ -725,58 +839,70 @@ fn draw_session_row(
     let frame = Frame::NONE
         .fill(fill)
         .corner_radius(CornerRadius::same(ui_theme::RADIUS_ROW))
-        .inner_margin(egui::Margin::symmetric(8, 6));
+        .inner_margin(Margin::symmetric(6, 4));
 
     let inner = frame.show(ui, |ui| {
-        ui.set_min_height(44.0 - 12.0);
+        ui.set_min_height(37.0);
         ui.horizontal(|ui| {
-            // Agent logo / icon + status badge
-            let icon_resp = if let Some(tex) = logo_tex.as_ref() {
-                let size = Vec2::splat(16.0);
-                let (rect, resp) = ui.allocate_exact_size(size, Sense::hover());
+            let icon_box = Vec2::splat(26.7);
+            let (icon_rect, icon_resp) = ui.allocate_exact_size(icon_box, Sense::hover());
+            let glyph_rect = egui::Rect::from_center_size(icon_rect.center(), Vec2::splat(18.0));
+            if let Some(tex) = logo_tex.as_ref() {
                 ui.painter().image(
                     tex.id(),
-                    rect,
-                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                    glyph_rect,
+                    Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
                     Color32::WHITE,
                 );
-                resp
             } else {
-                ui.label(ui_theme::icon(agent_icon, 16.0, agent_color))
-            };
-            let badge_center = egui::pos2(icon_resp.rect.right() - 2.0, icon_resp.rect.top() + 2.0);
-            paint_status_badge(ui, badge_center, tab.status, selected);
+                ui.painter().text(
+                    glyph_rect.center(),
+                    Align2::CENTER_CENTER,
+                    agent_icon.codepoint().to_string(),
+                    FontId::new(18.0, FontFamily::Name(ui_theme::FONT_ICONS.into())),
+                    agent_color,
+                );
+            }
+            let badge_center =
+                egui::pos2(icon_rect.right() - 3.0, icon_rect.top() + 4.0);
+            paint_status_badge(ui, badge_center, tab.status);
 
-            ui.add_space(6.0);
+            ui.add_space(4.0);
+            let time_w = 36.0;
+            let text_w = (ui.available_width() - time_w).max(40.0);
             ui.vertical(|ui| {
                 ui.spacing_mut().item_spacing.y = 2.0;
+                let title_font = FontId::new(ui_theme::SIZE_UI, FontFamily::Proportional);
                 if sidebar.rename_idx == Some(idx) {
                     let edit = ui.add(
                         egui::TextEdit::singleline(&mut sidebar.rename_buf)
-                            .desired_width(ui.available_width() - 40.0)
+                            .desired_width(text_w)
                             .font(egui::TextStyle::Body),
                     );
                     edit.request_focus();
                 } else {
+                    let title = ellipsize(ui, &tab.session_name, title_font.clone(), text_w);
                     ui.label(
-                        RichText::new(truncate(&tab.session_name, 28))
-                            .size(ui_theme::SIZE_TITLE)
+                        RichText::new(title)
+                            .size(ui_theme::SIZE_UI)
                             .color(ui_theme::TEXT),
                     );
                 }
+                let sub_font = FontId::new(ui_theme::SIZE_UI_SMALL, FontFamily::Proportional);
+                let sub_text = ellipsize(ui, &sub, sub_font.clone(), text_w);
                 ui.label(
-                    RichText::new(truncate(&sub, 36))
-                        .size(ui_theme::SIZE_SUB)
+                    RichText::new(sub_text)
+                        .size(ui_theme::SIZE_UI_SMALL)
                         .color(sub_color),
                 );
             });
 
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                // Hover actions replace relative time
-                let hovered = ui.rect_contains_pointer(ui.max_rect().expand(4.0));
+            ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                let hovered = icon_resp.hovered()
+                    || ui.rect_contains_pointer(ui.max_rect().expand(2.0));
                 if hovered {
                     if icon_btn(ui, Icon::Archive, ui_theme::TEXT_MUTED, 20.0)
-                        .on_hover_text("Archivar")
+                        .on_hover_text("Archive")
                         .clicked()
                     {
                         *archive_idx = Some(idx);
@@ -787,7 +913,7 @@ fn draw_session_row(
                         Icon::Pin
                     };
                     if icon_btn(ui, pin_ic, ui_theme::TEXT_MUTED, 20.0)
-                        .on_hover_text(if tab.pinned { "Desfijar" } else { "Fijar" })
+                        .on_hover_text(if tab.pinned { "Unpin" } else { "Pin" })
                         .clicked()
                     {
                         *toggle_pin = Some(idx);
@@ -804,7 +930,7 @@ fn draw_session_row(
         ui.painter().rect_filled(
             resp.rect,
             CornerRadius::same(ui_theme::RADIUS_ROW),
-            ui_theme::HOVER,
+            ui_theme::ROW_HOVER,
         );
     }
     if resp.clicked() {
@@ -814,20 +940,20 @@ fn draw_session_row(
         *start_rename = Some(idx);
     }
     resp.context_menu(|ui| {
-        if ui.button("Renombrar").clicked() {
+        if ui.button("Rename").clicked() {
             *start_rename = Some(idx);
             ui.close();
         }
-        let pin_label = if tab.pinned { "Desfijar" } else { "Fijar" };
+        let pin_label = if tab.pinned { "Unpin" } else { "Pin" };
         if ui.button(pin_label).clicked() {
             *toggle_pin = Some(idx);
             ui.close();
         }
-        if ui.button("Archivar").clicked() {
+        if ui.button("Archive").clicked() {
             *archive_idx = Some(idx);
             ui.close();
         }
-        if ui.button("Cerrar").clicked() {
+        if ui.button("Close").clicked() {
             *close_idx = Some(idx);
             ui.close();
         }
@@ -897,33 +1023,25 @@ fn agent_visual(
     (Icon::Terminal, ui_theme::TEXT_MUTED, None)
 }
 
-fn logo_or_icon_btn(
-    ui: &mut Ui,
+fn paint_launcher_button(
+    ui: &Ui,
+    rect: Rect,
     tex: Option<&TextureHandle>,
     launcher: &crate::config::Launcher,
     installed: bool,
-) -> egui::Response {
-    let size = 26.0;
-    let (rect, resp) = ui.allocate_exact_size(Vec2::splat(size), Sense::click());
-    if resp.hovered() {
-        ui.painter().rect_filled(
-            rect,
-            CornerRadius::same(ui_theme::RADIUS_KBD),
-            ui_theme::PRESSED,
-        );
-    }
-    let pad = 3.0;
-    let img_rect = rect.shrink(pad);
+) {
+    let painter = ui.painter();
+    let img_rect = rect.shrink(2.0);
     if let Some(tex) = tex {
         let tint = if installed {
             Color32::WHITE
         } else {
             Color32::from_white_alpha(110)
         };
-        ui.painter().image(
+        painter.image(
             tex.id(),
             img_rect,
-            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+            Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
             tint,
         );
     } else {
@@ -933,25 +1051,23 @@ fn logo_or_icon_btn(
         if !installed {
             color = color.gamma_multiply(0.45);
         }
-        ui.painter().text(
+        painter.text(
             rect.center(),
-            egui::Align2::CENTER_CENTER,
+            Align2::CENTER_CENTER,
             ic.codepoint().to_string(),
-            egui::FontId::new(
-                size * 0.55,
-                egui::FontFamily::Name(ui_theme::FONT_ICONS.into()),
-            ),
+            FontId::new(18.0, FontFamily::Name(ui_theme::FONT_ICONS.into())),
             color,
         );
     }
-    // Green ring when installed (midterm-style)
     if installed {
-        let badge = egui::pos2(rect.right() - 3.0, rect.top() + 3.0);
-        ui.painter()
-            .circle_filled(badge, 3.0, ui_theme::SURFACE_1);
-        ui.painter().circle_filled(badge, 2.2, ui_theme::OK);
+        let badge = egui::pos2(rect.right() - 2.0, rect.top() + 2.0);
+        painter.circle_filled(badge, 4.5, ui_theme::SIDEBAR_BG);
+        painter.circle_stroke(
+            badge,
+            4.5,
+            Stroke::new(2.0, ui_theme::LAUNCHER_BADGE),
+        );
     }
-    resp
 }
 
 fn subtitle_for(tab: &crate::layout::Tab) -> (String, Color32) {
@@ -965,51 +1081,48 @@ fn subtitle_for(tab: &crate::layout::Tab) -> (String, Color32) {
             if let Some(a) = activity_ok {
                 (a.clone(), ui_theme::TEXT_MUTED)
             } else {
-                ("Trabajando".into(), ui_theme::TEXT_MUTED)
+                ("Working".into(), ui_theme::TEXT_MUTED)
             }
         }
-        SessionStatus::Waiting => ("Esperando input".into(), ui_theme::WARN),
+        SessionStatus::Waiting => ("Waiting for input".into(), ui_theme::TEXT_MUTED),
         SessionStatus::Finished => {
             if let Some(code) = tab.exit_code {
                 if code == 0 {
-                    ("Listo".into(), ui_theme::OK)
+                    ("Done".into(), ui_theme::OK)
                 } else {
-                    (format!("Salió (código {code})"), ui_theme::ERROR)
+                    (format!("Exited (code {code})"), ui_theme::ERROR)
                 }
             } else {
-                ("Listo".into(), ui_theme::OK)
+                ("Done".into(), ui_theme::OK)
             }
         }
     }
 }
 
-fn paint_status_badge(ui: &Ui, center: egui::Pos2, status: SessionStatus, selected: bool) {
-    let ring = if selected {
-        ui_theme::SURFACE_SEL
-    } else {
-        ui_theme::SURFACE_1
-    };
-    let r = 3.5;
+fn paint_status_badge(ui: &Ui, center: egui::Pos2, status: SessionStatus) {
+    let ring_bg = ui_theme::SIDEBAR_BG;
+    let time = ui.input(|i| i.time) as f32;
+    let painter = ui.painter();
     match status {
         SessionStatus::Active => {
-            // loader-circle: draw rotating arc via icon would need font; use pulsing ring
-            let t = ui.input(|i| i.time) as f32;
-            let color = ui_theme::TEXT_MUTED;
-            ui.painter().circle_filled(center, r + 1.5, ring);
-            ui.painter().circle_stroke(
+            painter.circle_filled(center, 6.0, ring_bg);
+            paint_dashed_ring(
+                painter,
                 center,
-                r,
-                Stroke::new(1.5, color.gamma_multiply(0.5 + 0.5 * t.sin().abs())),
+                4.5,
+                ui_theme::WORKING_RING_DIM,
+                time,
+                1.0,
+                8,
             );
         }
         SessionStatus::Waiting => {
-            ui.painter().circle_filled(center, r + 1.5, ring);
-            ui.painter().circle_filled(center, r, ui_theme::WARN);
+            painter.circle_filled(center, 6.0, ring_bg);
+            painter.circle_filled(center, 4.0, ui_theme::WAITING);
         }
         SessionStatus::Finished => {
-            let color = ui_theme::OK;
-            ui.painter().circle_filled(center, r + 1.5, ring);
-            ui.painter().circle_filled(center, r, color);
+            painter.circle_filled(center, 5.5, ring_bg);
+            painter.circle_filled(center, 4.0, ui_theme::STATUS_DOT_OK);
         }
     }
 }
@@ -1035,11 +1148,16 @@ fn icon_btn(ui: &mut Ui, kind: Icon, color: Color32, size: f32) -> egui::Respons
 
 fn kbd_chip(ui: &mut Ui, label: &str) {
     Frame::NONE
-        .stroke(Stroke::new(1.0, ui_theme::BORDER))
+        .fill(ui_theme::KBD_BG)
+        .stroke(Stroke::new(1.0, ui_theme::KBD_BORDER))
         .corner_radius(CornerRadius::same(ui_theme::RADIUS_KBD))
-        .inner_margin(egui::Margin::symmetric(4, 1))
+        .inner_margin(Margin::symmetric(5, 2))
         .show(ui, |ui| {
-            ui.label(ui_theme::text_kbd(label));
+            ui.label(
+                RichText::new(label)
+                    .size(ui_theme::SIZE_UI)
+                    .color(ui_theme::TEXT_MUTED),
+            );
         });
 }
 
@@ -1056,12 +1174,62 @@ fn relative_time(d: Duration) -> String {
     }
 }
 
-fn truncate(s: &str, max: usize) -> String {
-    let count = s.chars().count();
-    if count <= max {
-        s.to_string()
-    } else {
-        let t: String = s.chars().take(max.saturating_sub(1)).collect();
-        format!("{t}…")
+fn ellipsize(ui: &Ui, text: &str, font_id: FontId, max_width: f32) -> String {
+    let galley = ui
+        .painter()
+        .layout_no_wrap(text.to_owned(), font_id.clone(), ui_theme::TEXT);
+    if galley.size().x <= max_width {
+        return text.to_string();
+    }
+    const ELLIPSIS: &str = "…";
+    let mut end = text.chars().count();
+    while end > 0 {
+        let prefix: String = text.chars().take(end).collect();
+        let trial = format!("{prefix}{ELLIPSIS}");
+        let g = ui
+            .painter()
+            .layout_no_wrap(trial.clone(), font_id.clone(), ui_theme::TEXT);
+        if g.size().x <= max_width {
+            return trial;
+        }
+        end -= 1;
+    }
+    ELLIPSIS.to_string()
+}
+
+fn paint_button_top_highlight(painter: &egui::Painter, rect: Rect, radius: u8) {
+    let inset = radius as f32 + 1.0;
+    if rect.width() > inset * 2.0 {
+        painter.hline(
+            rect.left() + inset..=rect.right() - inset,
+            rect.top() + 1.0,
+            Stroke::new(1.0, ui_theme::BUTTON_HIGHLIGHT),
+        );
+    }
+}
+
+fn paint_dashed_ring(
+    painter: &egui::Painter,
+    center: egui::Pos2,
+    radius: f32,
+    color: Color32,
+    time: f32,
+    stroke_width: f32,
+    n_dashes: u32,
+) {
+    let rot = time * 1.8;
+    let arc_span = std::f32::consts::TAU / n_dashes as f32;
+    let dash = arc_span * 0.55;
+    for i in 0..n_dashes {
+        let a0 = rot + i as f32 * arc_span;
+        let a1 = a0 + dash;
+        let steps = 3usize;
+        for s in 0..steps {
+            let t0 = a0 + (a1 - a0) * s as f32 / steps as f32;
+            let t1 = a0 + (a1 - a0) * (s + 1) as f32 / steps as f32;
+            let p0 = center + Vec2::new(t0.cos(), t0.sin()) * radius;
+            let p1 = center + Vec2::new(t1.cos(), t1.sin()) * radius;
+            painter.line_segment([p0, p1], Stroke::new(stroke_width, color));
+        }
     }
 }
