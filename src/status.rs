@@ -5,14 +5,25 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 /// Track previous statuses so we only notify on transitions.
-#[derive(Default)]
 pub struct StatusTracker {
     prev: HashMap<u64, SessionStatus>,
+    /// Ignore toasts while the window is still settling (focus flashes, PATH probes).
+    started: Instant,
+}
+
+impl Default for StatusTracker {
+    fn default() -> Self {
+        Self {
+            prev: HashMap::new(),
+            started: Instant::now(),
+        }
+    }
 }
 
 impl StatusTracker {
     pub fn tick(&mut self, workspace: &mut Workspace, config: &Config, window_focused: bool) {
         let timeout = Duration::from_secs(config.waiting_timeout_secs.max(1));
+        let notify_ok = self.started.elapsed() >= Duration::from_secs(3);
         for tab in &mut workspace.tabs {
             let mut any_alive = false;
             let mut any_waiting = false;
@@ -59,10 +70,12 @@ impl StatusTracker {
                 .unwrap_or(SessionStatus::Active);
             if prev != new_status {
                 tab.status_changed_at = Instant::now();
-                if matches!(
-                    new_status,
-                    SessionStatus::Waiting | SessionStatus::Finished
-                ) {
+                if notify_ok
+                    && matches!(
+                        new_status,
+                        SessionStatus::Waiting | SessionStatus::Finished
+                    )
+                {
                     notify::session_status_changed(&tab.session_name, new_status, window_focused);
                 }
             }

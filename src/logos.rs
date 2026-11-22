@@ -1,23 +1,22 @@
 use egui::{ColorImage, Context, TextureHandle, TextureOptions};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::process::Command;
+
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
+/// Hide the console window that `where.exe` would otherwise flash on Windows.
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// Raster logos from `assets/logos/` (PNG / WebP). SVGs fall back until converted.
+#[derive(Default)]
 pub struct LogoAtlas {
     textures: HashMap<String, TextureHandle>,
     missing: HashMap<String, bool>,
     /// Cached `where.exe` results keyed by command name.
     installed: HashMap<String, bool>,
-}
-
-impl Default for LogoAtlas {
-    fn default() -> Self {
-        Self {
-            textures: HashMap::new(),
-            missing: HashMap::new(),
-            installed: HashMap::new(),
-        }
-    }
 }
 
 impl LogoAtlas {
@@ -138,18 +137,15 @@ fn load_texture(ctx: &Context, name: &str, path: &Path) -> Option<TextureHandle>
 }
 
 /// `where.exe` check — true if the command resolves on PATH.
+/// Must use `CREATE_NO_WINDOW` on Windows or each probe flashes a console ("pum pum").
 pub fn command_installed(command: &str) -> bool {
-    let exe = if command.contains('.') || command.contains('\\') || command.contains('/') {
-        command.to_string()
-    } else {
-        // Try bare name; Windows where.exe finds .exe/.cmd/.bat
-        command.to_string()
-    };
-    std::process::Command::new("where.exe")
-        .arg(&exe)
+    let mut cmd = Command::new("where.exe");
+    cmd.arg(command)
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+        .stderr(std::process::Stdio::null());
+    #[cfg(windows)]
+    {
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd.status().map(|s| s.success()).unwrap_or(false)
 }

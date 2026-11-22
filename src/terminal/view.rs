@@ -1,5 +1,6 @@
 use super::backend::{CellMetrics, TerminalSession, VisibleCell};
 use super::bindings::{map_key, KeyAction};
+use crate::ui_theme::{self, CELL_H, CELL_W, PANE_PAD_X, PANE_PAD_Y};
 use alacritty_terminal::index::{Column, Line, Point};
 use alacritty_terminal::selection::{SelectionRange, SelectionType};
 use alacritty_terminal::term::cell::Flags;
@@ -12,9 +13,6 @@ use egui::{
 use std::collections::BTreeMap;
 
 const FONT_FAMILY: egui::FontFamily = egui::FontFamily::Monospace;
-/// Keep close to glyph height so TUI apps (OpenCode, etc.) align mouse + boxes.
-/// Pixel-snapping below still removes hairline gaps between rows.
-const LINE_HEIGHT: f32 = 1.0;
 
 pub struct TerminalView;
 
@@ -27,10 +25,17 @@ impl TerminalView {
     ) -> egui::Response {
         let available = ui.available_size();
         let (response, painter) = ui.allocate_painter(available, Sense::click_and_drag());
+        let ppp = ui.ctx().pixels_per_point();
 
-        let font_id = FontId::new(font_size.max(8.0), FONT_FAMILY);
-        let metrics = measure_cell(ui, &font_id);
-        session.resize(response.rect.width(), response.rect.height(), metrics);
+        // Midterm: Hack at 14.33 with fixed cell metrics (config size is for scroll only).
+        let paint_size = ui_theme::TERM_FONT_SIZE;
+        let font_id = FontId::new(paint_size, FONT_FAMILY);
+        let metrics = CellMetrics {
+            width: CELL_W,
+            height: CELL_H,
+        };
+        let content = content_rect(response.rect, ppp);
+        session.resize(content.width(), content.height(), metrics);
 
         // Only take focus on click/drag — never every frame, or sidebar search
         // and other TextEdits can never keep the keyboard.
@@ -60,21 +65,34 @@ impl TerminalView {
                 });
             }
             // Keys only when the terminal widget has focus (sidebar search can keep it).
-            handle_input(ui, &response, session, font_size, response.has_focus());
+            handle_input(
+                ui,
+                &response,
+                session,
+                font_size,
+                response.has_focus(),
+                content,
+            );
         }
-        paint_grid(ui, &response, &painter, session, &font_id, metrics);
+        paint_grid(ui, &response, &painter, session, &font_id, metrics, content);
         response
     }
 }
 
-fn measure_cell(ui: &Ui, font_id: &FontId) -> CellMetrics {
-    let galley = ui.fonts_mut(|f| f.layout_no_wrap("W".to_owned(), font_id.clone(), Color32::WHITE));
-    let ppp = ui.ctx().pixels_per_point();
-    // Round to whole physical pixels so truecolor rows / box-drawing join without gaps.
-    let width = ((galley.size().x.max(1.0) * ppp).round() / ppp).max(1.0 / ppp);
-    let height =
-        ((galley.size().y.max(1.0) * LINE_HEIGHT * ppp).round() / ppp).max(1.0 / ppp);
-    CellMetrics { width, height }
+/// Pane content area after midterm padding, snapped to physical pixels.
+fn content_rect(pane: Rect, ppp: f32) -> Rect {
+    Rect::from_min_max(
+        Pos2::new(
+            ui_theme::snap(pane.min.x + PANE_PAD_X, ppp),
+            ui_theme::snap(pane.min.y + PANE_PAD_Y, ppp),
+        ),
+        pane.max,
+    )
+}
+
+/// Convert a screen position to content-local coordinates (padding subtracted).
+fn to_content_local(pos: Pos2, content: Rect) -> Vec2 {
+    pos - content.min
 }
 
 fn handle_input(
@@ -83,6 +101,7 @@ fn handle_input(
     session: &mut TerminalSession,
     font_size: f32,
     keyboard_focus: bool,
+    content: Rect,
 ) {
     let modifiers = ui.input(|i| i.modifiers);
     let mode = session.snapshot().mode;
@@ -90,9 +109,9 @@ fn handle_input(
 
     // Pointer always when this pane is the interaction target.
     if mouse_reporting {
-        handle_mouse_report(ui, response, session);
+        handle_mouse_report(ui, response, session, content);
     } else if keyboard_focus || response.clicked() || response.dragged() {
-        handle_selection_pointer(ui, response, session, font_size);
+        handle_selection_pointer(ui, response, session, font_size, content);
     }
 
     if !keyboard_focus {
@@ -207,7 +226,12 @@ fn handle_wheel(
     }
 }
 
-fn handle_mouse_report(ui: &Ui, response: &egui::Response, session: &mut TerminalSession) {
+fn handle_mouse_report(
+    ui: &Ui,
+    response: &egui::Response,
+    session: &mut TerminalSession,
+    content: Rect,
+) {
     let mode = session.snapshot().mode;
     let events: Vec<egui::Event> = ui.input(|i| i.events.clone());
     for event in events {
@@ -218,7 +242,7 @@ fn handle_mouse_report(ui: &Ui, response: &egui::Response, session: &mut Termina
                 pressed,
                 ..
             } if response.rect.contains(pos) => {
-                let local = pos - response.rect.min;
+                let local = to_content_local(pos, content);
                 let (col, row) = session.cell_at(local.x, local.y);
                 let btn = match button {
                     egui::PointerButton::Primary => 0,
@@ -232,7 +256,7 @@ fn handle_mouse_report(ui: &Ui, response: &egui::Response, session: &mut Termina
                 if response.rect.contains(pos)
                     && mode.intersects(TermMode::MOUSE_DRAG | TermMode::MOUSE_MOTION) =>
             {
-                let local = pos - response.rect.min;
+                let local = to_content_local(pos, content);
                 let (col, row) = session.cell_at(local.x, local.y);
                 let pressed = ui.input(|i| i.pointer.any_down());
                 let btn = if ui.input(|i| i.pointer.button_down(egui::PointerButton::Primary)) {
@@ -257,7 +281,7 @@ fn handle_mouse_report(ui: &Ui, response: &egui::Response, session: &mut Termina
                 if !response.rect.contains(pos) {
                     continue;
                 }
-                let local = pos - response.rect.min;
+                let local = to_content_local(pos, content);
                 let (col, row) = session.cell_at(local.x, local.y);
                 let btn = if delta.y > 0.0 { 64 } else { 65 };
                 session.report_mouse(btn, col, row, true, false);
@@ -272,6 +296,7 @@ fn handle_selection_pointer(
     response: &egui::Response,
     session: &mut TerminalSession,
     font_size: f32,
+    content: Rect,
 ) {
     let modifiers = ui.input(|i| i.modifiers);
 
@@ -289,14 +314,14 @@ fn handle_selection_pointer(
 
     if response.triple_clicked() {
         if let Some(pos) = response.interact_pointer_pos() {
-            let local = pos - response.rect.min;
+            let local = to_content_local(pos, content);
             session.start_selection(local.x, local.y, SelectionType::Lines);
         }
         return;
     }
     if response.double_clicked() {
         if let Some(pos) = response.interact_pointer_pos() {
-            let local = pos - response.rect.min;
+            let local = to_content_local(pos, content);
             session.start_selection(local.x, local.y, SelectionType::Semantic);
         }
         return;
@@ -304,7 +329,7 @@ fn handle_selection_pointer(
 
     if response.drag_started() {
         if let Some(pos) = response.interact_pointer_pos() {
-            let local = pos - response.rect.min;
+            let local = to_content_local(pos, content);
             if modifiers.shift && session.has_selection() {
                 session.update_selection(local.x, local.y);
             } else {
@@ -313,7 +338,7 @@ fn handle_selection_pointer(
         }
     } else if response.dragged() {
         if let Some(pos) = ui.input(|i| i.pointer.interact_pos()) {
-            let local = pos - response.rect.min;
+            let local = to_content_local(pos, content);
             // Autoscroll when dragging past the top/bottom edge.
             if pos.y < response.rect.min.y {
                 let steps = ((response.rect.min.y - pos.y) / font_size).ceil() as i32;
@@ -326,7 +351,7 @@ fn handle_selection_pointer(
         }
     } else if response.clicked() {
         if let Some(pos) = response.interact_pointer_pos() {
-            let local = pos - response.rect.min;
+            let local = to_content_local(pos, content);
             if modifiers.shift {
                 if session.has_selection() {
                     session.update_selection(local.x, local.y);
@@ -347,12 +372,14 @@ fn paint_grid(
     session: &mut TerminalSession,
     font_id: &FontId,
     metrics: CellMetrics,
+    content_area: Rect,
 ) {
     let colors = session.colors.clone();
-    let content = session.sync();
-    let origin = response.rect.min;
+    let grid = session.sync();
+    let origin = content_area.min;
     let cell_w = metrics.width;
     let cell_h = metrics.height;
+    let ppp = ui.ctx().pixels_per_point();
 
     let mut shapes = vec![Shape::Rect(RectShape::filled(
         response.rect,
@@ -360,30 +387,30 @@ fn paint_grid(
         colors.background,
     ))];
 
-    let display_offset = content.display_offset as i32;
-    let cursor_point = content.cursor;
-    let app_cursor = content.mode.contains(TermMode::APP_CURSOR);
+    let display_offset = grid.display_offset as i32;
+    let cursor_point = grid.cursor;
+    let app_cursor = grid.mode.contains(TermMode::APP_CURSOR);
     // TUIs (OpenCode, etc.) draw their own cursor on the alternate screen.
-    let alt_screen = content.mode.contains(TermMode::ALT_SCREEN);
-    let selection = content.selection;
+    let alt_screen = grid.mode.contains(TermMode::ALT_SCREEN);
+    let selection = grid.selection;
 
     let mut by_line: BTreeMap<i32, Vec<&VisibleCell>> = BTreeMap::new();
-    for cell in &content.cells {
+    for cell in &grid.cells {
         let row = cell.line + display_offset;
         by_line.entry(row).or_default().push(cell);
     }
 
-    let ppp = ui.ctx().pixels_per_point();
-    let snap = |v: f32| (v * ppp).round() / ppp;
-
     for (row, cells) in &by_line {
-        let y = snap(origin.y + cell_h * (*row as f32));
+        // row_top(n) snapped; bottom = next row's top (no seams).
+        let y = ui_theme::term_row_top(origin.y, *row, ppp);
+        let y_next = ui_theme::term_row_top(origin.y, *row + 1, ppp);
+        let row_h = (y_next - y).max(cell_h);
         paint_row_backgrounds(
             &mut shapes,
             origin.x,
             y,
             cell_w,
-            cell_h,
+            row_h,
             cells,
             selection,
             &colors,
@@ -400,6 +427,7 @@ fn paint_grid(
             cells,
             selection,
             &colors,
+            ppp,
         );
         paint_row_text(
             ui,
@@ -414,20 +442,39 @@ fn paint_grid(
             app_cursor,
             cursor_point,
             !alt_screen,
+            ppp,
         );
-        paint_row_underlines(&mut shapes, origin.x, y, cell_w, cell_h, cells, &colors);
+        paint_row_underlines(
+            &mut shapes,
+            origin.x,
+            y,
+            cell_w,
+            cell_h,
+            cells,
+            &colors,
+            ppp,
+        );
     }
 
     if !alt_screen {
         let cursor_row = cursor_point.line.0 + display_offset;
-        let cursor_on_skipped = !content.cells.iter().any(|c| {
+        let cursor_on_skipped = !grid.cells.iter().any(|c| {
             c.line == cursor_point.line.0 && c.col as usize == cursor_point.column.0
         });
         let window_focused = ui.input(|i| i.focused);
         if cursor_on_skipped {
-            let x = snap(origin.x + cell_w * cursor_point.column.0 as f32);
-            let y = snap(origin.y + cell_h * cursor_row as f32);
-            paint_cursor(&mut shapes, x, y, cell_w, cell_h, colors.cursor, window_focused);
+            let x = ui_theme::term_col_x(origin.x, cursor_point.column.0 as u16, ppp);
+            let y = ui_theme::term_row_top(origin.y, cursor_row, ppp);
+            let y_next = ui_theme::term_row_top(origin.y, cursor_row + 1, ppp);
+            paint_cursor(
+                &mut shapes,
+                x,
+                y,
+                cell_w,
+                (y_next - y).max(cell_h),
+                colors.cursor,
+                window_focused,
+            );
         }
     }
 
@@ -476,6 +523,7 @@ fn paint_row_box_drawing(
     cells: &[&VisibleCell],
     selection: Option<SelectionRange>,
     colors: &super::theme::TermColors,
+    ppp: f32,
 ) {
     for cell in cells {
         if !is_box_drawing(cell.c) {
@@ -489,8 +537,10 @@ fn paint_row_box_drawing(
             Point::new(Line(0), Column(0)),
             false,
         );
-        let x = origin_x + cell_w * cell.col as f32;
-        let w = cell_w * width_cells;
+        let x = ui_theme::term_col_x(origin_x, cell.col, ppp);
+        let x_end =
+            ui_theme::term_col_x(origin_x, cell.col.saturating_add(width_cells as u16), ppp);
+        let w = (x_end - x).max(cell_w * width_cells);
         let cx = x + w * 0.5;
         let cy = y + cell_h * 0.5;
         let stroke = Stroke::new(1.25, fg);
@@ -625,7 +675,6 @@ fn paint_row_backgrounds(
     ppp: f32,
     paint_host_cursor: bool,
 ) {
-    let snap = |v: f32| (v * ppp).round() / ppp;
     let mut sorted: Vec<&VisibleCell> = cells.to_vec();
     sorted.sort_by_key(|c| c.col);
 
@@ -639,8 +688,8 @@ fn paint_row_backgrounds(
         if bg != colors.background && x1 > x0 {
             shapes.push(Shape::Rect(RectShape::filled(
                 Rect::from_min_max(
-                    Pos2::new(snap(x0), y),
-                    Pos2::new(snap(x1) + overlap, y + cell_h + overlap),
+                    Pos2::new(ui_theme::snap(x0, ppp), y),
+                    Pos2::new(ui_theme::snap(x1, ppp) + overlap, y + cell_h + overlap),
                 ),
                 CornerRadius::ZERO,
                 bg,
@@ -651,14 +700,15 @@ fn paint_row_backgrounds(
     for cell in &sorted {
         let (_fg, bg, width_cells) =
             cell_colors(cell, selection, colors, false, cursor_point, paint_host_cursor);
-        let x = origin_x + cell_w * cell.col as f32;
-        let w = cell_w * width_cells;
+        let x = ui_theme::term_col_x(origin_x, cell.col, ppp);
+        let x_end = ui_theme::term_col_x(origin_x, cell.col.saturating_add(width_cells as u16), ppp);
+        let w = x_end - x;
 
         if paint_host_cursor
             && cursor_point.line.0 == cell.line
             && cursor_point.column.0 == cell.col as usize
         {
-            paint_cursor(shapes, snap(x), y, cell_w, cell_h, colors.cursor, true);
+            paint_cursor(shapes, x, y, cell_w, cell_h, colors.cursor, true);
         }
 
         match run_bg {
@@ -689,7 +739,7 @@ fn paint_row_text(
     shapes: &mut Vec<Shape>,
     origin_x: f32,
     y: f32,
-    cell_w: f32,
+    _cell_w: f32,
     cells: &[&VisibleCell],
     selection: Option<SelectionRange>,
     colors: &super::theme::TermColors,
@@ -697,6 +747,7 @@ fn paint_row_text(
     app_cursor: bool,
     cursor_point: Point,
     apply_host_cursor: bool,
+    ppp: f32,
 ) {
     let mut sorted: Vec<&VisibleCell> = cells
         .iter()
@@ -729,7 +780,7 @@ fn paint_row_text(
         job.wrap.max_width = f32::INFINITY;
         job.wrap.break_anywhere = false;
 
-        let run_x = origin_x + cell_w * start.col as f32;
+        let run_x = ui_theme::term_col_x(origin_x, start.col, ppp);
         let mut expected_col = start.col;
         let mut text = String::new();
 
@@ -774,6 +825,7 @@ fn paint_row_text(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn paint_row_underlines(
     shapes: &mut Vec<Shape>,
     origin_x: f32,
@@ -782,14 +834,17 @@ fn paint_row_underlines(
     cell_h: f32,
     cells: &[&VisibleCell],
     colors: &super::theme::TermColors,
+    ppp: f32,
 ) {
     for cell in cells {
         if !cell.flags.contains(Flags::UNDERLINE) {
             continue;
         }
         let wide = cell.flags.contains(Flags::WIDE_CHAR);
-        let width = if wide { cell_w * 2.0 } else { cell_w };
-        let x = origin_x + cell_w * cell.col as f32;
+        let cells_w = if wide { 2u16 } else { 1 };
+        let x = ui_theme::term_col_x(origin_x, cell.col, ppp);
+        let x_end = ui_theme::term_col_x(origin_x, cell.col.saturating_add(cells_w), ppp);
+        let width = (x_end - x).max(if wide { cell_w * 2.0 } else { cell_w });
         let y2 = y + cell_h - 1.0;
         let fg = colors.resolve(cell.fg);
         shapes.push(Shape::LineSegment {

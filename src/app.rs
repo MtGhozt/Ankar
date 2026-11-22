@@ -537,9 +537,7 @@ fn draw_tab_bar(
                     ui_theme::TEXT_MUTED,
                 );
             }
-            if close_resp.clicked() {
-                close_idx = Some(i);
-            } else if resp.middle_clicked() {
+            if close_resp.clicked() || resp.middle_clicked() {
                 close_idx = Some(i);
             } else if resp.clicked() && !close_resp.hovered() {
                 switch_to = Some(i);

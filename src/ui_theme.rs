@@ -1,8 +1,11 @@
 use egui::{
     Color32, Context, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, RichText,
-    Shadow, Stroke, Style, Theme, ThemePreference, Visuals,
+    Shadow, Stroke, Style, TextStyle, Theme, ThemePreference, Visuals,
 };
+use std::collections::BTreeMap;
 use std::sync::Arc;
+#[cfg(debug_assertions)]
+use std::sync::atomic::{AtomicBool, Ordering};
 
 // --- Surfaces (midterm) ---
 pub const BG: Color32 = Color32::from_rgb(0x00, 0x00, 0x00);
@@ -30,10 +33,43 @@ pub const OK: Color32 = Color32::from_rgb(0x7A, 0xA5, 0x85);
 pub const WARN: Color32 = Color32::from_rgb(0xE1, 0xC1, 0x6B);
 pub const ERROR: Color32 = Color32::from_rgb(0xE5, 0x69, 0x5B);
 pub const ACCENT: Color32 = Color32::from_rgb(0x4D, 0x9F, 0xFB);
-/// Type scale (logical px). Prefer helpers over ad-hoc `.size()`.
-pub const SIZE_TITLE: f32 = 13.0;
-pub const SIZE_SUB: f32 = 12.0;
-pub const SIZE_KBD: f32 = 11.0;
+
+/// UI type scale (logical px). Only these two sizes for chrome text.
+pub const SIZE_UI: f32 = 13.0;
+pub const SIZE_UI_SMALL: f32 = 12.0;
+/// Aliases kept for call sites; same values as midterm `ui` / `ui_small`.
+pub const SIZE_TITLE: f32 = SIZE_UI;
+pub const SIZE_SUB: f32 = SIZE_UI_SMALL;
+pub const SIZE_KBD: f32 = SIZE_UI_SMALL;
+
+/// Terminal (Hack) size and fixed midterm cell metrics (logical px).
+pub const TERM_FONT_SIZE: f32 = 14.33;
+pub const CELL_W: f32 = 8.627;
+pub const CELL_H: f32 = 17.733;
+/// Padding inside each pane before col 0 / row 0.
+pub const PANE_PAD_X: f32 = 14.0;
+pub const PANE_PAD_Y: f32 = 15.33;
+
+/// Round a logical coordinate onto a physical pixel boundary.
+#[inline]
+pub fn snap(v: f32, ppp: f32) -> f32 {
+    if ppp <= 0.0 {
+        return v;
+    }
+    (v * ppp).round() / ppp
+}
+
+/// Row top for terminal row `n` (0-based), given the pane's content top (after pad).
+#[inline]
+pub fn term_row_top(content_top: f32, row: i32, ppp: f32) -> f32 {
+    snap(content_top + row as f32 * CELL_H, ppp)
+}
+
+/// Glyph left edge for column `col` (0-based).
+#[inline]
+pub fn term_col_x(content_left: f32, col: u16, ppp: f32) -> f32 {
+    snap(content_left + col as f32 * CELL_W, ppp)
+}
 
 pub const RADIUS_CTRL: u8 = 8;
 pub const RADIUS_ROW: u8 = 6;
@@ -180,6 +216,7 @@ pub fn popup_shadow() -> Shadow {
 }
 
 /// Force dark theme and register Inter + icon fonts.
+/// Does **not** call `set_pixels_per_point` — eframe keeps the monitor's native DPI.
 pub fn apply(ctx: &Context) {
     install_fonts(ctx);
     ctx.set_theme(ThemePreference::Dark);
@@ -195,7 +232,19 @@ pub fn apply(ctx: &Context) {
     for theme in [Theme::Dark, Theme::Light] {
         ctx.style_mut_of(theme, |s| {
             apply_spacing(s);
+            apply_text_styles(s);
         });
+    }
+
+    #[cfg(debug_assertions)]
+    {
+        static LOGGED_PPP: AtomicBool = AtomicBool::new(false);
+        if !LOGGED_PPP.swap(true, Ordering::Relaxed) {
+            log::debug!(
+                "pixels_per_point = {:.3} (native DPI; not overridden)",
+                ctx.pixels_per_point()
+            );
+        }
     }
 }
 
@@ -204,6 +253,17 @@ fn apply_spacing(s: &mut Style) {
     s.spacing.button_padding = egui::vec2(10.0, 5.0);
     s.spacing.interact_size.y = 30.0;
     s.spacing.scroll = egui::style::ScrollStyle::floating();
+}
+
+fn apply_text_styles(s: &mut Style) {
+    use FontFamily::{Monospace, Proportional};
+    s.text_styles = BTreeMap::from([
+        (TextStyle::Small, FontId::new(SIZE_UI_SMALL, Proportional)),
+        (TextStyle::Body, FontId::new(SIZE_UI, Proportional)),
+        (TextStyle::Button, FontId::new(SIZE_UI, Proportional)),
+        (TextStyle::Heading, FontId::new(SIZE_UI, Proportional)),
+        (TextStyle::Monospace, FontId::new(TERM_FONT_SIZE, Monospace)),
+    ]);
 }
 
 fn install_fonts(ctx: &Context) {
@@ -228,20 +288,26 @@ fn install_fonts(ctx: &Context) {
         ))),
     );
 
-    // Proportional = Inter first, then egui fallbacks.
-    fonts
+    // Start with Inter Medium for all UI text (egui strokes lighter than SF on macOS).
+    // Keep Inter Regular + egui fallbacks after it; drop Ubuntu-Light from the chain.
+    let proportional = fonts
         .families
         .entry(FontFamily::Proportional)
-        .or_default()
-        .insert(0, "Inter".to_owned());
+        .or_default();
+    proportional.retain(|name| name != "Ubuntu-Light");
+    proportional.insert(0, "Inter".to_owned());
+    proportional.insert(0, "InterMedium".to_owned());
 
-    fonts
-        .families
-        .insert(FontFamily::Name(FONT_MEDIUM.into()), vec!["InterMedium".into()]);
+    // Named Medium family for call sites that opt in explicitly (same face for now).
+    fonts.families.insert(
+        FontFamily::Name(FONT_MEDIUM.into()),
+        vec!["InterMedium".into(), "Inter".into()],
+    );
     fonts
         .families
         .insert(FontFamily::Name(FONT_ICONS.into()), vec!["AnkarIcons".into()]);
 
+    // Monospace stays egui's embedded Hack (default_fonts feature).
     ctx.set_fonts(fonts);
 }
 

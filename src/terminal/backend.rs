@@ -508,11 +508,22 @@ fn parse_cwd_title(title: &str) -> Option<PathBuf> {
             && trimmed.as_bytes()[1] == b':'
             && (trimmed.as_bytes()[2] == b'\\' || trimmed.as_bytes()[2] == b'/'))
         || trimmed.starts_with("\\\\");
-    if looks_abs {
-        Some(path)
-    } else {
-        None
+    if !looks_abs {
+        return None;
     }
+    // Reject executables mistakenly set as window title / cwd (was saving powershell.exe).
+    if path.is_file() {
+        return None;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if lower.ends_with(".exe")
+        || lower.ends_with(".cmd")
+        || lower.ends_with(".bat")
+        || lower.ends_with(".com")
+    {
+        return None;
+    }
+    Some(path)
 }
 
 fn is_default_skip(c: char, _fg: Color, bg: Color, flags: Flags, selected: bool) -> bool {

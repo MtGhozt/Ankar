@@ -603,6 +603,7 @@ fn matches_filter(status: SessionStatus, filter: SessionFilter) -> bool {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn segment(
     ui: &mut Ui,
     width: f32,

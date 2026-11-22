@@ -1,0 +1,698 @@
+{
+"cols": 76,
+"sep_rows": [
+51,
+53
+],
+"cursor": [
+52,
+2
+],
+"progress": [
+54,
+34,
+44,
+2
+],
+"bands": [
+[
+1,
+1,
+-0.25,
+73.75,
+"term_overlay_bg"
+],
+[
+2,
+8,
+5,
+69,
+"diff_red_bg"
+],
+[
+9,
+20,
+5,
+69,
+"diff_green_bg"
+],
+[
+31,
+33,
+5,
+69,
+"diff_green_bg"
+]
+],
+"overlays": [
+[
+49,
+25,
+" Jump to bottom (click) ↓ "
+]
+],
+"lines": {
+"1": [
+[
+"❯ [Image #1] si los logos no caben, que no se muestren, no que salten a ot…",
+"bright"
+]
+],
+"2": [
+[
+"          -",
+"fg"
+],
+[
+"no]} )) && langs=(js $langs)",
+"fg"
+]
+],
+"3": [
+[
+"      270 -",
+"rln"
+],
+[
+"  if [[ -n $pub ]]; then",
+"fg"
+]
+],
+"4": [
+[
+"      271 -",
+"rln"
+],
+[
+"    [[ $pub == *flutter* ]] && langs+=(flutter) || langs+=",
+"fg"
+]
+],
+"5": [
+[
+"          -",
+"rln"
+],
+[
+"(dart)",
+"fg"
+]
+],
+"6": [
+[
+"      272 -",
+"rln"
+],
+[
+"  fi",
+"fg"
+]
+],
+"7": [
+[
+"      273 -",
+"rln"
+],
+[
+"  techs=(${(u)fw} ${(u)langs} ${(u)tools})",
+"fg"
+]
+],
+"8": [
+[
+"      274 -",
+"rln"
+],
+[
+"  techs=(${(u)techs[1,5]})",
+"fg"
+]
+],
+"9": [
+[
+"      245 +",
+"gln"
+],
+[
+"  ",
+"fg"
+],
+[
+"for",
+"kw"
+],
+[
+" d ",
+"fg"
+],
+[
+"in",
+"kw"
+],
+[
+" $dirs; ",
+"fg"
+],
+[
+"do",
+"kw"
+]
+],
+"10": [
+[
+"      246 +",
+"gln"
+],
+[
+"    _midterm_has tsconfig.json && { tech=ts; ",
+"fg"
+],
+[
+"return",
+"lime"
+],
+[
+"; }",
+"fg"
+]
+],
+"11": [
+[
+"      247 +",
+"gln"
+],
+[
+"    [[ -r $d/package.json ]] && { IFS= ",
+"fg"
+],
+[
+"read",
+"lime"
+],
+[
+" -rd '' f < $d/",
+"fg"
+]
+],
+"12": [
+[
+"          +",
+"gln"
+],
+[
+"package.json; pkg+=$f; }",
+"fg"
+]
+],
+"13": [
+[
+"      248 +",
+"gln"
+],
+[
+"  ",
+"fg"
+],
+[
+"done",
+"kw"
+]
+],
+"14": [
+[
+"      249 +",
+"gln"
+],
+[
+"  # `\"typescript\":` en dependencies o devDependencies.",
+"cmt"
+]
+],
+"15": [
+[
+"      250 +",
+"gln"
+],
+[
+"  [[ $pkg == *\\\"typescript\\\"[[:space:]]#:* ]] && { tech=ts",
+"fg"
+]
+],
+"16": [
+[
+"          +",
+"gln"
+],
+[
+"; ",
+"fg"
+],
+[
+"return",
+"lime"
+],
+[
+"; }",
+"fg"
+]
+],
+"17": [
+[
+"      251 +",
+"gln"
+],
+[
+"  ",
+"fg"
+],
+[
+"for",
+"kw"
+],
+[
+" d ",
+"fg"
+],
+[
+"in",
+"kw"
+],
+[
+" $dirs; ",
+"fg"
+],
+[
+"do",
+"kw"
+]
+],
+"18": [
+[
+"      252 +",
+"gln"
+],
+[
+"    _midterm_has package-lock.json pnpm-lock.yaml yarn.loc",
+"fg"
+]
+],
+"19": [
+[
+"          +",
+"gln"
+],
+[
+"k .nvmrc .node-version && { tech=node; ",
+"fg"
+],
+[
+"return",
+"lime"
+],
+[
+"; }",
+"fg"
+]
+],
+"20": [
+[
+"      253 +",
+"gln"
+],
+[
+"  ",
+"fg"
+],
+[
+"done",
+"kw"
+]
+],
+"21": [
+[
+"      254",
+"dim"
+],
+[
+"  }",
+"fg"
+]
+],
+"22": [
+[
+"      255",
+"dim"
+]
+],
+"23": [
+[
+"      256",
+"dim"
+],
+[
+"  # Coloca `chips` (de anchos `widths`) en filas de `$1` col",
+"cmt"
+]
+],
+"24": [
+[
+"           umnas y devuelve el prompt en REPLY.",
+"cmt"
+]
+],
+"26": [
+[
+"● ",
+"okb"
+],
+[
+"Update",
+"fg",
+true
+],
+[
+"(~/Dev/midterm/assets/shell/midterm.zsh)",
+"fg"
+]
+],
+"27": [
+[
+"  ⎿  ",
+"dim"
+],
+[
+"Added ",
+"fg"
+],
+[
+"2",
+"fg",
+true
+],
+[
+" lines",
+"fg"
+]
+],
+"28": [
+[
+"      264",
+"dim"
+],
+[
+"    ",
+"fg"
+],
+[
+"for",
+"kw"
+],
+[
+" (( i = ",
+"fg"
+],
+[
+"1",
+"lav"
+],
+[
+"; i <= $#chips; i++ )); ",
+"fg"
+],
+[
+"do",
+"kw"
+]
+],
+"29": [
+[
+"      265",
+"dim"
+],
+[
+"      (( widths[i] > cols )) && ",
+"fg"
+],
+[
+"continue",
+"lime"
+]
+],
+"30": [
+[
+"      266",
+"dim"
+],
+[
+"      ",
+"fg"
+],
+[
+"if",
+"kw"
+],
+[
+" (( used && used + widths[i] > cols )); ",
+"fg"
+],
+[
+"then",
+"kw"
+]
+],
+"31": [
+[
+"      267 +",
+"gln"
+],
+[
+"        # El logo no abre fila: si no cabe al lado de los de",
+"cmt"
+]
+],
+"32": [
+[
+"          +",
+"gln"
+],
+[
+"más, no sale.",
+"cmt"
+]
+],
+"33": [
+[
+"      268 +",
+"gln"
+],
+[
+"        [[ ${chips[i]} == *chip=tech-* ]] && ",
+"fg"
+],
+[
+"continue",
+"lime"
+]
+],
+"34": [
+[
+"      269",
+"dim"
+],
+[
+"        (( limit && rows == limit )) && ",
+"fg"
+],
+[
+"continue",
+"lime"
+]
+],
+"35": [
+[
+"      270",
+"dim"
+],
+[
+"        (( ++rows ))",
+"fg"
+]
+],
+"36": [
+[
+"      271",
+"dim"
+],
+[
+"        ps+=",
+"fg"
+],
+[
+"$'\\n \\n'",
+"str"
+]
+],
+"38": [
+[
+"● ",
+"fg"
+],
+[
+"Ahora añado el logo de Node en ",
+"fg"
+],
+[
+"src/techs.rs",
+"lav"
+],
+[
+".",
+"fg"
+]
+],
+"40": [
+[
+"  Ran ",
+"gray"
+],
+[
+"4",
+"fg",
+true
+],
+[
+" shell commands",
+"gray"
+]
+],
+"41": [
+[
+"● Hecho en midterm (",
+"fg"
+],
+[
+"assets/shell/midterm.zsh",
+"lav"
+],
+[
+"): ahora sale un solo logo, y si",
+"fg"
+]
+],
+"42": [
+[
+"  no cabe en la fila de los demás chips no se muestra en vez de bajar a",
+"fg"
+]
+],
+"43": [
+[
+"  otra línea.",
+"fg"
+]
+],
+"45": [
+[
+"  - ",
+"fg"
+],
+[
+"Cuál sale",
+"fg",
+true
+],
+[
+": se miran la carpeta actual y, si en ella no hay proyecto, la",
+"fg"
+]
+],
+"46": [
+[
+"    raíz del repo. Gana el primero que encaje en este orden: Rust → Python →",
+"fg"
+]
+],
+"47": [
+[
+"    Bun → TypeScript → Node → JavaScript.",
+"fg"
+]
+],
+"48": [
+[
+"    - Bun: ",
+"fg"
+],
+[
+"bun.lock",
+"lav"
+],
+[
+", ",
+"fg"
+],
+[
+"bun.lockb",
+"lav"
+],
+[
+" o ",
+"fg"
+],
+[
+"bunfig.toml",
+"lav"
+],
+[
+".",
+"fg"
+]
+],
+"49": [
+[
+"    - TypeScript: ",
+"fg"
+],
+[
+"tsconfi",
+"lav"
+],
+[
+"                          dependencias.",
+"fg"
+]
+],
+"52": [
+[
+"❯ ",
+"bright"
+]
+],
+"54": [
+[
+"  ▸▸ auto mode on",
+"orange"
+],
+[
+" ·          ",
+"gray"
+],
+[
+"week",
+"gray"
+],
+[
+"            ",
+"gray"
+],
+[
+"15%",
+"bright"
+],
+[
+" ↻ 5d 11h · ‖ narrator off",
+"gray"
+]
+]
+}
+}

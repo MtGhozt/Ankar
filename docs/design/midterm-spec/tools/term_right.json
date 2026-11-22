@@ -1,0 +1,743 @@
+{
+"cols": 93,
+"sep_rows": [
+51,
+53
+],
+"cursor": [
+52,
+2
+],
+"progress": [
+54,
+51,
+61,
+2
+],
+"bands": [
+[
+9,
+9,
+5,
+86,
+"diff_red_bg"
+],
+[
+17,
+20,
+5,
+86,
+"diff_red_bg"
+],
+[
+21,
+22,
+5,
+86,
+"diff_green_bg"
+],
+[
+31,
+31,
+5,
+86,
+"diff_red_bg"
+]
+],
+"lines": {
+"1": [
+[
+"  ⎿  ",
+"dim"
+],
+[
+"test result: ok. 201 passed; 0 failed; 4 ignored; 0 measured; 0 filtered out; finis",
+"fg"
+]
+],
+"2": [
+[
+"     hed in 0.09s",
+"fg"
+]
+],
+"3": [
+[
+"     src/renderer/soft.rs:0",
+"fg"
+]
+],
+"4": [
+[
+"     src/renderer.rs:0",
+"fg"
+]
+],
+"5": [
+[
+"  ⎿  ",
+"dim"
+],
+[
+"Updated ",
+"fg"
+],
+[
+"src/renderer.rs",
+"fg",
+true
+],
+[
+" ",
+"fg"
+],
+[
+"+1",
+"gln"
+],
+[
+" ",
+"fg"
+],
+[
+"-5",
+"rln"
+]
+],
+"6": [
+[
+"      23",
+"dim"
+],
+[
+"      CACurrentMediaTime, CAKeyframeAnimation, CALayer, CAMediaTiming,",
+"fg"
+]
+],
+"7": [
+[
+"      24",
+"dim"
+],
+[
+"      CAMediaTimingFunction, CAMetalDrawable, CAMetalLayer, CATransaction,",
+"fg"
+]
+],
+"8": [
+[
+"      25",
+"dim"
+],
+[
+" };",
+"fg"
+]
+],
+"9": [
+[
+"      26 -",
+"rln"
+],
+[
+"use",
+"kw"
+],
+[
+" winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};",
+"fg"
+]
+],
+"10": [
+[
+"      26",
+"dim"
+],
+[
+"  ",
+"fg"
+],
+[
+"use",
+"kw"
+],
+[
+" winit::window::Window;",
+"fg"
+]
+],
+"11": [
+[
+"      27",
+"dim"
+]
+],
+"12": [
+[
+"      28",
+"dim"
+],
+[
+"  ",
+"fg"
+],
+[
+"use",
+"kw"
+],
+[
+" crate::agents::Agent;",
+"fg"
+]
+],
+"13": [
+[
+"     ...",
+"dim"
+]
+],
+"14": [
+[
+"      726",
+"dim"
+],
+[
+"      /// Crea la capa Metal de la ventana y la pone como capa de su vista.",
+"cmt"
+]
+],
+"15": [
+[
+"      727",
+"dim"
+],
+[
+"      ",
+"fg"
+],
+[
+"pub",
+"kw"
+],
+[
+" ",
+"fg"
+],
+[
+"fn",
+"fn"
+],
+[
+" new(window: &Window) -> ",
+"fg"
+],
+[
+"Result",
+"lime"
+],
+[
+"<Renderer, ",
+"fg"
+],
+[
+"String",
+"lime"
+],
+[
+"> {",
+"fg"
+]
+],
+"16": [
+[
+"      728",
+"dim"
+],
+[
+"          ",
+"fg"
+],
+[
+"let",
+"kw"
+],
+[
+" gpu = Gpu::",
+"fg"
+],
+[
+"shared",
+"lime"
+],
+[
+"()?;",
+"fg"
+]
+],
+"17": [
+[
+"      730 -",
+"rln"
+],
+[
+"        let RawWindowHandle::AppKit(handle) = window.window_handle().map_er",
+"fg"
+]
+],
+"18": [
+[
+"          -",
+"rln"
+],
+[
+"r(|e| e.to_string())?.as_raw() else {",
+"fg"
+]
+],
+"19": [
+[
+"      731 -",
+"rln"
+],
+[
+"            return Err(\"not an AppKit window\".into());",
+"fg"
+]
+],
+"20": [
+[
+"      732 -",
+"rln"
+],
+[
+"        };",
+"fg"
+]
+],
+"21": [
+[
+"      729 +",
+"gln"
+],
+[
+"        ",
+"fg"
+],
+[
+"let",
+"kw"
+],
+[
+" view = ffi::appkit::",
+"fg"
+],
+[
+"view",
+"lime"
+],
+[
+"(window).",
+"fg"
+],
+[
+"ok_or",
+"lime"
+],
+[
+"(\"not an AppKit window\")?",
+"str"
+]
+],
+"22": [
+[
+"          +",
+"gln"
+],
+[
+";",
+"fg"
+]
+],
+"23": [
+[
+"      730",
+"dim"
+],
+[
+"          ",
+"fg"
+],
+[
+"let",
+"kw"
+],
+[
+" size = window.",
+"fg"
+],
+[
+"inner_size",
+"lime"
+],
+[
+"();",
+"fg"
+]
+],
+"24": [
+[
+"      731",
+"dim"
+],
+[
+"          ",
+"fg"
+],
+[
+"let",
+"kw"
+],
+[
+" layer = CAMetalLayer::",
+"fg"
+],
+[
+"new",
+"lime"
+],
+[
+"();",
+"fg"
+]
+],
+"25": [
+[
+"      732",
+"dim"
+],
+[
+"          layer.",
+"fg"
+],
+[
+"setDevice",
+"lime"
+],
+[
+"(",
+"fg"
+],
+[
+"Some",
+"lime"
+],
+[
+"(&gpu.device));",
+"fg"
+]
+],
+"26": [
+[
+"     ...",
+"dim"
+]
+],
+"27": [
+[
+"      737",
+"dim"
+],
+[
+"          // Al redimensionar, el último frame se queda arriba a la izquierda",
+"cmt"
+]
+],
+"28": [
+[
+"              en vez de estirarse.",
+"cmt"
+]
+],
+"29": [
+[
+"      738",
+"dim"
+],
+[
+"          layer.",
+"fg"
+],
+[
+"setContentsGravity",
+"lime"
+],
+[
+"(ffi::quartz::",
+"fg"
+],
+[
+"gravity_top_left",
+"lime"
+],
+[
+"());",
+"fg"
+]
+],
+"30": [
+[
+"      739",
+"dim"
+],
+[
+"          layer.",
+"fg"
+],
+[
+"setOpaque",
+"lime"
+],
+[
+"(",
+"fg"
+],
+[
+"false",
+"lav"
+],
+[
+");",
+"fg"
+]
+],
+"31": [
+[
+"      743 -",
+"rln"
+],
+[
+"        let view = ffi::appkit::view(window).ok_or(\"no NSView\")?;",
+"fg"
+]
+],
+"32": [
+[
+"      740",
+"dim"
+],
+[
+"          view.",
+"fg"
+],
+[
+"setLayer",
+"lime"
+],
+[
+"(",
+"fg"
+],
+[
+"Some",
+"lime"
+],
+[
+"(&layer));",
+"fg"
+]
+],
+"33": [
+[
+"      741",
+"dim"
+],
+[
+"          view.",
+"fg"
+],
+[
+"setWantsLayer",
+"lime"
+],
+[
+"(",
+"fg"
+],
+[
+"true",
+"lav"
+],
+[
+");",
+"fg"
+]
+],
+"34": [
+[
+"      742",
+"dim"
+],
+[
+"          view.",
+"fg"
+],
+[
+"setLayerContentsPlacement",
+"lime"
+],
+[
+"(NSViewLayerContentsPlacement::TopLef",
+"fg"
+]
+],
+"35": [
+[
+"             t);",
+"fg"
+]
+],
+"36": [
+[
+"  ⎿  (timeout 10m)",
+"dim"
+]
+],
+"37": [
+[
+"  ⎿  Allowed by auto mode",
+"dim"
+]
+],
+"39": [
+[
+"● Renderer sin ",
+"fg"
+],
+[
+"unsafe",
+"lav"
+],
+[
+" y tests en verde. Antes de seguir, lo pruebo de verdad con el binario",
+"fg"
+]
+],
+"40": [
+[
+"  del banco (Metal, CPU y captura).",
+"fg"
+]
+],
+"42": [
+[
+"  Read ",
+"gray"
+],
+[
+"1",
+"fg",
+true
+],
+[
+" file, ran ",
+"gray"
+],
+[
+"3",
+"fg",
+true
+],
+[
+" shell commands",
+"gray"
+]
+],
+"44": [
+[
+"● Se ve bien y ",
+"fg"
+],
+[
+"verify: 0 distintos",
+"lav"
+],
+[
+" (el pintado por CPU coincide píxel a píxel). Pruebo",
+"fg"
+]
+],
+"45": [
+[
+"  también el camino de Metal:",
+"fg"
+]
+],
+"47": [
+[
+"● ",
+"gray"
+],
+[
+"Running ",
+"fg"
+],
+[
+"1",
+"fg",
+true
+],
+[
+" shell command…",
+"fg"
+]
+],
+"49": [
+[
+"· Cogitating… ",
+"cog"
+],
+[
+"(21m 31s · ↓ 139.5k tokens · thought for 3s)",
+"gray"
+]
+],
+"50": [
+[
+"                                                                       ◎ /goal active (21m)",
+"lav"
+]
+],
+"52": [
+[
+"❯ ",
+"bright"
+]
+],
+"54": [
+[
+"  ▸▸ auto mode on",
+"orange"
+],
+[
+" ·                           ",
+"gray"
+],
+[
+"week",
+"gray"
+],
+[
+"            ",
+"gray"
+],
+[
+"15%",
+"bright"
+],
+[
+" ↻ 5d 11h · ‖ narrator off",
+"gray"
+]
+]
+}
+}

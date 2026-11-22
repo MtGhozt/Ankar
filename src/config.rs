@@ -34,7 +34,7 @@ fn default_scrollback_lines() -> usize {
 }
 
 fn default_font_size() -> f32 {
-    13.0
+    crate::ui_theme::TERM_FONT_SIZE
 }
 
 fn default_accent() -> String {
@@ -301,7 +301,7 @@ default_shell = "{default_shell}"
 # Seconds without PTY output before a live session is "waiting"
 waiting_timeout_secs = {waiting_timeout_secs}
 
-# Terminal font size (points) — Hack at 13 with ~1.3 line height
+# Terminal font size (points) — Hack at 14.33, cell 8.627×17.733
 font_size = {font_size}
 
 # Accent color (hex) — cursor + selection
