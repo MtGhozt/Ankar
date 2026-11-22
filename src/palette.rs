@@ -203,7 +203,7 @@ fn build_groups(
 
     let mut actions = vec![
         PaletteItem {
-            label: "Nueva pestaña".into(),
+            label: "New tab".into(),
             icon: Some(Icon::Plus),
             shortcut: "Ctrl+Shift+T".into(),
             action: PaletteAction::NewTab,
@@ -271,7 +271,7 @@ fn build_groups(
     }
     if !profiles.is_empty() {
         groups.push(PaletteGroup {
-            heading: "Perfiles",
+            heading: "Profiles",
             items: profiles,
         });
     }
@@ -307,7 +307,7 @@ fn build_groups(
     }
     if !arch.is_empty() {
         groups.push(PaletteGroup {
-            heading: "Archivadas",
+            heading: "Archived",
             items: arch,
         });
     }
