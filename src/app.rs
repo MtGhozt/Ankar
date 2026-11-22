@@ -177,69 +177,105 @@ impl eframe::App for AnkarApp {
             &mut self.files,
         );
 
-        // Sidebar first → full height; tab bar only over content (midterm).
+        // Manual panel widths — egui's built-in SidePanel resize fought PanelState
+        // and bounced on release. We own the width via exact_size + drag handles.
+        let window_w = ui
+            .ctx()
+            .input(|i| i.viewport().inner_rect.map(|r| r.width()))
+            .unwrap_or(1100.0);
         if self.sidebar.show {
-            let mut width_dirty = false;
-            // id "sidebar_v3" resets egui memory if v2 still remembered a bad width.
-            let desired = Config::clamp_sidebar_width(self.config.sidebar_width);
-            egui::Panel::left("sidebar_v3")
-                .resizable(true)
-                .default_size(desired)
-                .min_size(200.0)
-                .max_size(320.0)
-                .frame(
-                    Frame::NONE
-                        .fill(ui_theme::SURFACE_1)
-                        .inner_margin(egui::Margin {
-                            left: 12,
-                            right: 10,
-                            top: 8,
-                            bottom: 8,
-                        }),
-                )
-                .show_separator_line(true)
+            let max_w = Config::max_sidebar_width(window_w);
+            let width = Config::clamp_sidebar_width(self.config.sidebar_width, window_w);
+            let panel = egui::Panel::left("sidebar_v6")
+                .exact_size(width)
+                .resizable(false)
+                .frame(Frame::NONE.fill(ui_theme::SIDEBAR_BG))
+                .show_separator_line(false)
                 .show(ui, |ui| {
-                    // Keep all sidebar painting inside the panel clip (avoids left cut-off).
-                    let clip = ui.max_rect();
-                    ui.set_clip_rect(clip);
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                        if icon_square(ui, Icon::PanelLeft, "Ocultar sidebar (Ctrl+Shift+B)")
-                            .clicked()
-                        {
-                            self.sidebar.show = false;
-                        }
-                    });
-                    sidebar::draw(
-                        ui,
-                        &mut self.workspace,
-                        &mut self.config,
-                        &mut self.sidebar,
-                        &mut self.logos,
-                        !self.config_load_failed,
+                    ui.set_width(ui.available_width());
+                    ui.set_clip_rect(ui.max_rect());
+                    let sidebar_rect = ui.max_rect();
+                    let painter = ui.painter();
+
+                    // Title strip (y 0–38): drag area x 0–70; panel-left toggle at (81.33, 10).
+                    let toggle_rect = egui::Rect::from_min_size(
+                        egui::pos2(sidebar_rect.left() + 81.33, sidebar_rect.top() + 10.0),
+                        Vec2::splat(18.7),
                     );
-                    let w = Config::clamp_sidebar_width(ui.max_rect().width());
-                    if (w - self.config.sidebar_width).abs() > 1.0 {
-                        self.config.sidebar_width = w;
-                        width_dirty = true;
+                    let toggle_id = ui.scope_id().with("sidebar_toggle");
+                    let toggle_resp = ui.interact(toggle_rect, toggle_id, Sense::click());
+                    if toggle_resp.hovered() {
+                        painter.rect_filled(
+                            toggle_rect.expand(4.0),
+                            CornerRadius::same(ui_theme::RADIUS_KBD),
+                            ui_theme::HOVER,
+                        );
                     }
+                    painter.text(
+                        toggle_rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        Icon::PanelLeft.codepoint().to_string(),
+                        egui::FontId::new(
+                            18.7,
+                            egui::FontFamily::Name(ui_theme::FONT_ICONS.into()),
+                        ),
+                        ui_theme::TEXT_MUTED,
+                    );
+                    let toggle_resp =
+                        toggle_resp.on_hover_text("Hide sidebar (Ctrl+Shift+B)");
+                    if toggle_resp.clicked() {
+                        self.sidebar.show = false;
+                    }
+
+                    let content_top = sidebar_rect.top() + 38.0;
+                    let content_rect = egui::Rect::from_min_max(
+                        egui::pos2(sidebar_rect.left(), content_top),
+                        sidebar_rect.max,
+                    );
+                    ui.scope_builder(egui::UiBuilder::new().max_rect(content_rect), |ui| {
+                        ui.set_width(ui.available_width());
+                        sidebar::draw(
+                            ui,
+                            &mut self.workspace,
+                            &mut self.config,
+                            &mut self.sidebar,
+                            &mut self.logos,
+                            !self.config_load_failed,
+                            sidebar_rect,
+                        );
+                    });
                 });
-            if width_dirty && !self.config_load_failed {
+
+            let resize = drag_resize_edge(
+                ui,
+                ui.scope_id().with("sidebar_resize_v6"),
+                panel.response.rect.right(),
+                panel.response.rect.y_range(),
+            );
+            if resize.dragged() {
+                let dx = ui.input(|i| i.pointer.delta().x);
+                self.config.sidebar_width =
+                    Config::clamp_sidebar_width(width + dx, window_w).min(max_w);
+            }
+            if resize.drag_stopped() && !self.config_load_failed {
                 let _ = self.config.save();
             }
         }
 
         if self.files.show {
-            egui::Panel::right("files")
-                .resizable(true)
-                .default_size(280.0)
+            let max_w = Config::max_files_width(window_w);
+            let width = Config::clamp_files_width(self.config.files_width, window_w);
+            let panel = egui::Panel::right("files_v4")
+                .exact_size(width)
+                .resizable(false)
                 .frame(
                     Frame::NONE
                         .fill(ui_theme::SURFACE_1)
-                        .inner_margin(egui::Margin::same(8))
-                        .stroke(Stroke::new(1.0, ui_theme::BORDER)),
+                        .inner_margin(egui::Margin::same(8)),
                 )
                 .show_separator_line(false)
                 .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
                     let before = self.files.open_file.clone();
                     self.files.draw(ui);
                     if self.files.open_file != before {
@@ -250,6 +286,22 @@ impl eframe::App for AnkarApp {
                         }
                     }
                 });
+
+            let resize = drag_resize_edge(
+                ui,
+                ui.scope_id().with("files_resize_v4"),
+                panel.response.rect.left(),
+                panel.response.rect.y_range(),
+            );
+            if resize.dragged() {
+                // Dragging the left edge rightward shrinks the right panel.
+                let dx = ui.input(|i| i.pointer.delta().x);
+                self.config.files_width =
+                    Config::clamp_files_width(width - dx, window_w).min(max_w);
+            }
+            if resize.drag_stopped() && !self.config_load_failed {
+                let _ = self.config.save();
+            }
         }
 
         // Tab bar over content only
@@ -397,7 +449,7 @@ fn draw_tab_bar(
         ui.spacing_mut().item_spacing.x = 0.0;
 
         if !sidebar.show
-            && icon_square(ui, Icon::PanelLeft, "Mostrar sidebar (Ctrl+Shift+B)").clicked()
+            && icon_square(ui, Icon::PanelLeft, "Show sidebar (Ctrl+Shift+B)").clicked()
         {
             sidebar.show = true;
         }
@@ -582,6 +634,30 @@ fn draw_tab_bar(
     });
 }
 
+/// Hit-test strip on a panel edge. Returns the interact response (check `dragged`).
+fn drag_resize_edge(
+    ui: &mut egui::Ui,
+    id: egui::Id,
+    edge_x: f32,
+    y_range: egui::Rangef,
+) -> egui::Response {
+    let grab = 6.0;
+    let handle = egui::Rect::from_x_y_ranges((edge_x - grab)..=(edge_x + grab), y_range);
+    // Allocate on the foreground layer so terminal/content doesn't eat the drag.
+    let resp = ui.interact(handle, id, Sense::click_and_drag());
+    let stroke = if resp.dragged() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+        ui.style().visuals.widgets.active.fg_stroke
+    } else if resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+        ui.style().visuals.widgets.hovered.fg_stroke
+    } else {
+        Stroke::new(1.0, ui_theme::SIDEBAR_BORDER)
+    };
+    ui.painter().vline(edge_x, y_range, stroke);
+    resp
+}
+
 fn tab_agent_visual(
     tab: &crate::layout::Tab,
     config: &Config,
@@ -688,6 +764,13 @@ fn handle_shortcuts(
         if i.consume_key(cs, Key::L) {
             sidebar.show = true;
             sidebar.search_focus = true;
+        }
+        if i.key_pressed(Key::Slash) && !i.modifiers.any() && !palette.open {
+            let focus = ui.memory(|m| m.focused());
+            if focus.is_none() || focus == Some(sidebar::search_field_id()) {
+                sidebar.show = true;
+                sidebar.search_focus = true;
+            }
         }
         if i.consume_key(cs, Key::P) {
             workspace.toggle_pin_active();

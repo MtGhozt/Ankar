@@ -76,7 +76,7 @@ impl LogoAtlas {
         if self.is_installed(command) {
             format!("{name}\n{cmd_line}")
         } else {
-            format!("{name} — no instalado\nInstalar / ejecutar: {cmd_line}")
+            format!("{name} — not installed\nInstall or run: {cmd_line}")
         }
     }
 }
@@ -130,7 +130,19 @@ fn resolve_logo_path(dir: &Path, key: &str) -> Option<PathBuf> {
 
 fn load_texture(ctx: &Context, name: &str, path: &Path) -> Option<TextureHandle> {
     let bytes = std::fs::read(path).ok()?;
-    let img = image::load_from_memory(&bytes).ok()?.into_rgba8();
+    let mut img = image::load_from_memory(&bytes).ok()?.into_rgba8();
+    let ppp = ctx.pixels_per_point();
+  // Target ~18 logical px icons at native density when the asset is larger.
+    let target = (18.0 * ppp).round().max(1.0) as u32;
+    let (w, h) = (img.width(), img.height());
+    if w > target + 2 || h > target + 2 {
+        img = image::imageops::resize(
+            &img,
+            target,
+            target,
+            image::imageops::FilterType::Lanczos3,
+        );
+    }
     let size = [img.width() as usize, img.height() as usize];
     let color = ColorImage::from_rgba_unmultiplied(size, img.as_raw());
     Some(ctx.load_texture(format!("logo-{name}"), color, TextureOptions::LINEAR))

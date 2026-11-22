@@ -17,6 +17,9 @@ mod ui_theme;
 
 use anyhow::Context;
 
+/// Bumped whenever we need Matias to confirm he's running a fresh binary.
+const BUILD_MARK: &str = "resize-r6";
+
 /// Parse `--window-size WxH` (logical px) for midterm acceptance screenshots.
 fn parse_window_size(args: &[String]) -> Option<[f32; 2]> {
     let mut iter = args.iter();
@@ -60,18 +63,28 @@ fn main() -> anyhow::Result<()> {
         None => [1100.0, 700.0],
     };
 
+    if let Ok(exe) = std::env::current_exe() {
+        log::info!(
+            "Ankar {BUILD_MARK} launching from {}",
+            exe.display()
+        );
+    } else {
+        log::info!("Ankar {BUILD_MARK} launching");
+    }
+
+    let title = format!("Ankar ({BUILD_MARK})");
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size(window_size)
             .with_min_inner_size([640.0, 400.0])
-            .with_title("Ankar"),
+            .with_title(title.clone()),
         // Native monitor DPI (e.g. 1.5 at 150%). Do not set_pixels_per_point.
         renderer: eframe::Renderer::Glow,
         ..Default::default()
     };
 
     eframe::run_native(
-        "Ankar",
+        &title,
         native_options,
         Box::new(|cc| Ok(Box::new(app::AnkarApp::new(cc)?))),
     )

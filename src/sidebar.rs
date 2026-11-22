@@ -9,6 +9,12 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+/// Stable focus id for the sidebar search field (`/` shortcut in `app.rs`).
+#[inline]
+pub fn search_field_id() -> egui::Id {
+    egui::Id::unique("ankar_sidebar_search")
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum SessionFilter {
     All,
@@ -66,6 +72,7 @@ pub fn draw(
     sidebar: &mut SidebarState,
     logos: &mut LogoAtlas,
     allow_config_save: bool,
+    _sidebar_rect: egui::Rect,
 ) {
     let _ = sidebar.now();
     let mut activate = None;
@@ -137,7 +144,7 @@ pub fn draw(
     ui.add_space(8.0);
 
     // --- Search ---
-    let search_id = ui.scope_id().with("sidebar_search");
+    let search_id = search_field_id();
     let search_frame = Frame::NONE
         .fill(ui_theme::SURFACE_SUNKEN)
         .stroke(Stroke::new(1.0, ui_theme::BORDER))

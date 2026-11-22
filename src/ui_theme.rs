@@ -1,3 +1,6 @@
+//! Midterm UI tokens. Some aliases are wired in later steps.
+#![allow(dead_code)]
+
 use egui::{
     Color32, Context, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, RichText,
     Shadow, Stroke, Style, TextStyle, Theme, ThemePreference, Visuals,
@@ -7,32 +10,51 @@ use std::sync::Arc;
 #[cfg(debug_assertions)]
 use std::sync::atomic::{AtomicBool, Ordering};
 
-// --- Surfaces (midterm) ---
+// --- Surfaces (midterm global tokens) ---
 pub const BG: Color32 = Color32::from_rgb(0x00, 0x00, 0x00);
-pub const SURFACE_1: Color32 = Color32::from_rgb(0x0D, 0x0D, 0x0D);
+/// Sidebar, inactive tabs, tab bar (`sidebar_bg` / `tabbar_bg`).
+pub const SURFACE_1: Color32 = Color32::from_rgb(0x0C, 0x0C, 0x0C);
+pub const SIDEBAR_BG: Color32 = SURFACE_1;
 pub const SURFACE_SUNKEN: Color32 = Color32::from_rgb(0x08, 0x08, 0x08);
+pub const INPUT_BG: Color32 = SURFACE_SUNKEN;
 pub const SURFACE_2: Color32 = Color32::from_rgb(0x18, 0x18, 0x18);
+pub const BUTTON_BG: Color32 = SURFACE_2;
 pub const SURFACE_SEL: Color32 = Color32::from_rgb(0x20, 0x20, 0x20);
-// White at low alpha (≈ #141414 / #1A1A1A over black).
-pub const HOVER: Color32 = Color32::from_rgba_premultiplied(10, 10, 10, 10);
-pub const PRESSED: Color32 = Color32::from_rgba_premultiplied(18, 18, 18, 18);
+pub const SEGMENT_ACTIVE: Color32 = SURFACE_SEL;
+pub const ROW_HOVER: Color32 = Color32::from_rgb(0x14, 0x14, 0x14);
+pub const ROW_SELECTED: Color32 = BUTTON_BG;
+pub const HOVER: Color32 = ROW_HOVER;
+pub const PRESSED: Color32 = Color32::from_rgb(0x1A, 0x1A, 0x1A);
 
 // --- Lines ---
-pub const BORDER: Color32 = Color32::from_rgb(0x16, 0x16, 0x16);
-pub const DIVIDER: Color32 = Color32::from_rgb(0x14, 0x14, 0x14);
+pub const BORDER: Color32 = Color32::from_rgb(0x1C, 0x1C, 0x1C);
+pub const SIDEBAR_BORDER: Color32 = BORDER;
+pub const INPUT_BORDER: Color32 = Color32::from_rgb(0x14, 0x14, 0x14);
+pub const DIVIDER: Color32 = Color32::from_rgb(0x19, 0x19, 0x19);
+pub const SIDEBAR_DIVIDER: Color32 = DIVIDER;
 pub const DIVIDER_ACTIVE: Color32 = Color32::from_gray(0x3A);
+pub const BUTTON_HIGHLIGHT: Color32 = Color32::from_rgb(0x1E, 0x1E, 0x1E);
+pub const KBD_BG: Color32 = INPUT_BORDER;
+pub const KBD_BORDER: Color32 = BUTTON_HIGHLIGHT;
 
 // --- Text ---
-pub const TEXT: Color32 = Color32::from_rgb(0xF2, 0xF2, 0xF2);
-pub const TEXT_MUTED: Color32 = Color32::from_rgb(0x8A, 0x8A, 0x8A);
+pub const TEXT: Color32 = Color32::from_rgb(0xE7, 0xE7, 0xE7);
+pub const TEXT_MUTED: Color32 = Color32::from_rgb(0x83, 0x83, 0x83);
 pub const TEXT_FAINT: Color32 = Color32::from_rgb(0x5A, 0x5A, 0x5A);
-pub const TAB_INACTIVE_TEXT: Color32 = Color32::from_rgb(0x7E, 0x7E, 0x7E);
+pub const TAB_INACTIVE_TEXT: Color32 = TEXT_MUTED;
 
 // --- Status + accent ---
-pub const OK: Color32 = Color32::from_rgb(0x7A, 0xA5, 0x85);
-pub const WARN: Color32 = Color32::from_rgb(0xE1, 0xC1, 0x6B);
+pub const OK: Color32 = Color32::from_rgb(0x6F, 0xA7, 0x7D);
+pub const STATUS_DOT_OK: Color32 = Color32::from_rgb(0x53, 0xBE, 0x6B);
+pub const WAITING: Color32 = Color32::from_rgb(0xE9, 0xB6, 0x32);
+pub const WARN: Color32 = WAITING;
+pub const FILTER_WAITING_DOT: Color32 = Color32::from_rgb(0x45, 0x45, 0x45);
+pub const WORKING_RING: Color32 = Color32::from_rgb(0x85, 0x85, 0x85);
+pub const WORKING_RING_DIM: Color32 = Color32::from_rgb(0x90, 0x90, 0x90);
+pub const LAUNCHER_BADGE: Color32 = Color32::from_rgb(0x65, 0xB1, 0x77);
 pub const ERROR: Color32 = Color32::from_rgb(0xE5, 0x69, 0x5B);
-pub const ACCENT: Color32 = Color32::from_rgb(0x4D, 0x9F, 0xFB);
+pub const ACCENT: Color32 = Color32::from_rgb(0x0F, 0x8C, 0xEC);
+pub const CURSOR: Color32 = ACCENT;
 
 /// UI type scale (logical px). Only these two sizes for chrome text.
 pub const SIZE_UI: f32 = 13.0;

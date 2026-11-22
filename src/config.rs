@@ -38,11 +38,15 @@ fn default_font_size() -> f32 {
 }
 
 fn default_accent() -> String {
-    "#4D9FFB".into()
+    "#0F8CEC".into()
 }
 
 fn default_sidebar_width() -> f32 {
-    260.0
+    309.33
+}
+
+fn default_files_width() -> f32 {
+    280.0
 }
 
 fn default_true() -> bool {
@@ -54,7 +58,7 @@ fn default_icon_bot() -> String {
 }
 
 fn default_icon_color() -> String {
-    "#8A8A8A".into()
+    "#838383".into()
 }
 
 fn default_logo_key() -> String {
@@ -78,6 +82,9 @@ pub struct Config {
     pub scrollback_lines: usize,
     #[serde(default = "default_sidebar_width")]
     pub sidebar_width: f32,
+    /// File viewer panel width (logical px). Default 280; drag to resize.
+    #[serde(default = "default_files_width")]
+    pub files_width: f32,
     /// Dim unfocused split panes with a translucent overlay.
     #[serde(default = "default_true")]
     pub dim_inactive_panes: bool,
@@ -117,6 +124,7 @@ impl Default for Config {
             launchers: default_launchers(),
             scrollback_lines: default_scrollback_lines(),
             sidebar_width: default_sidebar_width(),
+            files_width: default_files_width(),
             dim_inactive_panes: true,
             collapsed_groups: Vec::new(),
             custom_titlebar: false,
@@ -209,9 +217,24 @@ impl Launcher {
 }
 
 impl Config {
-    /// Midterm-like narrow sidebar. Never let a bad save lock it at half the window.
-    pub fn clamp_sidebar_width(width: f32) -> f32 {
-        width.clamp(200.0, 320.0)
+    /// Sidebar width in logical px: min 240, max 40% of the window.
+    pub fn clamp_sidebar_width(width: f32, window_width: f32) -> f32 {
+        let max_w = (window_width * 0.4).max(240.0);
+        width.clamp(240.0, max_w)
+    }
+
+    pub fn max_sidebar_width(window_width: f32) -> f32 {
+        Self::clamp_sidebar_width(f32::MAX, window_width)
+    }
+
+    /// Files panel: min 200, max 45% of the window.
+    pub fn clamp_files_width(width: f32, window_width: f32) -> f32 {
+        let max_w = (window_width * 0.45).max(200.0);
+        width.clamp(200.0, max_w)
+    }
+
+    pub fn max_files_width(window_width: f32) -> f32 {
+        Self::clamp_files_width(f32::MAX, window_width)
     }
 
     pub fn config_dir() -> anyhow::Result<PathBuf> {
@@ -237,7 +260,8 @@ impl Config {
             let text = fs::read_to_string(&path)?;
             match toml::from_str::<Config>(&text) {
                 Ok(mut cfg) => {
-                    cfg.sidebar_width = Self::clamp_sidebar_width(cfg.sidebar_width);
+                    cfg.sidebar_width = Self::clamp_sidebar_width(cfg.sidebar_width, 1837.33);
+                    cfg.files_width = Self::clamp_files_width(cfg.files_width, 1837.33);
                     cfg.merge_default_launchers();
                     Ok((cfg, false))
                 }
@@ -310,8 +334,11 @@ accent = "{accent}"
 # Scrollback lines per terminal (default 2000; hard cap 50000)
 scrollback_lines = {scrollback_lines}
 
-# Sidebar width in logical px (min 220, max 40% of window)
+# Sidebar width in logical px (min 240, max 40% of window) — drag the edge to resize
 sidebar_width = {sidebar_width}
+
+# Files panel width in logical px (min 200, max 45% of window) — drag the edge to resize
+files_width = {files_width}
 
 # Dim unfocused split panes
 dim_inactive_panes = {dim_inactive_panes}
@@ -349,6 +376,7 @@ color = "#8A8A8A"
             accent = self.accent,
             scrollback_lines = self.scrollback_lines,
             sidebar_width = self.sidebar_width,
+            files_width = self.files_width,
             dim_inactive_panes = self.dim_inactive_panes,
         );
         fs::write(path, body)?;
