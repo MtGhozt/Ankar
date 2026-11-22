@@ -448,11 +448,14 @@ pub fn draw(
         ui.set_width(ui.available_width());
         let launchers = config.launchers.clone();
         let cwd = workspace.active_tab().and_then(|t| t.cwd.clone());
+        // midterm: first box (16.67, …) 22×22; centers pitch ≈ 35.
         let mut x = sidebar_rect.left() + 16.67;
         let y_center = launcher_rect.center().y;
         for launcher in &launchers {
-            let pos = egui::pos2(x, y_center - 11.0);
-            let btn_rect = Rect::from_min_size(pos, Vec2::splat(22.0));
+            let btn_rect = Rect::from_min_size(
+                egui::pos2(x, y_center - 11.0),
+                Vec2::splat(22.0),
+            );
             let tip = logos.launcher_tooltip(&launcher.name, &launcher.command, &launcher.args);
             let installed = logos.is_installed(&launcher.command);
             let tex = logos.get(ui.ctx(), launcher.logo_key());
@@ -462,7 +465,7 @@ pub fn draw(
                 .on_hover_text(tip);
             if resp.hovered() {
                 ui.painter().rect_filled(
-                    btn_rect,
+                    btn_rect.expand(2.0),
                     CornerRadius::same(ui_theme::RADIUS_KBD),
                     ui_theme::ROW_HOVER,
                 );
@@ -505,29 +508,37 @@ pub fn draw(
         ui.set_width(ui.available_width());
         let arch_count = sidebar.archived.len();
         let row_h = 28.0;
-        ui.add_space(4.0);
-        let arch_resp = ui
-            .horizontal(|ui| {
-                ui.add_space(5.33);
-                ui.label(ui_theme::icon(Icon::Archive, 18.0, ui_theme::TEXT_MUTED));
-                ui.label(
-                    RichText::new("Archived")
-                        .size(ui_theme::SIZE_UI)
-                        .color(ui_theme::TEXT_MUTED),
+        // midterm: archive icon 18px at x 11.33; "Archived" 13px at x 36; count right @ 293.3.
+        let (arch_row, arch_resp) =
+            ui.allocate_exact_size(Vec2::new(ui.available_width(), row_h), Sense::click());
+        {
+            let painter = ui.painter();
+            let y_mid = arch_row.center().y;
+            painter.text(
+                egui::pos2(arch_row.left() + 11.33, y_mid),
+                Align2::LEFT_CENTER,
+                Icon::Archive.codepoint().to_string(),
+                FontId::new(18.0, FontFamily::Name(ui_theme::FONT_ICONS.into())),
+                ui_theme::TEXT_MUTED,
+            );
+            painter.text(
+                egui::pos2(arch_row.left() + 36.0, y_mid),
+                Align2::LEFT_CENTER,
+                "Archived",
+                FontId::new(ui_theme::SIZE_UI, FontFamily::Proportional),
+                ui_theme::TEXT_MUTED,
+            );
+            if arch_count > 0 {
+                let count_x = arch_row.left() + (293.3_f32).min(arch_row.width() - 10.0);
+                painter.text(
+                    egui::pos2(count_x, y_mid),
+                    Align2::RIGHT_CENTER,
+                    format!("{arch_count}"),
+                    FontId::new(ui_theme::SIZE_UI_SMALL, FontFamily::Proportional),
+                    ui_theme::TEXT_MUTED,
                 );
-                ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
-                    ui.add_space(6.0);
-                    if arch_count > 0 {
-                        ui.label(
-                            RichText::new(format!("{arch_count}"))
-                                .size(ui_theme::SIZE_UI_SMALL)
-                                .color(ui_theme::TEXT_MUTED),
-                        );
-                    }
-                });
-            })
-            .response
-            .interact(Sense::click());
+            }
+        }
         if arch_resp.clicked() {
             sidebar.show_archived = !sidebar.show_archived;
         }
@@ -1206,13 +1217,10 @@ fn paint_launcher_button(
         );
     }
     if installed {
-        let badge = egui::pos2(rect.right() - 2.0, rect.top() + 2.0);
+        // Green ring Ø9, stroke 2 #65B177 at icon top-right.
+        let badge = egui::pos2(rect.right() - 1.0, rect.top() + 1.0);
         painter.circle_filled(badge, 4.5, ui_theme::SIDEBAR_BG);
-        painter.circle_stroke(
-            badge,
-            4.5,
-            Stroke::new(2.0, ui_theme::LAUNCHER_BADGE),
-        );
+        painter.circle_stroke(badge, 4.5, Stroke::new(2.0, ui_theme::LAUNCHER_BADGE));
     }
 }
 
