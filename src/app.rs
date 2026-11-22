@@ -304,9 +304,9 @@ impl eframe::App for AnkarApp {
             }
         }
 
-        // Tab bar over content only
+        // Tab bar over content only (midterm: 38 px, no sub-row under it).
         egui::Panel::top("tab_bar")
-            .exact_size(36.0)
+            .exact_size(38.0)
             .frame(Frame::NONE.fill(ui_theme::SURFACE_1))
             .show_separator_line(false)
             .show(ui, |ui| {
@@ -334,7 +334,7 @@ impl eframe::App for AnkarApp {
                         .inner_margin(8.0)
                         .show(ui, |ui| {
                             ui.set_min_width(180.0);
-                            ui.label(ui_theme::text_sub("Perfiles"));
+                            ui.label(ui_theme::text_sub("Profiles"));
                             let profiles = self.workspace.profiles.clone();
                             for profile in &profiles {
                                 if ui
@@ -391,7 +391,7 @@ impl eframe::App for AnkarApp {
                 if self.workspace.tabs.is_empty() {
                     ui.centered_and_justified(|ui| {
                         ui.label(ui_theme::text_sub(
-                            "Abrí una pestaña con Ctrl+Shift+T o el botón +.",
+                            "Open a tab with Ctrl+Shift+T or the + button.",
                         ));
                     });
                     return;
@@ -427,6 +427,9 @@ impl eframe::App for AnkarApp {
     }
 }
 
+const TAB_WIDTH: f32 = 224.0;
+const TAB_BAR_H: f32 = 38.0;
+
 fn draw_tab_bar(
     ui: &mut egui::Ui,
     workspace: &mut Workspace,
@@ -437,15 +440,24 @@ fn draw_tab_bar(
     logos: &mut LogoAtlas,
 ) {
     let bar_rect = ui.max_rect();
-    // Bottom border line (gap under active tab painted later)
-    ui.painter().hline(
+    let painter = ui.painter();
+    // Bottom border (erased under the active tab later).
+    painter.hline(
         bar_rect.x_range(),
         bar_rect.bottom() - 0.5,
         Stroke::new(1.0, ui_theme::BORDER),
     );
 
+    ui.set_min_height(TAB_BAR_H);
+    ui.spacing_mut().item_spacing.x = 0.0;
+
+    let mut switch_to = None;
+    let mut close_idx = None;
+    let active = workspace.active_tab;
+    let mut last_tab_right = bar_rect.left();
+
     ui.horizontal(|ui| {
-        ui.set_min_height(36.0);
+        ui.set_min_height(TAB_BAR_H);
         ui.spacing_mut().item_spacing.x = 0.0;
 
         if !sidebar.show
@@ -453,15 +465,6 @@ fn draw_tab_bar(
         {
             sidebar.show = true;
         }
-
-        let n = workspace.tabs.len().max(1);
-        let actions_w = 28.0 * 3.0 + 8.0;
-        let avail = (ui.available_width() - actions_w).max(110.0);
-        let tab_w = (avail / n as f32).clamp(110.0, 260.0);
-
-        let mut switch_to = None;
-        let mut close_idx = None;
-        let active = workspace.active_tab;
 
         for (i, tab) in workspace.tabs.iter().enumerate() {
             let selected = i == active;
@@ -472,33 +475,34 @@ fn draw_tab_bar(
             } else {
                 ui_theme::SURFACE_1
             };
-            let text_color = if selected {
-                ui_theme::TEXT
-            } else {
-                ui_theme::TAB_INACTIVE_TEXT
-            };
 
-            // Full-height tab rect flush with panel (avoids the "cut" bar look).
             let (rect, resp) =
-                ui.allocate_exact_size(Vec2::new(tab_w, ui.available_height().max(36.0)), Sense::click());
+                ui.allocate_exact_size(Vec2::new(TAB_WIDTH, TAB_BAR_H), Sense::click());
+            last_tab_right = rect.right();
             ui.painter()
                 .rect_filled(rect, CornerRadius::ZERO, fill);
 
+            // Separator only between two inactive tabs.
             if i > 0 {
-                ui.painter().vline(
-                    rect.left(),
-                    rect.y_range(),
-                    Stroke::new(1.0, ui_theme::BORDER),
-                );
+                let prev_active = i - 1 == active;
+                if !selected && !prev_active {
+                    let sep_x = rect.left();
+                    ui.painter().vline(
+                        sep_x,
+                        egui::Rangef::new(rect.top() + 12.0, rect.top() + 12.0 + 14.67),
+                        Stroke::new(1.0, ui_theme::TAB_SEP),
+                    );
+                }
             }
 
-            if resp.hovered() && !selected {
-                ui.painter()
-                    .rect_filled(rect, CornerRadius::ZERO, ui_theme::HOVER);
-            }
-
-            // Active tab blends into terminal: erase bottom hairline.
             if selected {
+                // Right edge of active tab.
+                ui.painter().vline(
+                    rect.right() - 0.5,
+                    rect.y_range(),
+                    Stroke::new(1.0, ui_theme::TAB_ACTIVE_EDGE),
+                );
+                // Erase bottom border under active tab (merge with terminal).
                 ui.painter().rect_filled(
                     egui::Rect::from_min_max(
                         egui::pos2(rect.left(), rect.bottom() - 2.0),
@@ -509,64 +513,69 @@ fn draw_tab_bar(
                 );
             }
 
-            let mut x = rect.left() + 12.0;
-            let cy = rect.center().y;
-
-            match tab.status {
-                SessionStatus::Waiting => {
-                    ui.painter()
-                        .circle_filled(egui::pos2(x + 3.0, cy), 3.0, ui_theme::WARN);
-                    x += 10.0;
-                }
-                SessionStatus::Finished => {
-                    ui.painter()
-                        .circle_filled(egui::pos2(x + 3.0, cy), 3.0, ui_theme::OK);
-                    x += 10.0;
-                }
-                SessionStatus::Active => {}
+            if resp.hovered() && !selected {
+                ui.painter()
+                    .rect_filled(rect, CornerRadius::ZERO, ui_theme::HOVER);
             }
-
-            if let Some(tex) = logo_tex.as_ref() {
-                let img = egui::Rect::from_center_size(egui::pos2(x + 7.0, cy), Vec2::splat(14.0));
-                ui.painter().image(
-                    tex.id(),
-                    img,
-                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                    Color32::WHITE,
-                );
-            } else {
-                ui.painter().text(
-                    egui::pos2(x, cy),
-                    egui::Align2::LEFT_CENTER,
-                    icon.codepoint().to_string(),
-                    egui::FontId::new(14.0, egui::FontFamily::Name(ui_theme::FONT_ICONS.into())),
-                    color,
-                );
-            }
-            x += 18.0;
 
             let title = if tab.session_name.is_empty() {
                 tab.title.clone()
             } else {
                 tab.session_name.clone()
             };
-            ui.painter().text(
-                egui::pos2(x, cy),
-                egui::Align2::LEFT_CENTER,
-                title,
-                egui::FontId::proportional(ui_theme::SIZE_TITLE),
-                if resp.hovered() {
-                    ui_theme::TEXT
-                } else {
-                    text_color
-                },
-            );
 
-            // Close: stable id, consume click so the tab doesn't also activate (flicker).
-            let show_close = resp.hovered() || selected;
+            if selected {
+                // Left-aligned: icon at x+5.3, title at x+26.7, fade last 20%.
+                let icon_x = rect.left() + 5.3;
+                let icon_y = rect.top() + 8.0;
+                paint_tab_icon(
+                    ui,
+                    logo_tex.as_ref(),
+                    icon,
+                    color,
+                    egui::pos2(icon_x + 8.0, icon_y + 8.0),
+                    16.0,
+                    tab.status,
+                );
+                let title_x = rect.left() + 26.7;
+                let title_baseline = rect.top() + 25.33;
+                paint_tab_title_fade(
+                    ui,
+                    &title,
+                    egui::pos2(title_x, title_baseline),
+                    rect.right() - title_x - 8.0,
+                    ui_theme::TEXT,
+                    ui_theme::BG,
+                );
+            } else {
+                // Centered: icon + 1px gap + title.
+                let font = egui::FontId::proportional(ui_theme::SIZE_UI);
+                let galley = ui.fonts_mut(|f| {
+                    f.layout_no_wrap(title.clone(), font.clone(), ui_theme::TEXT_MUTED)
+                });
+                let content_w = 16.0 + 1.0 + galley.size().x;
+                let start_x = rect.center().x - content_w * 0.5;
+                paint_tab_icon(
+                    ui,
+                    logo_tex.as_ref(),
+                    icon,
+                    color,
+                    egui::pos2(start_x + 8.0, rect.center().y),
+                    16.0,
+                    tab.status,
+                );
+                ui.painter().galley(
+                    egui::pos2(start_x + 17.0, title_baseline_center(rect, &galley)),
+                    galley,
+                    ui_theme::TEXT_MUTED,
+                );
+            }
+
+            // Close on hover only (midterm); middle-click closes.
+            let show_close = resp.hovered();
             let close_rect = egui::Rect::from_center_size(
-                egui::pos2(rect.right() - 14.0, cy),
-                Vec2::splat(20.0),
+                egui::pos2(rect.right() - 14.0, rect.center().y),
+                Vec2::splat(18.0),
             );
             let close_id = ui.scope_id().with("tab_close").with(tab.id);
             let close_resp = ui.interact(close_rect, close_id, Sense::click());
@@ -596,42 +605,121 @@ fn draw_tab_bar(
             }
         }
 
-        if let Some(i) = switch_to {
-            workspace.active_tab = i;
+        // "+" right after the last tab (gap ≈ 13).
+        ui.add_space(13.0);
+        let plus = icon_square(ui, Icon::Plus, "New tab (Ctrl+Shift+T)");
+        if plus.clicked() {
+            let profile = crate::shell::default_profile();
+            let cwd = workspace.active_tab().and_then(|t| t.cwd.clone());
+            let _ = workspace.open_tab(ui.ctx(), &profile, cwd);
         }
-        if let Some(i) = close_idx {
-            if i < workspace.tabs.len() {
-                workspace.tabs.remove(i);
-                if workspace.active_tab >= workspace.tabs.len() && !workspace.tabs.is_empty() {
-                    workspace.active_tab = workspace.tabs.len() - 1;
-                } else if i < workspace.active_tab {
-                    workspace.active_tab = workspace.active_tab.saturating_sub(1);
-                }
-                workspace.mark_dirty();
-            }
+        if plus.secondary_clicked() {
+            *show_menu = !*show_menu;
         }
+        let _ = last_tab_right;
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            // Stats panel lives in prompt 05 — show the affordance so it's discoverable.
+            // Midterm right icons: activity then files/globe (RTL paints files first).
+            if icon_square(ui, Icon::Folder, "Files (Ctrl+Shift+F)").clicked() {
+                files.show = !files.show;
+            }
             let _ = icon_square(
                 ui,
                 Icon::ChartColumn,
-                "Estadísticas (próximamente · Ctrl+Shift+I)",
+                "Activity (Ctrl+Shift+I · coming soon)",
             );
-            if icon_square(ui, Icon::Folder, "Archivos (Ctrl+Shift+F)").clicked() {
-                files.show = !files.show;
-            }
-            let plus = icon_square(ui, Icon::Plus, "Nueva terminal (Ctrl+Shift+T)");
-            if plus.clicked() {
-                let profile = crate::shell::default_profile();
-                let cwd = workspace.active_tab().and_then(|t| t.cwd.clone());
-                let _ = workspace.open_tab(ui.ctx(), &profile, cwd);
-            }
-            if plus.secondary_clicked() {
-                *show_menu = !*show_menu;
-            }
         });
     });
+
+    if let Some(i) = switch_to {
+        workspace.active_tab = i;
+    }
+    if let Some(i) = close_idx {
+        if i < workspace.tabs.len() {
+            workspace.tabs.remove(i);
+            if workspace.active_tab >= workspace.tabs.len() && !workspace.tabs.is_empty() {
+                workspace.active_tab = workspace.tabs.len() - 1;
+            } else if i < workspace.active_tab {
+                workspace.active_tab = workspace.active_tab.saturating_sub(1);
+            }
+            workspace.mark_dirty();
+        }
+    }
+}
+
+fn title_baseline_center(rect: egui::Rect, galley: &egui::Galley) -> f32 {
+    rect.center().y - galley.size().y * 0.5
+}
+
+fn paint_tab_icon(
+    ui: &egui::Ui,
+    logo: Option<&egui::TextureHandle>,
+    icon: Icon,
+    color: Color32,
+    center: egui::Pos2,
+    size: f32,
+    status: SessionStatus,
+) {
+    if let Some(tex) = logo {
+        let img = egui::Rect::from_center_size(center, Vec2::splat(size));
+        ui.painter().image(
+            tex.id(),
+            img,
+            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+            Color32::WHITE,
+        );
+    } else {
+        ui.painter().text(
+            center,
+            egui::Align2::CENTER_CENTER,
+            icon.codepoint().to_string(),
+            egui::FontId::new(size, egui::FontFamily::Name(ui_theme::FONT_ICONS.into())),
+            color,
+        );
+    }
+    // Small status badge on the icon.
+    let badge = egui::pos2(center.x + size * 0.35, center.y - size * 0.35);
+    match status {
+        SessionStatus::Finished => {
+            ui.painter()
+                .circle_filled(badge, 3.0, ui_theme::STATUS_DOT_OK);
+        }
+        SessionStatus::Waiting => {
+            ui.painter().circle_filled(badge, 3.0, ui_theme::WAITING);
+        }
+        SessionStatus::Active => {}
+    }
+}
+
+/// Paint title with a transparent→bg fade over the last 20% (no ellipsis).
+fn paint_tab_title_fade(
+    ui: &egui::Ui,
+    title: &str,
+    baseline_left: egui::Pos2,
+    max_w: f32,
+    color: Color32,
+    fade_to: Color32,
+) {
+    if max_w <= 1.0 {
+        return;
+    }
+    let font = egui::FontId::proportional(ui_theme::SIZE_UI);
+    let galley = ui.fonts_mut(|f| f.layout_no_wrap(title.to_owned(), font, color));
+    let pos = egui::pos2(baseline_left.x, baseline_left.y - galley.size().y * 0.8);
+    let clip = egui::Rect::from_min_size(pos, Vec2::new(max_w, galley.size().y + 4.0));
+    let painter = ui.painter().with_clip_rect(clip);
+    painter.galley(pos, galley, color);
+    let fade_w = (max_w * 0.20).max(8.0);
+    let fade_rect = egui::Rect::from_min_max(
+        egui::pos2(clip.right() - fade_w, clip.top()),
+        clip.max,
+    );
+    let [r, g, b, _] = fade_to.to_array();
+    painter.rect_filled(
+        fade_rect,
+        CornerRadius::ZERO,
+        Color32::from_rgba_unmultiplied(r, g, b, 220),
+    );
 }
 
 /// Hit-test strip on a panel edge. Returns the interact response (check `dragged`).
@@ -890,10 +978,11 @@ fn render_node(
                     }
                 });
                 if dim_inactive && !is_focused {
+                    // Midterm: black @ alpha 0.4 (measured brightness ×0.6).
                     ui.painter().rect_filled(
                         rect,
                         CornerRadius::ZERO,
-                        Color32::from_black_alpha(70),
+                        ui_theme::PANE_DIM,
                     );
                 }
             }
@@ -972,7 +1061,7 @@ fn render_node(
             let div_color = if hovering {
                 ui_theme::DIVIDER_ACTIVE
             } else {
-                ui_theme::DIVIDER
+                ui_theme::BORDER // pane divider #1C1C1C
             };
             let mid = match *direction {
                 SplitDir::Vertical => {

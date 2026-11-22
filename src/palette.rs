@@ -75,7 +75,7 @@ impl CommandPalette {
                                 egui::TextEdit::singleline(&mut self.query)
                                     .frame(egui::Frame::NONE)
                                     .desired_width(width - 48.0)
-                                    .hint_text("Buscar…")
+                                    .hint_text("Search…")
                                     .text_color(ui_theme::TEXT),
                             );
                             resp.request_focus();

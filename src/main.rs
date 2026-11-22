@@ -18,7 +18,7 @@ mod ui_theme;
 use anyhow::Context;
 
 /// Bumped whenever we need Matias to confirm he's running a fresh binary.
-const BUILD_MARK: &str = "resize-r6";
+const BUILD_MARK: &str = "midterm-r7";
 
 /// Parse `--window-size WxH` (logical px) for midterm acceptance screenshots.
 fn parse_window_size(args: &[String]) -> Option<[f32; 2]> {

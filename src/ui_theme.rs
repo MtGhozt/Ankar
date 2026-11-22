@@ -29,6 +29,8 @@ pub const PRESSED: Color32 = Color32::from_rgb(0x1A, 0x1A, 0x1A);
 // --- Lines ---
 pub const BORDER: Color32 = Color32::from_rgb(0x1C, 0x1C, 0x1C);
 pub const SIDEBAR_BORDER: Color32 = BORDER;
+pub const TAB_SEP: Color32 = Color32::from_rgb(0x15, 0x15, 0x15);
+pub const TAB_ACTIVE_EDGE: Color32 = Color32::from_rgb(0x1D, 0x1D, 0x1D);
 pub const INPUT_BORDER: Color32 = Color32::from_rgb(0x14, 0x14, 0x14);
 pub const DIVIDER: Color32 = Color32::from_rgb(0x19, 0x19, 0x19);
 pub const SIDEBAR_DIVIDER: Color32 = DIVIDER;
@@ -55,6 +57,10 @@ pub const LAUNCHER_BADGE: Color32 = Color32::from_rgb(0x65, 0xB1, 0x77);
 pub const ERROR: Color32 = Color32::from_rgb(0xE5, 0x69, 0x5B);
 pub const ACCENT: Color32 = Color32::from_rgb(0x0F, 0x8C, 0xEC);
 pub const CURSOR: Color32 = ACCENT;
+/// Default terminal foreground (`#E8E8E8`).
+pub const TERM_FG: Color32 = Color32::from_rgb(0xE8, 0xE8, 0xE8);
+/// Unfocused pane dim overlay (black @ 0.4).
+pub const PANE_DIM: Color32 = Color32::from_black_alpha(102);
 
 /// UI type scale (logical px). Only these two sizes for chrome text.
 pub const SIZE_UI: f32 = 13.0;
