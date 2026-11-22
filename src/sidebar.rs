@@ -99,132 +99,219 @@ pub fn draw(
     let mut toggle_group: Option<String> = None;
     let mut start_rename: Option<usize> = None;
 
-    // --- Top actions ---
-    ui.add_space(2.0);
-    ui.horizontal(|ui| {
-        let avail = ui.available_width();
-        let square = 30.0;
-        let gap = 6.0;
-        let main_w = (avail - square - gap).max(80.0);
+    // --- Top actions: New session 260×30 + folder 30×30 (mockup x 6 / 273.33) ---
+    ui.add_space(7.33); // title strip ends at y38; buttons at y45.33 → +7.33 into content
+    let row = ui.available_rect_before_wrap();
+    let (actions_rect, _) = ui.allocate_exact_size(Vec2::new(row.width(), 30.0), Sense::hover());
+    let side_l = 6.0;
+    let new_rect = Rect::from_min_size(
+        egui::pos2(actions_rect.left() + side_l, actions_rect.top()),
+        Vec2::new(260.0, 30.0),
+    );
+    let folder_rect = Rect::from_min_size(
+        egui::pos2(actions_rect.left() + 273.33, actions_rect.top()),
+        Vec2::splat(30.0),
+    );
+    // Clamp folder into row if sidebar is narrow.
+    let folder_rect = if folder_rect.right() > actions_rect.right() - 2.0 {
+        Rect::from_min_size(
+            egui::pos2(actions_rect.right() - 32.0, actions_rect.top()),
+            Vec2::splat(30.0),
+        )
+    } else {
+        folder_rect
+    };
+    let new_rect = if new_rect.right() + 6.0 > folder_rect.left() {
+        Rect::from_min_size(
+            new_rect.min,
+            Vec2::new((folder_rect.left() - 6.0 - new_rect.left()).max(120.0), 30.0),
+        )
+    } else {
+        new_rect
+    };
 
-        let new_inner = Frame::NONE
-            .fill(ui_theme::BUTTON_BG)
-            .corner_radius(CornerRadius::same(ui_theme::RADIUS_ROW))
-            .inner_margin(Margin::symmetric(10, 0))
-            .show(ui, |ui| {
-                ui.set_min_size(Vec2::new(main_w, 30.0));
-                ui.set_max_height(30.0);
-                ui.horizontal_centered(|ui| {
-                    ui.label(ui_theme::icon(Icon::SquarePen, 16.0, ui_theme::TEXT));
-                    ui.add_space(6.0);
-                    ui.label(ui_theme::text_title("New session"));
-                    ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
-                        let shortcut = if ui.available_width() > 52.0 {
-                            "Ctrl+Shift+T"
-                        } else {
-                            "⇧^T"
-                        };
-                        ui.label(
-                            RichText::new(shortcut)
-                                .size(ui_theme::SIZE_UI)
-                                .color(ui_theme::TEXT_MUTED),
-                        );
-                    });
-                });
-            })
-            .response;
-        let new_resp = ui.interact(new_inner.rect, search_field_id().with("new_session"), Sense::click());
-        paint_button_top_highlight(&painter, new_resp.rect, ui_theme::RADIUS_ROW);
-        if new_resp.hovered() {
-            painter.rect_filled(
-                new_resp.rect,
-                CornerRadius::same(ui_theme::RADIUS_ROW),
-                ui_theme::ROW_HOVER,
+    {
+        let new_resp = ui.interact(
+            new_rect,
+            search_field_id().with("new_session"),
+            Sense::click(),
+        );
+        let fill = if new_resp.hovered() {
+            ui_theme::ROW_HOVER
+        } else {
+            ui_theme::BUTTON_BG
+        };
+        painter.rect_filled(new_rect, CornerRadius::same(ui_theme::RADIUS_ROW), fill);
+        paint_button_top_highlight(&painter, new_rect, ui_theme::RADIUS_ROW);
+        let y_mid = new_rect.center().y;
+        let font = FontId::new(ui_theme::SIZE_UI, FontFamily::Proportional);
+        // Icon at mockup (18, 52) → x = bar_left + 12 from new_rect left (=18-6).
+        painter.text(
+            egui::pos2(new_rect.left() + 12.0, y_mid),
+            Align2::LEFT_CENTER,
+            Icon::SquarePen.codepoint().to_string(),
+            FontId::new(16.0, FontFamily::Name(ui_theme::FONT_ICONS.into())),
+            ui_theme::TEXT,
+        );
+        // Label at x 42.67 → +36.67 from new_rect left.
+        let label_rect = painter.text(
+            egui::pos2(new_rect.left() + 36.67, y_mid),
+            Align2::LEFT_CENTER,
+            "New session",
+            font.clone(),
+            ui_theme::TEXT,
+        );
+        // Shortcut right edge at x 254.7 (mockup); shrink string if it would collide.
+        let shortcut_right = new_rect.left() + (254.7 - 6.0);
+        let mut shortcut = "Ctrl+Shift+T";
+        let mut sg = painter.layout_no_wrap(
+            shortcut.to_owned(),
+            font.clone(),
+            ui_theme::TEXT_MUTED,
+        );
+        if shortcut_right - sg.size().x < label_rect.right() + 8.0 {
+            shortcut = "⇧^T";
+            sg = painter.layout_no_wrap(
+                shortcut.to_owned(),
+                font.clone(),
+                ui_theme::TEXT_MUTED,
             );
-            paint_button_top_highlight(&painter, new_resp.rect, ui_theme::RADIUS_ROW);
         }
+        painter.galley(
+            egui::pos2(shortcut_right - sg.size().x, y_mid - sg.size().y * 0.5),
+            sg,
+            ui_theme::TEXT_MUTED,
+        );
         if new_resp.clicked() {
             new_session = true;
         }
+    }
 
-        let folder_inner = Frame::NONE
-            .fill(ui_theme::BUTTON_BG)
-            .corner_radius(CornerRadius::same(ui_theme::RADIUS_ROW))
-            .show(ui, |ui| {
-                ui.set_min_size(Vec2::splat(30.0));
-                ui.centered_and_justified(|ui| {
-                    ui.label(ui_theme::icon(Icon::FolderPlus, 17.0, ui_theme::TEXT_MUTED));
-                });
-            })
-            .response;
-        let folder_id = search_field_id().with("new_in_folder");
+    {
         let folder_resp = ui
-            .interact(folder_inner.rect, folder_id, Sense::click())
+            .interact(
+                folder_rect,
+                search_field_id().with("new_in_folder"),
+                Sense::click(),
+            )
             .on_hover_text("New session in active folder");
-        paint_button_top_highlight(&painter, folder_resp.rect, ui_theme::RADIUS_ROW);
-        if folder_resp.hovered() {
-            painter.rect_filled(
-                folder_resp.rect,
-                CornerRadius::same(ui_theme::RADIUS_ROW),
-                ui_theme::ROW_HOVER,
-            );
-            paint_button_top_highlight(&painter, folder_resp.rect, ui_theme::RADIUS_ROW);
-        }
+        let fill = if folder_resp.hovered() {
+            ui_theme::ROW_HOVER
+        } else {
+            ui_theme::BUTTON_BG
+        };
+        painter.rect_filled(folder_rect, CornerRadius::same(ui_theme::RADIUS_ROW), fill);
+        paint_button_top_highlight(&painter, folder_rect, ui_theme::RADIUS_ROW);
+        painter.text(
+            folder_rect.center(),
+            Align2::CENTER_CENTER,
+            Icon::FolderPlus.codepoint().to_string(),
+            FontId::new(17.0, FontFamily::Name(ui_theme::FONT_ICONS.into())),
+            ui_theme::TEXT_MUTED,
+        );
         if folder_resp.clicked() {
             new_in_folder = true;
         }
-    });
-
-    ui.add_space(8.0);
-
-    // --- Search ---
-    let search_id = search_field_id();
-    let search_frame = Frame::NONE
-        .fill(ui_theme::INPUT_BG)
-        .stroke(Stroke::new(1.0, ui_theme::INPUT_BORDER))
-        .corner_radius(CornerRadius::same(ui_theme::RADIUS_ROW))
-        .inner_margin(Margin::symmetric(8, 0))
-        .show(ui, |ui| {
-            ui.set_min_height(29.33);
-            ui.set_max_height(29.33);
-            ui.with_layout(egui::Layout::left_to_right(Align::Center), |ui| {
-                ui.set_min_height(29.33);
-                ui.label(ui_theme::icon(Icon::Search, 12.5, ui_theme::TEXT_MUTED));
-                ui.add_space(4.0);
-                ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
-                    kbd_chip(ui, "/");
-                    let edit = egui::TextEdit::singleline(&mut sidebar.search)
-                        .id(search_id)
-                        .frame(Frame::NONE)
-                        .margin(Margin::ZERO)
-                        .align(Align2::LEFT_CENTER)
-                        .desired_width(ui.available_width())
-                        .hint_text(RichText::new("Search agents").color(ui_theme::TEXT_MUTED))
-                        .font(FontId::new(ui_theme::SIZE_UI, FontFamily::Proportional))
-                        .text_color(ui_theme::TEXT);
-                    let resp = ui.add(edit);
-                    if sidebar.search_focus {
-                        resp.request_focus();
-                        sidebar.search_focus = false;
-                    }
-                    if resp.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                        sidebar.search.clear();
-                        resp.surrender_focus();
-                    }
-                    if resp.clicked()
-                        || (ui.rect_contains_pointer(ui.max_rect())
-                            && ui.input(|i| i.pointer.primary_clicked())
-                            && !resp.has_focus())
-                    {
-                        resp.request_focus();
-                    }
-                });
-            });
-        });
-    if search_frame.response.clicked() {
-        ui.memory_mut(|m| m.request_focus(search_id));
     }
 
+    // Gap mockup: buttons bottom 75.33 → search top 86 = 10.67
+    ui.add_space(10.67);
+
+    // --- Search: 297.33×29.33, kbd chip 20.67×18.67 ---
+    let search_id = search_field_id();
+    let row = ui.available_rect_before_wrap();
+    let (search_row, _) = ui.allocate_exact_size(Vec2::new(row.width(), 29.33), Sense::click());
+    let search_w = (search_row.width() - side_l - 5.0).max(180.0);
+    let search_rect = Rect::from_min_size(
+        egui::pos2(search_row.left() + side_l, search_row.top()),
+        Vec2::new(search_w, 29.33),
+    );
+    let s = search_rect.width() / 297.33;
+    let map_sx = |mx: f32| search_rect.left() + (mx - 6.0) * s;
+
+    painter.rect(
+        search_rect,
+        CornerRadius::same(ui_theme::RADIUS_ROW),
+        ui_theme::INPUT_BG,
+        Stroke::new(1.0, ui_theme::INPUT_BORDER),
+        egui::StrokeKind::Inside,
+    );
+
+    // Search icon at mockup (18, 93.3).
+    painter.text(
+        egui::pos2(map_sx(18.0), search_rect.center().y),
+        Align2::LEFT_CENTER,
+        Icon::Search.codepoint().to_string(),
+        FontId::new(12.5, FontFamily::Name(ui_theme::FONT_ICONS.into())),
+        ui_theme::TEXT_MUTED,
+    );
+
+    // `/` kbd chip: 20.67×18.67 at (279.33, 91.33) → vertically centered in search.
+    let kbd_w = 20.67 * s.clamp(0.9, 1.15);
+    let kbd_h = 18.67 * s.clamp(0.9, 1.15);
+    let kbd_rect = Rect::from_center_size(
+        egui::pos2(map_sx(279.33) + kbd_w * 0.5, search_rect.center().y),
+        Vec2::new(kbd_w, kbd_h),
+    );
+    painter.rect(
+        kbd_rect,
+        CornerRadius::same(ui_theme::RADIUS_KBD),
+        ui_theme::KBD_BG,
+        Stroke::new(1.0, ui_theme::KBD_BORDER),
+        egui::StrokeKind::Inside,
+    );
+    painter.text(
+        kbd_rect.center(),
+        Align2::CENTER_CENTER,
+        "/",
+        FontId::new(ui_theme::SIZE_UI, FontFamily::Proportional),
+        ui_theme::TEXT_MUTED,
+    );
+
+    // Text field between icon and kbd.
+    let edit_left = map_sx(42.67);
+    let edit_right = kbd_rect.left() - 6.0;
+    let edit_rect = Rect::from_min_max(
+        egui::pos2(edit_left, search_rect.top()),
+        egui::pos2(edit_right.max(edit_left + 40.0), search_rect.bottom()),
+    );
+    let mut edit_ui = ui.new_child(
+        egui::UiBuilder::new()
+            .id_salt("sidebar_search_edit")
+            .max_rect(edit_rect)
+            .layout(egui::Layout::left_to_right(Align::Center)),
+    );
+    let edit = egui::TextEdit::singleline(&mut sidebar.search)
+        .id(search_id)
+        .frame(Frame::NONE)
+        .margin(Margin::ZERO)
+        .align(Align2::LEFT_CENTER)
+        .desired_width(edit_rect.width())
+        .hint_text(
+            RichText::new("Search agents")
+                .size(ui_theme::SIZE_UI)
+                .color(ui_theme::TEXT_MUTED),
+        )
+        .font(FontId::new(ui_theme::SIZE_UI, FontFamily::Proportional))
+        .text_color(ui_theme::TEXT);
+    let resp = edit_ui.add(edit);
+    if sidebar.search_focus {
+        resp.request_focus();
+        sidebar.search_focus = false;
+    }
+    if resp.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+        sidebar.search.clear();
+        resp.surrender_focus();
+    }
+    if search_row.contains(ui.input(|i| i.pointer.interact_pos().unwrap_or_default()))
+        && ui.input(|i| i.pointer.primary_clicked())
+        && !resp.has_focus()
+        && !kbd_rect.contains(ui.input(|i| i.pointer.interact_pos().unwrap_or_default()))
+    {
+        resp.request_focus();
+    }
+
+    // Gap mockup: search bottom 115.33 → filter top 123.33 = 8
     ui.add_space(8.0);
 
     // Counts for filters
@@ -1148,21 +1235,6 @@ fn icon_btn(ui: &mut Ui, kind: Icon, color: Color32, size: f32) -> egui::Respons
         color,
     );
     resp
-}
-
-fn kbd_chip(ui: &mut Ui, label: &str) {
-    Frame::NONE
-        .fill(ui_theme::KBD_BG)
-        .stroke(Stroke::new(1.0, ui_theme::KBD_BORDER))
-        .corner_radius(CornerRadius::same(ui_theme::RADIUS_KBD))
-        .inner_margin(Margin::symmetric(5, 2))
-        .show(ui, |ui| {
-            ui.label(
-                RichText::new(label)
-                    .size(ui_theme::SIZE_UI)
-                    .color(ui_theme::TEXT_MUTED),
-            );
-        });
 }
 
 fn relative_time(d: Duration) -> String {
