@@ -78,7 +78,9 @@ pub fn draw(
     sidebar_rect: Rect,
 ) {
     let _ = sidebar.now();
+    ui.spacing_mut().item_spacing = Vec2::ZERO;
     let painter = ui.painter().clone();
+    // midterm footer: launchers y 951–974, archived baseline 1016 in 1033 window → ~92 / ~46 from bottom.
     let divider_launcher_y = sidebar_rect.bottom() - 92.0;
     let divider_archived_y = sidebar_rect.bottom() - 46.0;
     let filter_bottom_y = sidebar_rect.top() + 151.33;

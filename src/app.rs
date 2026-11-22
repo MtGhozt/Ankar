@@ -619,11 +619,11 @@ fn draw_tab_bar(
         let _ = last_tab_right;
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            // Midterm right icons: activity then files/globe (RTL paints files first).
-            if icon_square(ui, Icon::Folder, "Files (Ctrl+Shift+F)").clicked() {
+            // Midterm right icons: 18px activity + files (RTL paints files first).
+            if tab_bar_right_icon(ui, Icon::Folder, "Files (Ctrl+Shift+F)").clicked() {
                 files.show = !files.show;
             }
-            let _ = icon_square(
+            let _ = tab_bar_right_icon(
                 ui,
                 Icon::ChartColumn,
                 "Activity (Ctrl+Shift+I · coming soon)",
@@ -677,7 +677,7 @@ fn paint_tab_icon(
             color,
         );
     }
-    // Small status badge on the icon.
+    // Small status badge on the icon (Done green / Waiting amber / Working spinner).
     let badge = egui::pos2(center.x + size * 0.35, center.y - size * 0.35);
     match status {
         SessionStatus::Finished => {
@@ -687,7 +687,22 @@ fn paint_tab_icon(
         SessionStatus::Waiting => {
             ui.painter().circle_filled(badge, 3.0, ui_theme::WAITING);
         }
-        SessionStatus::Active => {}
+        SessionStatus::Active => {
+            let time = ui.input(|i| i.time) as f32;
+            ui.painter()
+                .circle_filled(badge, 4.5, ui_theme::SURFACE_1);
+            const N: u32 = 8;
+            let rot = time * 1.8;
+            for i in 0..N {
+                let a = rot + i as f32 * (std::f32::consts::TAU / N as f32);
+                let t = 1.0 - (i as f32 / N as f32);
+                let alpha = (0.18 + 0.82 * t).clamp(0.15, 1.0);
+                let c = Color32::from_rgba_unmultiplied(0x90, 0x90, 0x90, (alpha * 255.0) as u8);
+                let p = badge + Vec2::new(a.cos(), a.sin()) * 3.0;
+                ui.painter().circle_filled(p, 1.0, c);
+            }
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
+        }
     }
 }
 
@@ -810,6 +825,23 @@ fn icon_square(ui: &mut egui::Ui, kind: Icon, tip: &str) -> egui::Response {
         egui::Align2::CENTER_CENTER,
         kind.codepoint().to_string(),
         egui::FontId::new(14.0, egui::FontFamily::Name(ui_theme::FONT_ICONS.into())),
+        ui_theme::TEXT_MUTED,
+    );
+    resp.on_hover_text(tip)
+}
+
+/// Midterm tab-bar right icons: 18px glyph in a compact hit target.
+fn tab_bar_right_icon(ui: &mut egui::Ui, kind: Icon, tip: &str) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(Vec2::splat(22.0), Sense::click());
+    if resp.hovered() {
+        ui.painter()
+            .rect_filled(rect, CornerRadius::same(ui_theme::RADIUS_KBD), ui_theme::HOVER);
+    }
+    ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        kind.codepoint().to_string(),
+        egui::FontId::new(18.0, egui::FontFamily::Name(ui_theme::FONT_ICONS.into())),
         ui_theme::TEXT_MUTED,
     );
     resp.on_hover_text(tip)
