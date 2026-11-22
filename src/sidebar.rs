@@ -645,132 +645,136 @@ fn draw_filter_bar(
     n_waiting: usize,
     n_working: usize,
 ) {
-    if n_working > 0 {
-        ui.ctx()
-            .request_repaint_after(Duration::from_millis(100));
-    }
+    // Spinner glyph always visible — keep it turning.
+    ui.ctx()
+        .request_repaint_after(Duration::from_millis(100));
     let time = ui.input(|i| i.time) as f32;
-    Frame::NONE
-        .fill(ui_theme::INPUT_BG)
-        .stroke(Stroke::new(1.0, ui_theme::INPUT_BORDER))
-        .corner_radius(CornerRadius::same(ui_theme::RADIUS_ROW))
-        .inner_margin(2.0)
-        .show(ui, |ui| {
-            ui.set_min_height(28.0);
-            let bar_rect = ui.max_rect();
-            let inner = bar_rect.shrink(2.0);
-            let seg_w = inner.width() / 3.0;
-            let painter = ui.painter();
-            let font = FontId::new(ui_theme::SIZE_UI, FontFamily::Proportional);
-            let font_small = FontId::new(ui_theme::SIZE_UI_SMALL, FontFamily::Proportional);
-            let segments = [
-                (SessionFilter::All, "All", n_all, 0u8),
-                (SessionFilter::Waiting, "Waiting", n_waiting, 1u8),
-                (SessionFilter::Working, "Working", n_working, 2u8),
-            ];
-            for (idx, (seg_filter, label, count, _)) in segments.iter().enumerate() {
-                let seg_rect = Rect::from_min_size(
-                    inner.min + Vec2::new(idx as f32 * seg_w, 0.0),
-                    Vec2::new(seg_w, inner.height()),
+
+    // midterm: container x=6, w=297.33, h=28, padding 2, 3×96.67 segments.
+    let row = ui.available_rect_before_wrap();
+    let (row_rect, _) = ui.allocate_exact_size(Vec2::new(row.width(), 28.0), Sense::hover());
+    let side_l = 6.0;
+    let side_r = 5.0;
+    let bar_w = (row_rect.width() - side_l - side_r).max(180.0);
+    let bar = Rect::from_min_size(
+        egui::pos2(row_rect.left() + side_l, row_rect.top()),
+        Vec2::new(bar_w, 28.0),
+    );
+    // Scale mockup x coords (designed for bar at x=6, w=297.33) onto current bar.
+    let s = bar.width() / 297.33;
+    let map_x = |mx: f32| bar.left() + (mx - 6.0) * s;
+    let y_mid = bar.center().y;
+
+    let painter = ui.painter();
+    painter.rect(
+        bar,
+        CornerRadius::same(ui_theme::RADIUS_ROW),
+        ui_theme::INPUT_BG,
+        Stroke::new(1.0, ui_theme::INPUT_BORDER),
+        egui::StrokeKind::Inside,
+    );
+
+    let inner = bar.shrink(2.0);
+    let seg_w = inner.width() / 3.0;
+    let font = FontId::new(ui_theme::SIZE_UI, FontFamily::Proportional);
+    let segments = [
+        (SessionFilter::All, "All", n_all),
+        (SessionFilter::Waiting, "Waiting", n_waiting),
+        (SessionFilter::Working, "Working", n_working),
+    ];
+
+    for (idx, (seg_filter, label, count)) in segments.iter().enumerate() {
+        let seg_rect = Rect::from_min_size(
+            inner.min + Vec2::new(idx as f32 * seg_w, 0.0),
+            Vec2::new(seg_w, inner.height()),
+        );
+        let selected = *filter == *seg_filter;
+        if selected {
+            painter.rect_filled(
+                seg_rect,
+                CornerRadius::same(5),
+                ui_theme::SEGMENT_ACTIVE,
+            );
+        }
+        let id = ui.scope_id().with(format!("filter_{idx}"));
+        let resp = ui.interact(seg_rect, id, Sense::click());
+        if resp.clicked() {
+            *filter = *seg_filter;
+        }
+        let text_color = if selected {
+            ui_theme::TEXT
+        } else {
+            ui_theme::TEXT_MUTED
+        };
+
+        match seg_filter {
+            SessionFilter::All => {
+                // "All" @ x 42.67, count @ x 62.67 — both 13px.
+                let label_rect = painter.text(
+                    egui::pos2(map_x(42.67), y_mid),
+                    Align2::LEFT_CENTER,
+                    *label,
+                    font.clone(),
+                    text_color,
                 );
-                let selected = *filter == *seg_filter;
-                if selected {
-                    painter.rect_filled(
-                        seg_rect,
-                        CornerRadius::same(5),
-                        ui_theme::SEGMENT_ACTIVE,
+                painter.text(
+                    egui::pos2(label_rect.right() + 3.0, y_mid),
+                    Align2::LEFT_CENTER,
+                    format!("{count}"),
+                    font.clone(),
+                    ui_theme::TEXT_MUTED,
+                );
+            }
+            SessionFilter::Waiting => {
+                // Dot Ø7 #454545 centered at (128.7, mid); label @ x 139.33.
+                painter.circle_filled(
+                    egui::pos2(map_x(128.7), y_mid),
+                    3.5 * s.clamp(0.85, 1.25),
+                    ui_theme::FILTER_WAITING_DOT,
+                );
+                let label_rect = painter.text(
+                    egui::pos2(map_x(139.33), y_mid),
+                    Align2::LEFT_CENTER,
+                    *label,
+                    font.clone(),
+                    text_color,
+                );
+                // Count hidden when 0 (spec).
+                if *count > 0 {
+                    painter.text(
+                        egui::pos2(label_rect.right() + 3.0, y_mid),
+                        Align2::LEFT_CENTER,
+                        format!("{count}"),
+                        font.clone(),
+                        ui_theme::TEXT_MUTED,
                     );
                 }
-                let id = ui.scope_id().with(format!("filter_{idx}"));
-                let resp = ui.interact(seg_rect, id, Sense::click());
-                if resp.clicked() {
-                    *filter = *seg_filter;
-                }
-                let text_color = if selected {
-                    ui_theme::TEXT
-                } else {
-                    ui_theme::TEXT_MUTED
-                };
-                let mut x = seg_rect.left() + 8.0;
-                let y_mid = seg_rect.center().y;
-                match seg_filter {
-                    SessionFilter::All => {
-                        painter.text(
-                            egui::pos2(x, y_mid),
-                            Align2::LEFT_CENTER,
-                            label,
-                            font.clone(),
-                            text_color,
-                        );
-                        x += painter
-                            .layout_no_wrap(label.to_string(), font.clone(), text_color)
-                            .size()
-                            .x;
-                        if *count > 0 {
-                            let c = format!(" {count}");
-                            painter.text(
-                                egui::pos2(x, y_mid),
-                                Align2::LEFT_CENTER,
-                                c,
-                                font_small.clone(),
-                                ui_theme::TEXT_MUTED,
-                            );
-                        }
-                    }
-                    SessionFilter::Waiting => {
-                        painter.circle_filled(
-                            egui::pos2(seg_rect.center().x - 14.0, y_mid),
-                            3.5,
-                            ui_theme::FILTER_WAITING_DOT,
-                        );
-                        painter.text(
-                            egui::pos2(seg_rect.center().x + 4.0, y_mid),
-                            Align2::LEFT_CENTER,
-                            label,
-                            font.clone(),
-                            text_color,
-                        );
-                        if *count > 0 {
-                            painter.text(
-                                egui::pos2(seg_rect.right() - 10.0, y_mid),
-                                Align2::RIGHT_CENTER,
-                                format!("{count}"),
-                                font_small.clone(),
-                                ui_theme::TEXT_MUTED,
-                            );
-                        }
-                    }
-                    SessionFilter::Working => {
-                        let ring_center = egui::pos2(seg_rect.center().x - 10.0, y_mid - 2.0);
-                        paint_dashed_ring(
-                            painter,
-                            ring_center,
-                            6.5,
-                            ui_theme::WORKING_RING,
-                            time,
-                            1.25,
-                            8,
-                        );
-                        painter.text(
-                            egui::pos2(seg_rect.center().x + 10.0, y_mid),
-                            Align2::LEFT_CENTER,
-                            label,
-                            font.clone(),
-                            text_color,
-                        );
-                        if *count > 0 {
-                            painter.text(
-                                egui::pos2(seg_rect.right() - 10.0, y_mid),
-                                Align2::RIGHT_CENTER,
-                                format!("{count}"),
-                                font_small.clone(),
-                                ui_theme::TEXT_MUTED,
-                            );
-                        }
-                    }
+            }
+            SessionFilter::Working => {
+                // Spinner Ø13 at mockup icon box (212, …); label @ 229.33, count @ 284.67.
+                let ring_r = 6.5 * s.clamp(0.85, 1.25);
+                let ring_c = egui::pos2(map_x(212.0) + ring_r, y_mid);
+                paint_working_spinner(painter, ring_c, ring_r, ui_theme::WORKING_RING, time);
+                let label_rect = painter.text(
+                    egui::pos2(map_x(229.33), y_mid),
+                    Align2::LEFT_CENTER,
+                    *label,
+                    font.clone(),
+                    text_color,
+                );
+                if *count > 0 {
+                    let count_x = map_x(284.67).max(label_rect.right() + 3.0);
+                    painter.text(
+                        egui::pos2(count_x, y_mid),
+                        Align2::LEFT_CENTER,
+                        format!("{count}"),
+                        font.clone(),
+                        ui_theme::TEXT_MUTED,
+                    );
                 }
             }
-        });
+        }
+    }
 }
 
 fn draw_group_header(
@@ -1205,6 +1209,28 @@ fn paint_button_top_highlight(painter: &egui::Painter, rect: Rect, radius: u8) {
             rect.top() + 1.0,
             Stroke::new(1.0, ui_theme::BUTTON_HIGHLIGHT),
         );
+    }
+}
+
+/// Filter-chip Working glyph: 8 dots on a ring with alpha fade (matches `i_working.png`).
+fn paint_working_spinner(
+    painter: &egui::Painter,
+    center: egui::Pos2,
+    radius: f32,
+    color: Color32,
+    time: f32,
+) {
+    const N: u32 = 8;
+    let rot = time * 1.8;
+    let dot_r = (radius * 0.28).clamp(1.2, 2.4);
+    for i in 0..N {
+        let a = rot + i as f32 * (std::f32::consts::TAU / N as f32);
+        // Brightest at the head; fade clockwise like the midterm asset.
+        let t = 1.0 - (i as f32 / N as f32);
+        let alpha = (0.18 + 0.82 * t).clamp(0.15, 1.0);
+        let c = Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), (alpha * 255.0) as u8);
+        let p = center + Vec2::new(a.cos(), a.sin()) * radius;
+        painter.circle_filled(p, dot_r, c);
     }
 }
 
