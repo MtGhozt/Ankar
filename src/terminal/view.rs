@@ -492,9 +492,10 @@ fn paint_cursor(
     color: Color32,
     window_focused: bool,
 ) {
-    // 2 px bar cursor (midterm); outline-only when window unfocused.
-    let bar = Rect::from_min_size(Pos2::new(x, y), Vec2::new(2.0, cell_h));
+    // Midterm: focused = 2 px bar, height cell − 3; unfocused = 1 px outline box.
     if window_focused {
+        let h = (cell_h - 3.0).max(1.0);
+        let bar = Rect::from_min_size(Pos2::new(x, y + 1.5), Vec2::new(2.0, h));
         shapes.push(Shape::Rect(RectShape::filled(bar, CornerRadius::ZERO, color)));
     } else {
         shapes.push(Shape::Rect(RectShape::stroke(

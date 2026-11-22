@@ -94,6 +94,10 @@ pub struct Config {
     /// Experimental custom title bar (off by default).
     #[serde(default)]
     pub custom_titlebar: bool,
+    /// Optional host-drawn pane status line for plain shells (off by default).
+    /// TUIs like Claude Code draw their own — leave false to avoid a double bar.
+    #[serde(default)]
+    pub pane_status_bar: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -128,6 +132,7 @@ impl Default for Config {
             dim_inactive_panes: true,
             collapsed_groups: Vec::new(),
             custom_titlebar: false,
+            pane_status_bar: false,
         }
     }
 }

@@ -15,8 +15,8 @@ impl Default for TermColors {
     fn default() -> Self {
         Self {
             background: ui_theme::BG,
-            foreground: Color32::from_rgb(0xE6, 0xE6, 0xE6),
-            cursor: ui_theme::ACCENT,
+            foreground: ui_theme::TERM_FG,
+            cursor: ui_theme::CURSOR,
             ansi: [
                 Color32::from_rgb(0x3A, 0x3A, 0x3A), // black
                 Color32::from_rgb(0xE5, 0x69, 0x5B), // red
