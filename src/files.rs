@@ -64,6 +64,8 @@ struct LoadResult {
 #[derive(Default)]
 pub struct FileViewer {
     pub root: Option<PathBuf>,
+    /// Last shell cwd applied to `root`; manual Parent/Home navigation sticks until it changes.
+    synced_cwd: Option<PathBuf>,
     pub open_file: Option<PathBuf>,
     content: FileContent,
     /// Heavy (>10 MB); dropped whenever the panel is hidden.
@@ -76,10 +78,15 @@ pub struct FileViewer {
 }
 
 impl FileViewer {
-    /// Sync viewer root from the shell cwd. Does not clear navigation if the
-    /// user already browsed elsewhere under the same project — only when the
-    /// shell cwd itself changes.
-    pub fn set_root(&mut self, root: Option<PathBuf>) {
+    /// Follow the shell cwd, but only when it actually changes.
+    pub fn sync_shell_cwd(&mut self, cwd: Option<PathBuf>) {
+        if self.synced_cwd != cwd {
+            self.synced_cwd = cwd.clone();
+            self.set_root(cwd);
+        }
+    }
+
+    fn set_root(&mut self, root: Option<PathBuf>) {
         let root = root.or_else(dirs::home_dir);
         if self.root != root {
             self.root = root;

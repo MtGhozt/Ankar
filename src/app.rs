@@ -181,7 +181,7 @@ impl eframe::App for AnkarApp {
         }
 
         let cwd = self.workspace.active_tab().and_then(|t| t.cwd.clone());
-        self.files.set_root(cwd);
+        self.files.sync_shell_cwd(cwd);
 
         handle_shortcuts(
             ui,
