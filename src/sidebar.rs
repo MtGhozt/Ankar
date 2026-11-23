@@ -34,6 +34,10 @@ pub struct SidebarState {
     pub search_focus: bool,
     pub rename_idx: Option<usize>,
     pub rename_buf: String,
+    /// Focus the rename field only on its first frame, so clicks elsewhere can take the keyboard.
+    rename_just_started: bool,
+    /// Set by the rename field when it loses focus: `true` commits, `false` (Esc) cancels.
+    rename_finished: Option<bool>,
     pub confirm_delete: Option<usize>,
     last_relative_tick: Instant,
     cached_now: Instant,
@@ -51,6 +55,8 @@ impl Default for SidebarState {
             search_focus: false,
             rename_idx: None,
             rename_buf: String::new(),
+            rename_just_started: false,
+            rename_finished: None,
             confirm_delete: None,
             last_relative_tick: now,
             cached_now: now,
@@ -622,6 +628,8 @@ pub fn draw(
         if let Some(tab) = workspace.tabs.get(i) {
             sidebar.rename_idx = Some(i);
             sidebar.rename_buf = tab.session_name.clone();
+            sidebar.rename_just_started = true;
+            sidebar.rename_finished = None;
         }
     }
     if let Some(i) = activate {
@@ -700,9 +708,9 @@ pub fn draw(
         }
     }
 
-    // Commit rename on Enter / click away handled inside row; apply here if buffer set
-    if let Some(i) = sidebar.rename_idx {
-        if ui.input(|inp| inp.key_pressed(egui::Key::Enter)) {
+    // The rename field reports Enter / click away (commit) or Esc (cancel) when it loses focus.
+    if let (Some(i), Some(commit)) = (sidebar.rename_idx, sidebar.rename_finished.take()) {
+        if commit {
             if let Some(tab) = workspace.tabs.get_mut(i) {
                 if !sidebar.rename_buf.trim().is_empty() {
                     tab.session_name = sidebar.rename_buf.trim().to_string();
@@ -710,11 +718,8 @@ pub fn draw(
                     workspace.mark_dirty();
                 }
             }
-            sidebar.rename_idx = None;
         }
-        if ui.input(|inp| inp.key_pressed(egui::Key::Escape)) {
-            sidebar.rename_idx = None;
-        }
+        sidebar.rename_idx = None;
     }
 }
 
@@ -980,7 +985,13 @@ fn draw_session_row(
                 .desired_width(text_w)
                 .font(egui::TextStyle::Body),
         );
-        edit.request_focus();
+        if sidebar.rename_just_started {
+            edit.request_focus();
+            sidebar.rename_just_started = false;
+        } else if edit.lost_focus() {
+            let cancelled = ui.input(|i| i.key_pressed(egui::Key::Escape));
+            sidebar.rename_finished = Some(!cancelled);
+        }
     }
 
     {
