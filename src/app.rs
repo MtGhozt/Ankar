@@ -290,15 +290,7 @@ impl eframe::App for AnkarApp {
                 .show_separator_line(false)
                 .show(ui, |ui| {
                     ui.set_width(ui.available_width());
-                    let before = self.files.open_file.clone();
                     self.files.draw(ui);
-                    if self.files.open_file != before {
-                        if let Some(path) = self.files.open_file.clone() {
-                            if path.is_file() {
-                                self.files.open_path(path);
-                            }
-                        }
-                    }
                 });
 
             let resize = drag_resize_edge(
@@ -316,6 +308,8 @@ impl eframe::App for AnkarApp {
             if resize.drag_stopped() && !self.config_load_failed {
                 let _ = self.config.save();
             }
+        } else {
+            self.files.release();
         }
 
         // Tab bar over content only (midterm: 38 px, no sub-row under it).

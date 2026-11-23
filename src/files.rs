@@ -5,12 +5,16 @@ use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::sync::Arc;
 use syntect::easy::HighlightLines;
 use syntect::highlighting::{Style as SynStyle, Theme, ThemeSet};
 use syntect::parsing::SyntaxSet;
 use syntect::util::LinesWithEndings;
 
-const MAX_FILE_BYTES: u64 = 512 * 1024;
+const MAX_FILE_BYTES: u64 = 256 * 1024;
+const MAX_FILE_LINES: usize = 5000;
+const CONTENT_FONT_SIZE: f32 = 12.0;
 
 #[derive(Clone)]
 struct DirEntryInfo {
@@ -19,35 +23,59 @@ struct DirEntryInfo {
     is_dir: bool,
 }
 
-#[derive(Default)]
-pub struct FileViewer {
-    pub root: Option<PathBuf>,
-    pub open_file: Option<PathBuf>,
-    pub content: String,
-    /// Cached highlighted layout; rebuilt only when a file is opened.
-    pub highlighted_job: Option<LayoutJob>,
-    syntax_set: Option<SyntaxSet>,
-    theme: Option<Theme>,
-    dir_cache: HashMap<PathBuf, Vec<DirEntryInfo>>,
-    pub show: bool,
-    loaded_path: Option<PathBuf>,
+struct Syntect {
+    syntax_set: SyntaxSet,
+    theme: Theme,
 }
 
-impl FileViewer {
-    fn ensure_syntect(&mut self) {
-        if self.syntax_set.is_some() {
-            return;
-        }
-        self.syntax_set = Some(SyntaxSet::load_defaults_newlines());
+impl Syntect {
+    fn load() -> Self {
+        let syntax_set = SyntaxSet::load_defaults_newlines();
         let mut ts = ThemeSet::load_defaults();
         let theme = ts
             .themes
             .remove("base16-ocean.dark")
             .or_else(|| ts.themes.into_values().next())
             .expect("syntect theme");
-        self.theme = Some(theme);
+        Self { syntax_set, theme }
     }
+}
 
+struct HighlightedText {
+    lines: Vec<Arc<LayoutJob>>,
+    max_cols: usize,
+}
+
+#[derive(Default)]
+enum FileContent {
+    #[default]
+    Empty,
+    Loading,
+    Ready(HighlightedText),
+    Error(String),
+}
+
+struct LoadResult {
+    generation: u64,
+    syntect: Arc<Syntect>,
+    content: FileContent,
+}
+
+#[derive(Default)]
+pub struct FileViewer {
+    pub root: Option<PathBuf>,
+    pub open_file: Option<PathBuf>,
+    content: FileContent,
+    /// Heavy (>10 MB); dropped whenever the panel is hidden.
+    syntect: Option<Arc<Syntect>>,
+    /// Bumped on every load so results for a file the user already left are dropped.
+    generation: u64,
+    load_rx: Option<Receiver<LoadResult>>,
+    dir_cache: HashMap<PathBuf, Vec<DirEntryInfo>>,
+    pub show: bool,
+}
+
+impl FileViewer {
     /// Sync viewer root from the shell cwd. Does not clear navigation if the
     /// user already browsed elsewhere under the same project — only when the
     /// shell cwd itself changes.
@@ -56,10 +84,81 @@ impl FileViewer {
         if self.root != root {
             self.root = root;
             self.open_file = None;
-            self.loaded_path = None;
-            self.content.clear();
-            self.highlighted_job = None;
+            self.cancel_load();
+            self.content = FileContent::Empty;
             self.dir_cache.clear();
+        }
+    }
+
+    /// Free syntect and the highlighted lines while the panel is hidden.
+    pub fn release(&mut self) {
+        if self.syntect.is_none()
+            && self.load_rx.is_none()
+            && matches!(self.content, FileContent::Empty)
+        {
+            return;
+        }
+        self.cancel_load();
+        self.syntect = None;
+        if let FileContent::Ready(text) = &mut self.content {
+            text.lines.clear();
+            text.lines.shrink_to_fit();
+        }
+        self.content = FileContent::Empty;
+    }
+
+    fn cancel_load(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+        self.load_rx = None;
+    }
+
+    fn open_path(&mut self, ctx: &egui::Context, path: PathBuf) {
+        self.cancel_load();
+        let generation = self.generation;
+        let (tx, rx) = mpsc::channel();
+        self.load_rx = Some(rx);
+        self.content = FileContent::Loading;
+        self.open_file = Some(path.clone());
+        let syntect = self.syntect.clone();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let syntect = syntect.unwrap_or_else(|| Arc::new(Syntect::load()));
+            let content = match read_file_capped(&path) {
+                Ok((text, truncated)) => {
+                    FileContent::Ready(highlight_lines(&syntect, &path, &text, truncated))
+                }
+                Err(e) => FileContent::Error(format!("Failed to read file: {e}")),
+            };
+            if tx
+                .send(LoadResult {
+                    generation,
+                    syntect,
+                    content,
+                })
+                .is_ok()
+            {
+                ctx.request_repaint();
+            }
+        });
+    }
+
+    fn poll_load(&mut self) {
+        let Some(rx) = &self.load_rx else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok(result) => {
+                self.load_rx = None;
+                if result.generation == self.generation {
+                    self.syntect = Some(result.syntect);
+                    self.content = result.content;
+                }
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {
+                self.load_rx = None;
+                self.content = FileContent::Error("Failed to read file.".into());
+            }
         }
     }
 
@@ -75,35 +174,14 @@ impl FileViewer {
         self.set_root(dirs::home_dir());
     }
 
-    pub fn open_path(&mut self, path: PathBuf) {
-        match read_file_capped(&path) {
-            Ok((text, truncated)) => {
-                let mut clipped = text;
-                if truncated {
-                    clipped.push_str("\n\n… truncated …");
-                }
-                self.ensure_syntect();
-                let job = highlight_job(
-                    self.syntax_set.as_ref().unwrap(),
-                    self.theme.as_ref().unwrap(),
-                    &path,
-                    &clipped,
-                );
-                self.highlighted_job = Some(job);
-                self.content = clipped;
-                self.loaded_path = Some(path.clone());
-                self.open_file = Some(path);
-            }
-            Err(e) => {
-                self.content = format!("Failed to read file: {e}");
-                self.highlighted_job = None;
-                self.loaded_path = Some(path.clone());
-                self.open_file = Some(path);
+    pub fn draw(&mut self, ui: &mut Ui) {
+        self.poll_load();
+        if matches!(self.content, FileContent::Empty) && self.load_rx.is_none() {
+            if let Some(path) = self.open_file.clone() {
+                self.open_path(ui.ctx(), path);
             }
         }
-    }
 
-    pub fn draw(&mut self, ui: &mut Ui) {
         ui.horizontal(|ui| {
             ui.set_min_height(28.0);
             if let Some(root) = self.root.clone() {
@@ -176,7 +254,7 @@ impl FileViewer {
             });
 
         if let Some(path) = clicked {
-            self.open_path(path);
+            self.open_path(ui.ctx(), path);
         }
 
         if let Some(path) = self.open_file.clone() {
@@ -185,13 +263,30 @@ impl FileViewer {
                 ui.allocate_exact_size(Vec2::new(ui.available_width(), 1.0), Sense::hover());
             ui.painter().rect_filled(sep2, 0.0, ui_theme::BORDER);
             ui.label(ui_theme::text_sub(path.display().to_string()));
-            egui::ScrollArea::both().id_salt("file_content").show(ui, |ui| {
-                if let Some(job) = self.highlighted_job.clone() {
-                    ui.label(job);
-                } else {
-                    ui.monospace(&self.content);
+            match &self.content {
+                FileContent::Empty | FileContent::Loading => {
+                    ui.label(ui_theme::text_sub("Loading…"));
                 }
-            });
+                FileContent::Error(msg) => {
+                    ui.label(ui_theme::text_sub(msg.clone()));
+                }
+                FileContent::Ready(text) => {
+                    let font = FontId::monospace(CONTENT_FONT_SIZE);
+                    let (row_h, char_w) =
+                        ui.fonts_mut(|f| (f.row_height(&font), f.glyph_width(&font, 'M')));
+                    egui::ScrollArea::both().id_salt("file_content").show_rows(
+                        ui,
+                        row_h,
+                        text.lines.len(),
+                        |ui, rows| {
+                            ui.set_min_width(text.max_cols as f32 * char_w);
+                            for line in &text.lines[rows] {
+                                ui.add(egui::Label::new(line.clone()).extend());
+                            }
+                        },
+                    );
+                }
+            }
         }
     }
 }
@@ -283,43 +378,54 @@ fn draw_tree(
     }
 }
 
-fn highlight_job(ss: &SyntaxSet, theme: &Theme, path: &Path, text: &str) -> LayoutJob {
+fn highlight_lines(syntect: &Syntect, path: &Path, text: &str, truncated: bool) -> HighlightedText {
+    let ss = &syntect.syntax_set;
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
     let syntax = ss
         .find_syntax_by_extension(ext)
         .unwrap_or_else(|| ss.find_syntax_plain_text());
-    let mut h = HighlightLines::new(syntax, theme);
-    let mut job = LayoutJob::default();
-    let font = FontId::monospace(12.0);
-    for line in LinesWithEndings::from(text) {
+    let mut h = HighlightLines::new(syntax, &syntect.theme);
+    let font = FontId::monospace(CONTENT_FONT_SIZE);
+    let format = |color| TextFormat {
+        font_id: font.clone(),
+        color,
+        ..Default::default()
+    };
+    let mut lines = Vec::new();
+    let mut max_cols = 0;
+    let mut truncated = truncated;
+    for (n, line) in LinesWithEndings::from(text).enumerate() {
+        if n >= MAX_FILE_LINES {
+            truncated = true;
+            break;
+        }
+        let mut job = LayoutJob::default();
         match h.highlight_line(line, ss) {
             Ok(ranges) => {
                 for (style, piece) in ranges {
-                    job.append(
-                        piece,
-                        0.0,
-                        TextFormat {
-                            font_id: font.clone(),
-                            color: syn_color(style),
-                            ..Default::default()
-                        },
-                    );
+                    let piece = piece.trim_end_matches(['\n', '\r']);
+                    if !piece.is_empty() {
+                        job.append(piece, 0.0, format(syn_color(style)));
+                    }
                 }
             }
             Err(_) => {
-                job.append(
-                    line,
-                    0.0,
-                    TextFormat {
-                        font_id: font.clone(),
-                        color: ui_theme::TEXT,
-                        ..Default::default()
-                    },
-                );
+                job.append(line.trim_end_matches(['\n', '\r']), 0.0, format(ui_theme::TEXT));
             }
         }
+        // Empty jobs lay out with zero height and would break the fixed row pitch.
+        if job.is_empty() {
+            job.append(" ", 0.0, format(ui_theme::TEXT));
+        }
+        max_cols = max_cols.max(job.text.chars().count());
+        lines.push(Arc::new(job));
     }
-    job
+    if truncated {
+        let mut job = LayoutJob::default();
+        job.append("… truncated …", 0.0, format(ui_theme::TEXT_MUTED));
+        lines.push(Arc::new(job));
+    }
+    HighlightedText { lines, max_cols }
 }
 
 fn syn_color(style: SynStyle) -> Color32 {
