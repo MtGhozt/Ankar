@@ -2,6 +2,7 @@ use egui::{ColorImage, Context, TextureHandle, TextureOptions};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::mpsc::{self, Receiver, TryRecvError};
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -15,11 +16,33 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 pub struct LogoAtlas {
     textures: HashMap<String, TextureHandle>,
     missing: HashMap<String, bool>,
-    /// Cached `where.exe` results keyed by command name.
+    /// `where.exe` results keyed by command name, filled by the startup thread.
     installed: HashMap<String, bool>,
+    installed_rx: Option<Receiver<(String, bool)>>,
 }
 
 impl LogoAtlas {
+    /// Checks every launcher command once, off the UI thread.
+    pub fn new(ctx: &Context, mut commands: Vec<String>) -> Self {
+        commands.sort();
+        commands.dedup();
+        let (tx, rx) = mpsc::channel();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            for command in commands {
+                let ok = command_installed(&command);
+                if tx.send((command, ok)).is_err() {
+                    return;
+                }
+            }
+            ctx.request_repaint();
+        });
+        Self {
+            installed_rx: Some(rx),
+            ..Default::default()
+        }
+    }
+
     pub fn logos_dir() -> PathBuf {
         // Dev: next to Cargo.toml. Release: next to the exe, then cwd.
         let candidates = [
@@ -57,13 +80,26 @@ impl LogoAtlas {
         }
     }
 
+    /// Unknown until the startup check reports back; treated as installed meanwhile.
     pub fn is_installed(&mut self, command: &str) -> bool {
-        if let Some(v) = self.installed.get(command) {
-            return *v;
+        self.poll_installed();
+        self.installed.get(command).copied().unwrap_or(true)
+    }
+
+    fn poll_installed(&mut self) {
+        let Some(rx) = &self.installed_rx else {
+            return;
+        };
+        loop {
+            match rx.try_recv() {
+                Ok((command, ok)) => {
+                    self.installed.insert(command, ok);
+                }
+                Err(TryRecvError::Empty) => return,
+                Err(TryRecvError::Disconnected) => break,
+            }
         }
-        let ok = command_installed(command);
-        self.installed.insert(command.to_string(), ok);
-        ok
+        self.installed_rx = None;
     }
 
     /// Hover / tooltip line for a launcher icon.

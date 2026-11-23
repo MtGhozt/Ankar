@@ -45,6 +45,8 @@ impl AnkarApp {
             }
         }
         let ankar_stats = Arc::new(Mutex::new(AnkarStatsStore::default()));
+        let launcher_commands = config.launchers.iter().map(|l| l.command.clone()).collect();
+        let logos = LogoAtlas::new(&cc.egui_ctx, launcher_commands);
         Ok(Self {
             workspace,
             config,
@@ -59,7 +61,7 @@ impl AnkarApp {
             status: StatusTracker::default(),
             palette: CommandPalette::default(),
             files: FileViewer::default(),
-            logos: LogoAtlas::default(),
+            logos,
             stats: StatsPanel::new(ankar_stats.clone()),
             ankar_stats,
         })
