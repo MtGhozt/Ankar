@@ -17,10 +17,13 @@ pub fn session_status_changed(session_name: &str, status: SessionStatus, window_
         SessionStatus::Active => return,
     };
     // TODO(ankar): app_id propio requiere registrar un AUMID (HKCU\Software\Classes\AppUserModelId\MtGhozt.Ankar o un acceso directo con AppUserModelID). Sin eso Windows muestra "Windows PowerShell".
-    let _ = Notification::new()
-        .summary(summary)
-        .body(&body)
-        .appname("Ankar")
-        .timeout(5000)
-        .show();
+    // WinRT toasts can block for a while; never show them from the UI thread.
+    std::thread::spawn(move || {
+        let _ = Notification::new()
+            .summary(summary)
+            .body(&body)
+            .appname("Ankar")
+            .timeout(5000)
+            .show();
+    });
 }
