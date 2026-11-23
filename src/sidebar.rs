@@ -745,9 +745,10 @@ fn draw_filter_bar(
     n_waiting: usize,
     n_working: usize,
 ) {
-    // Spinner glyph always visible — keep it turning.
-    ui.ctx()
-        .request_repaint_after(Duration::from_millis(100));
+    if n_working > 0 {
+        ui.ctx()
+            .request_repaint_after(Duration::from_millis(100));
+    }
     let time = ui.input(|i| i.time) as f32;
 
     // midterm: container x=6, w=297.33, h=28, padding 2, 3×96.67 segments.
