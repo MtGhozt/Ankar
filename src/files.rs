@@ -1,7 +1,7 @@
 use crate::ui_theme::{self, Icon};
 use egui::text::{LayoutJob, TextFormat};
 use egui::{Color32, FontId, Sense, Ui, Vec2};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -74,6 +74,7 @@ pub struct FileViewer {
     generation: u64,
     load_rx: Option<Receiver<LoadResult>>,
     dir_cache: HashMap<PathBuf, Vec<DirEntryInfo>>,
+    expanded: HashSet<PathBuf>,
     pub show: bool,
 }
 
@@ -102,9 +103,12 @@ impl FileViewer {
         if self.syntect.is_none()
             && self.load_rx.is_none()
             && matches!(self.content, FileContent::Empty)
+            && self.dir_cache.is_empty()
         {
             return;
         }
+        // Re-read directories when the panel opens again.
+        self.dir_cache.clear();
         self.cancel_load();
         self.syntect = None;
         if let FileContent::Ready(text) = &mut self.content {
@@ -228,17 +232,23 @@ impl FileViewer {
             self.root = dirs::home_dir();
         }
         let Some(root) = self.root.clone() else {
-            ui.label(ui_theme::text_sub("No hay directorio home."));
+            ui.label(ui_theme::text_sub("No home folder."));
             return;
         };
 
         ui.horizontal(|ui| {
             if ui
-                .add(egui::Button::new(ui_theme::icon(Icon::ChevronRight, 12.0, ui_theme::TEXT_MUTED)).frame(false))
+                .add(
+                    egui::Button::new(
+                        egui::RichText::new("↑")
+                            .size(ui_theme::SIZE_TITLE)
+                            .color(ui_theme::TEXT_MUTED),
+                    )
+                    .frame(false),
+                )
                 .on_hover_text("Parent")
                 .clicked()
             {
-                // Use folder-up via go_parent — chevron as affordance
                 self.go_parent();
             }
             if ui
@@ -247,6 +257,21 @@ impl FileViewer {
                 .clicked()
             {
                 self.go_home();
+            }
+            // Inter has no ↻; Hack (monospace) does.
+            if ui
+                .add(
+                    egui::Button::new(
+                        egui::RichText::new("↻")
+                            .font(FontId::monospace(ui_theme::SIZE_TITLE))
+                            .color(ui_theme::TEXT_MUTED),
+                    )
+                    .frame(false),
+                )
+                .on_hover_text("Refresh")
+                .clicked()
+            {
+                self.dir_cache.clear();
             }
             let _ = root;
         });
@@ -257,7 +282,14 @@ impl FileViewer {
             .id_salt("file_tree")
             .max_height(ui.available_height() * 0.35)
             .show(ui, |ui| {
-                draw_tree(ui, &root, self.open_file.as_ref(), &mut clicked, &mut self.dir_cache);
+                draw_tree(
+                    ui,
+                    &root,
+                    self.open_file.as_ref(),
+                    &mut clicked,
+                    &mut self.dir_cache,
+                    &mut self.expanded,
+                );
             });
 
         if let Some(path) = clicked {
@@ -305,7 +337,7 @@ fn read_file_capped(path: &Path) -> std::io::Result<(String, bool)> {
     let truncated = buf.len() as u64 == MAX_FILE_BYTES;
     let probe = &buf[..buf.len().min(8 * 1024)];
     if probe.contains(&0) {
-        return Ok(("Archivo binario, no se muestra".into(), false));
+        return Ok(("Binary file, not shown".into(), false));
     }
     Ok((String::from_utf8_lossy(&buf).into_owned(), truncated))
 }
@@ -337,21 +369,45 @@ fn draw_tree(
     selected: Option<&PathBuf>,
     clicked: &mut Option<PathBuf>,
     cache: &mut HashMap<PathBuf, Vec<DirEntryInfo>>,
+    expanded: &mut HashSet<PathBuf>,
 ) {
     let items = list_dir_cached(dir, cache);
 
     for entry in items {
         if entry.is_dir {
-            let label = format!("{}  {}", Icon::Folder.codepoint(), entry.name);
-            egui::CollapsingHeader::new(
-                egui::RichText::new(label)
-                    .size(ui_theme::SIZE_TITLE)
-                    .color(ui_theme::TEXT),
-            )
-            .id_salt(entry.path.as_os_str())
-            .show(ui, |ui| {
-                draw_tree(ui, &entry.path, selected, clicked, cache);
-            });
+            let open = expanded.contains(&entry.path);
+            let row = egui::Frame::NONE
+                .corner_radius(egui::CornerRadius::same(ui_theme::RADIUS_ROW))
+                .inner_margin(egui::Margin::symmetric(6, 2))
+                .show(ui, |ui| {
+                    ui.set_min_height(22.0);
+                    ui.horizontal(|ui| {
+                        let chevron = if open { Icon::ChevronDown } else { Icon::ChevronRight };
+                        ui.label(ui_theme::icon(chevron, 12.0, ui_theme::TEXT_MUTED));
+                        ui.label(ui_theme::icon(Icon::Folder, 14.0, ui_theme::TEXT_MUTED));
+                        ui.label(ui_theme::text_title(entry.name.clone()));
+                    });
+                });
+            let resp = row.response.interact(Sense::click());
+            if resp.hovered() {
+                ui.painter().rect_filled(
+                    resp.rect,
+                    egui::CornerRadius::same(ui_theme::RADIUS_ROW),
+                    ui_theme::HOVER,
+                );
+            }
+            if resp.clicked() {
+                if open {
+                    expanded.remove(&entry.path);
+                } else {
+                    expanded.insert(entry.path.clone());
+                }
+            }
+            if open {
+                ui.indent(entry.path.as_os_str(), |ui| {
+                    draw_tree(ui, &entry.path, selected, clicked, cache, expanded);
+                });
+            }
         } else {
             let is_sel = selected == Some(&entry.path);
             let fill = if is_sel {
