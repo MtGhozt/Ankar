@@ -248,11 +248,19 @@ pub fn draw(
         ui_theme::TEXT_MUTED,
     );
 
-    // `/` kbd chip: 20.67×18.67 at (279.33, 91.33) → vertically centered in search.
-    let kbd_w = 20.67 * s.clamp(0.9, 1.15);
-    let kbd_h = 18.67 * s.clamp(0.9, 1.15);
+    // Shortcut kbd chip, right edge where the mockup's 20.67×18.67 chip at (279.33, 91.33) ends.
+    // Inter has no ⌃ glyph, so the chord is spelled out.
+    let kbd_scale = s.clamp(0.9, 1.15);
+    let kbd_h = 18.67 * kbd_scale;
+    let kbd_right = map_sx(279.33) + 20.67 * kbd_scale;
+    let kbd_galley = painter.layout_no_wrap(
+        "Ctrl+Shift+L".to_owned(),
+        FontId::new(10.0, FontFamily::Proportional),
+        ui_theme::TEXT_MUTED,
+    );
+    let kbd_w = kbd_galley.size().x + 10.0;
     let kbd_rect = Rect::from_center_size(
-        egui::pos2(map_sx(279.33) + kbd_w * 0.5, search_rect.center().y),
+        egui::pos2(kbd_right - kbd_w * 0.5, search_rect.center().y),
         Vec2::new(kbd_w, kbd_h),
     );
     painter.rect(
@@ -262,11 +270,9 @@ pub fn draw(
         Stroke::new(1.0, ui_theme::KBD_BORDER),
         egui::StrokeKind::Inside,
     );
-    painter.text(
-        kbd_rect.center(),
-        Align2::CENTER_CENTER,
-        "/",
-        FontId::new(ui_theme::SIZE_UI, FontFamily::Proportional),
+    painter.galley(
+        kbd_rect.center() - kbd_galley.size() * 0.5,
+        kbd_galley,
         ui_theme::TEXT_MUTED,
     );
 

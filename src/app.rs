@@ -908,13 +908,6 @@ fn handle_shortcuts(
             sidebar.show = true;
             sidebar.search_focus = true;
         }
-        if i.key_pressed(Key::Slash) && !i.modifiers.any() && !palette.open {
-            let focus = ui.memory(|m| m.focused());
-            if focus.is_none() || focus == Some(sidebar::search_field_id()) {
-                sidebar.show = true;
-                sidebar.search_focus = true;
-            }
-        }
         if i.consume_key(cs, Key::P) {
             workspace.toggle_pin_active();
         }
