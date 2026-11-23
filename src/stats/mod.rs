@@ -147,9 +147,3 @@ pub struct AnkarHourCell {
     #[serde(default)]
     pub starts: u64,
 }
-
-/// Debug probe: print OpenCode schema (keys only, never message text).
-#[cfg(debug_assertions)]
-pub fn run_stats_probe() {
-    opencode::probe();
-}

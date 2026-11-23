@@ -56,11 +56,6 @@ fn main() -> anyhow::Result<()> {
     }
 
     let args: Vec<String> = std::env::args().collect();
-    #[cfg(debug_assertions)]
-    if args.iter().any(|a| a == "--stats-probe") {
-        stats::run_stats_probe();
-        return Ok(());
-    }
 
     let window_size = match parse_window_size(&args) {
         Some(size) => {
