@@ -93,7 +93,7 @@ fn rgb_to_color32(rgb: Rgb) -> Color32 {
     Color32::from_rgb(rgb.r, rgb.g, rgb.b)
 }
 
-fn indexed_256(index: u8) -> Color32 {
+pub(crate) fn indexed_256(index: u8) -> Color32 {
     match index {
         0..=15 => TermColors::default().ansi[index as usize],
         16..=231 => {

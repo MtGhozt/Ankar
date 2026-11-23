@@ -26,6 +26,9 @@ impl TerminalView {
         let available = ui.available_size();
         let (response, painter) = ui.allocate_painter(available, Sense::click_and_drag());
         let ppp = ui.ctx().pixels_per_point();
+        if let Some(text) = session.take_clipboard() {
+            ui.ctx().copy_text(text);
+        }
 
         // Midterm: Hack at 14.33 with fixed cell metrics (config size is for scroll only).
         let paint_size = ui_theme::TERM_FONT_SIZE;

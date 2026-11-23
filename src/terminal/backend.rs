@@ -1,4 +1,4 @@
-use super::theme::TermColors;
+use super::theme::{indexed_256, TermColors};
 use alacritty_terminal::event::{Event, EventListener, Notify, OnResize, WindowSize};
 use alacritty_terminal::event_loop::{EventLoop, Msg, Notifier};
 use alacritty_terminal::grid::{Dimensions, Scroll};
@@ -9,8 +9,9 @@ use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::test::TermSize;
 use alacritty_terminal::term::{self, viewport_to_point, Term, TermMode};
 use alacritty_terminal::tty;
-use alacritty_terminal::vte::ansi::{Color, NamedColor};
+use alacritty_terminal::vte::ansi::{Color, NamedColor, Rgb};
 use egui::Context;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
@@ -131,6 +132,10 @@ pub struct TerminalSession {
     /// Latest non-cwd window title (agent activity).
     activity: Arc<Mutex<Option<String>>>,
     exit_code: Arc<Mutex<Option<i32>>>,
+    /// Shared with the event thread so it can answer size queries (CSI 14/18 t).
+    window_size: Arc<Mutex<WindowSize>>,
+    /// OSC 52 copy waiting for the UI thread (the clipboard only works inside a frame).
+    clipboard: Arc<Mutex<Option<String>>>,
     pub colors: TermColors,
 }
 
@@ -143,9 +148,15 @@ impl TerminalSession {
         cwd: Option<PathBuf>,
         scrollback_lines: usize,
     ) -> anyhow::Result<Self> {
+        // Merged into the inherited environment by alacritty_terminal. TERM stays unset on purpose.
+        let env = HashMap::from([
+            ("COLORTERM".to_owned(), "truecolor".to_owned()),
+            ("TERM_PROGRAM".to_owned(), "ankar".to_owned()),
+        ]);
         let pty_config = tty::Options {
             shell: Some(tty::Shell::new(program.to_string(), args.to_vec())),
             working_directory: cwd.clone(),
+            env,
             ..tty::Options::default()
         };
 
@@ -183,6 +194,12 @@ impl TerminalSession {
         let activity_flag = activity_state.clone();
         let exit_code_state = Arc::new(Mutex::new(None::<i32>));
         let exit_code_flag = exit_code_state.clone();
+        let window_size = Arc::new(Mutex::new(WindowSize::from(terminal_size)));
+        let window_size_flag = window_size.clone();
+        let clipboard = Arc::new(Mutex::new(None::<String>));
+        let clipboard_flag = clipboard.clone();
+        let colors = TermColors::default();
+        let query_colors = colors.clone();
         let title = program
             .rsplit(['\\', '/'])
             .next()
@@ -241,6 +258,25 @@ impl TerminalSession {
                             }
                             ctx.request_repaint();
                         }
+                        Event::ColorRequest(index, format) => {
+                            if let Some(rgb) = query_color(&query_colors, *index) {
+                                pty_notifier.notify(format(rgb).into_bytes());
+                            }
+                        }
+                        Event::TextAreaSizeRequest(format) => {
+                            let size = window_size_flag.lock().ok().map(|g| *g);
+                            if let Some(size) = size {
+                                pty_notifier.notify(format(size).into_bytes());
+                            }
+                        }
+                        Event::ClipboardStore(_, text) => {
+                            if let Ok(mut g) = clipboard_flag.lock() {
+                                *g = Some(text.clone());
+                            }
+                            ctx.request_repaint();
+                        }
+                        // OSC 52 paste is ignored on purpose: no program may read the clipboard.
+                        // Event::ClipboardLoad(..) => {}
                         _ => {
                             if visible_flag.load(Ordering::Relaxed) {
                                 ctx.request_repaint_after(Duration::from_millis(8));
@@ -264,8 +300,15 @@ impl TerminalSession {
             cwd: cwd_state,
             activity: activity_state,
             exit_code: exit_code_state,
-            colors: TermColors::default(),
+            window_size,
+            clipboard,
+            colors,
         })
+    }
+
+    /// Text an app copied via OSC 52 since the last call.
+    pub fn take_clipboard(&self) -> Option<String> {
+        self.clipboard.lock().ok().and_then(|mut g| g.take())
     }
 
     pub fn set_visible(&self, visible: bool) {
@@ -342,6 +385,9 @@ impl TerminalSession {
         };
 
         self.notifier.on_resize(self.size.into());
+        if let Ok(mut g) = self.window_size.lock() {
+            *g = self.size.into();
+        }
         let mut term = self.term.lock();
         term.resize(TermSize::new(
             self.size.num_cols as usize,
@@ -524,6 +570,23 @@ fn parse_cwd_title(title: &str) -> Option<PathBuf> {
         return None;
     }
     Some(path)
+}
+
+/// Palette entry reported for OSC 4 / 10 / 11 / 12 queries.
+fn query_color(colors: &TermColors, index: usize) -> Option<Rgb> {
+    let c = match index {
+        0..=15 => colors.ansi[index],
+        16..=255 => indexed_256(index as u8),
+        i if i == NamedColor::Foreground as usize => colors.foreground,
+        i if i == NamedColor::Background as usize => colors.background,
+        i if i == NamedColor::Cursor as usize => colors.cursor,
+        _ => return None,
+    };
+    Some(Rgb {
+        r: c.r(),
+        g: c.g(),
+        b: c.b(),
+    })
 }
 
 fn is_default_skip(c: char, _fg: Color, bg: Color, flags: Flags, selected: bool) -> bool {
