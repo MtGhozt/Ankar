@@ -64,3 +64,28 @@ Notes:
 - Row `LayoutJob` text (P4) — CPU / transient
 - Lazy syntect + capped file read + dir cache (P5)
 - No release console window (P6)
+
+## After stabilization (07)
+
+Metric: `ankar.exe` alone (not the process tree), Private Bytes and Working Set in MB, read with:
+
+```powershell
+Get-Process ankar | Select-Object @{n='PrivateMB';e={[math]::Round($_.PrivateMemorySize64/1MB,1)}}, @{n='WSMB';e={[math]::Round($_.WorkingSet64/1MB,1)}}
+```
+
+`cargo build --release`, ~10 s idle before each reading. "Before" is the ≈140 MB Matias saw in Task Manager on `main` at 4f0f2ab.
+
+| Scenario | Before | ankar Private | ankar WS |
+|---|---:|---:|---:|
+| A: 1 PowerShell tab | ≈140 | 104.4 | 109.8 |
+| B: 3 PowerShell tabs | ≈140 | pending | pending |
+| C: 3 tabs, scrollback full (`1..5000 \| % { ("linea $_ ") * 8 }`) | — | pending | pending |
+| D: B + file viewer with `Cargo.lock` open | — | pending | pending |
+| D: B + file viewer closed again | — | pending | pending |
+| E: 1 PowerShell + 1 OpenCode tab | — | pending | pending |
+
+Notes:
+
+- A was read 15 s after launch; 15 s later it was 105.1 Private / 116.7 WS. Idle CPU over 10 s was 0.01 s (the 10 fps filter-bar repaint is gone).
+- B–E need tabs opened and commands typed inside Ankar; they were not measured in the stabilization session.
+- Goal: B < 100 MB Private (ideally C too). A alone is already ≈4.4 MB over it, so B will not meet the goal without further work. The stats panel is not the cause: its loader only runs when the panel is opened.
