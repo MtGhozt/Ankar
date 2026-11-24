@@ -395,9 +395,6 @@ impl eframe::App for AnkarApp {
                             }
                         });
                 });
-            if ui.input(|i| i.pointer.any_click()) {
-                // keep open if clicking inside — simplified: Esc closes
-            }
             if ui.input(|i| i.key_pressed(Key::Escape)) {
                 self.show_profile_menu = false;
             }
@@ -478,7 +475,6 @@ fn draw_tab_bar(
     let mut close_idx = None;
     let mut open_stats = false;
     let active = workspace.active_tab;
-    let mut last_tab_right = bar_rect.left();
 
     ui.horizontal(|ui| {
         ui.set_min_height(TAB_BAR_H);
@@ -502,7 +498,6 @@ fn draw_tab_bar(
 
             let (rect, resp) =
                 ui.allocate_exact_size(Vec2::new(TAB_WIDTH, TAB_BAR_H), Sense::click());
-            last_tab_right = rect.right();
             ui.painter()
                 .rect_filled(rect, CornerRadius::ZERO, fill);
 
@@ -648,8 +643,6 @@ fn draw_tab_bar(
         if plus.secondary_clicked() {
             *show_menu = !*show_menu;
         }
-        let _ = last_tab_right;
-
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             // Midterm right icons: 18px activity + files (RTL paints files first).
             if tab_bar_right_icon(ui, Icon::Folder, "Files (Ctrl+Shift+F)").clicked() {

@@ -333,9 +333,6 @@ waiting_timeout_secs = {waiting_timeout_secs}
 # Terminal font size (points) — Hack at 14.33, cell 8.627×17.733
 font_size = {font_size}
 
-# Accent color (hex) — cursor + selection
-accent = "{accent}"
-
 # Scrollback lines per terminal (default 2000; hard cap 50000)
 scrollback_lines = {scrollback_lines}
 
@@ -347,9 +344,6 @@ files_width = {files_width}
 
 # Dim unfocused split panes
 dim_inactive_panes = {dim_inactive_panes}
-
-# Experimental custom title bar (Windows chrome risks — leave false)
-custom_titlebar = false
 
 # Pinned project folders (absolute paths)
 pinned_projects = []
@@ -378,7 +372,6 @@ color = "#8A8A8A"
             default_shell = self.default_shell,
             waiting_timeout_secs = self.waiting_timeout_secs,
             font_size = self.font_size,
-            accent = self.accent,
             scrollback_lines = self.scrollback_lines,
             sidebar_width = self.sidebar_width,
             files_width = self.files_width,

@@ -115,10 +115,6 @@ impl Default for Snapshot {
 }
 
 pub struct TerminalSession {
-    #[allow(dead_code)]
-    pub id: u64,
-    #[allow(dead_code)]
-    pub title: String,
     term: Arc<FairMutex<Term<EventProxy>>>,
     size: TerminalSize,
     notifier: Notifier,
@@ -200,12 +196,6 @@ impl TerminalSession {
         let clipboard_flag = clipboard.clone();
         let colors = TermColors::default();
         let query_colors = colors.clone();
-        let title = program
-            .rsplit(['\\', '/'])
-            .next()
-            .unwrap_or(program)
-            .to_string();
-
         std::thread::Builder::new()
             .name(format!("ankar-pty-{id}"))
             .spawn(move || {
@@ -287,8 +277,6 @@ impl TerminalSession {
             })?;
 
         Ok(Self {
-            id,
-            title,
             term,
             size: terminal_size,
             notifier,

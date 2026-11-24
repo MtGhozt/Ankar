@@ -8,7 +8,7 @@ use alacritty_terminal::term::TermMode;
 use egui::epaint::RectShape;
 use egui::text::{LayoutJob, TextFormat};
 use egui::{
-    Color32, CornerRadius, FontId, Frame, Pos2, Rect, Sense, Shape, Stroke, Ui, Vec2,
+    Color32, CornerRadius, FontId, Pos2, Rect, Sense, Shape, Stroke, Ui, Vec2,
 };
 use std::collections::BTreeMap;
 
@@ -482,8 +482,6 @@ fn paint_grid(
     }
 
     painter.extend(shapes);
-
-    let _ = Frame::NONE;
 }
 
 fn paint_cursor(

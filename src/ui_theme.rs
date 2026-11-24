@@ -1,5 +1,4 @@
-//! Midterm UI tokens. Some aliases are wired in later steps.
-#![allow(dead_code)]
+//! Midterm UI tokens.
 
 use egui::{
     Color32, Context, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, RichText,
@@ -43,13 +42,11 @@ pub const KBD_BORDER: Color32 = BUTTON_HIGHLIGHT;
 pub const TEXT: Color32 = Color32::from_rgb(0xE7, 0xE7, 0xE7);
 pub const TEXT_MUTED: Color32 = Color32::from_rgb(0x83, 0x83, 0x83);
 pub const TEXT_FAINT: Color32 = Color32::from_rgb(0x5A, 0x5A, 0x5A);
-pub const TAB_INACTIVE_TEXT: Color32 = TEXT_MUTED;
 
 // --- Status + accent ---
 pub const OK: Color32 = Color32::from_rgb(0x6F, 0xA7, 0x7D);
 pub const STATUS_DOT_OK: Color32 = Color32::from_rgb(0x53, 0xBE, 0x6B);
 pub const WAITING: Color32 = Color32::from_rgb(0xE9, 0xB6, 0x32);
-pub const WARN: Color32 = WAITING;
 pub const FILTER_WAITING_DOT: Color32 = Color32::from_rgb(0x45, 0x45, 0x45);
 pub const WORKING_RING: Color32 = Color32::from_rgb(0x85, 0x85, 0x85);
 pub const WORKING_RING_DIM: Color32 = Color32::from_rgb(0x90, 0x90, 0x90);

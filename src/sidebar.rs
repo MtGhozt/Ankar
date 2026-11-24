@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-/// Stable focus id for the sidebar search field (`/` shortcut in `app.rs`).
+/// Stable focus id for the sidebar search field.
 #[inline]
 pub fn search_field_id() -> egui::Id {
     egui::Id::unique("ankar_sidebar_search")

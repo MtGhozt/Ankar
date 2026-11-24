@@ -273,7 +273,6 @@ impl FileViewer {
             {
                 self.dir_cache.clear();
             }
-            let _ = root;
         });
 
         let root = self.root.clone().unwrap_or(root);
