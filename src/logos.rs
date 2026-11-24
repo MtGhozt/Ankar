@@ -1,6 +1,8 @@
-use egui::{ColorImage, Context, TextureHandle, TextureOptions};
+use crate::config::Config;
+use crate::layout::Tab;
+use crate::ui_theme::{self, Icon};
+use egui::{Color32, ColorImage, Context, TextureFilter, TextureHandle, TextureOptions};
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 
@@ -11,11 +13,11 @@ use std::os::windows::process::CommandExt;
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
-/// Raster logos from `assets/logos/` (PNG / WebP). SVGs fall back until converted.
+/// Agent logos embedded from `assets/logos/` (64×64 RGBA PNG), resampled to the drawn size.
 #[derive(Default)]
 pub struct LogoAtlas {
-    textures: HashMap<String, TextureHandle>,
-    missing: HashMap<String, bool>,
+    /// Keyed by logo and physical pixel size; `None` if decoding failed.
+    textures: HashMap<(&'static str, u32), Option<TextureHandle>>,
     /// `where.exe` results keyed by command name, filled by the startup thread.
     installed: HashMap<String, bool>,
     installed_rx: Option<Receiver<(String, bool)>>,
@@ -43,41 +45,14 @@ impl LogoAtlas {
         }
     }
 
-    pub fn logos_dir() -> PathBuf {
-        // Dev: next to Cargo.toml. Release: next to the exe, then cwd.
-        let candidates = [
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets/logos"),
-            std::env::current_exe()
-                .ok()
-                .and_then(|p| p.parent().map(|d| d.join("assets/logos")))
-                .unwrap_or_default(),
-            PathBuf::from("assets/logos"),
-        ];
-        candidates
-            .into_iter()
-            .find(|p| p.is_dir())
-            .unwrap_or_else(|| PathBuf::from("assets/logos"))
-    }
-
-    pub fn get(&mut self, ctx: &Context, key: &str) -> Option<TextureHandle> {
-        if let Some(t) = self.textures.get(key) {
-            return Some(t.clone());
-        }
-        if self.missing.get(key).copied().unwrap_or(false) {
-            return None;
-        }
-        let dir = Self::logos_dir();
-        let path = resolve_logo_path(&dir, key);
-        match path.and_then(|p| load_texture(ctx, key, &p)) {
-            Some(tex) => {
-                self.textures.insert(key.to_string(), tex.clone());
-                Some(tex)
-            }
-            None => {
-                self.missing.insert(key.to_string(), true);
-                None
-            }
-        }
+    /// Logo for `key` drawn at `size` logical px. Unknown keys have no logo.
+    pub fn get(&mut self, ctx: &Context, key: &str, size: f32) -> Option<TextureHandle> {
+        let (name, bytes) = embedded_logo(key)?;
+        let px = (size * ctx.pixels_per_point()).ceil().max(1.0) as u32;
+        self.textures
+            .entry((name, px))
+            .or_insert_with(|| load_texture(ctx, name, bytes, px))
+            .clone()
     }
 
     /// Unknown until the startup check reports back; treated as installed meanwhile.
@@ -117,71 +92,98 @@ impl LogoAtlas {
     }
 }
 
-fn resolve_logo_path(dir: &Path, key: &str) -> Option<PathBuf> {
-    let stems = [
-        key,
-        &format!("{key}-logo"),
-        &format!("{key}-ai-icon"),
-        &format!("{key}-ai"),
-    ];
-    let exts = ["png", "webp", "jpg", "jpeg"];
-    for stem in stems {
-        for ext in exts {
-            let p = dir.join(format!("{stem}.{ext}"));
-            if p.is_file() {
-                return Some(p);
-            }
+fn embedded_logo(key: &str) -> Option<(&'static str, &'static [u8])> {
+    Some(match key.to_ascii_lowercase().as_str() {
+        "opencode" => ("opencode", &include_bytes!("../assets/logos/opencode.png")[..]),
+        "openai" | "codex" => ("openai", &include_bytes!("../assets/logos/openai.png")[..]),
+        "claude" | "anthropic" => ("claude", &include_bytes!("../assets/logos/claude.png")[..]),
+        "grok" => ("grok", &include_bytes!("../assets/logos/grok.png")[..]),
+        "antigravity" => (
+            "antigravity",
+            &include_bytes!("../assets/logos/antigravity.png")[..],
+        ),
+        "cursor" | "cursor-agent" => ("cursor", &include_bytes!("../assets/logos/cursor.png")[..]),
+        "copilot" | "github-copilot" => {
+            ("copilot", &include_bytes!("../assets/logos/copilot.png")[..])
         }
-    }
-    // Known file aliases
-    let aliases: &[(&str, &str)] = &[
-        ("opencode", "opencode-logo.webp"),
-        ("openai", "openai.png"),
-        ("claude", "claude-ai.png"),
-        ("anthropic", "claude-ai.png"),
-        ("grok", "grok-ai-icon.webp"),
-        ("antigravity", "google-antigravity.png"),
-        ("cursor", "cursor.png"),
-        ("cursor-agent", "cursor.png"),
-        ("copilot", "github-copilot.webp"),
-        ("github-copilot", "github-copilot.webp"),
-        ("codex", "openai.png"),
-        ("default", "default.png"),
-    ];
-    for (k, file) in aliases {
-        if key.eq_ignore_ascii_case(k) {
-            let p = dir.join(file);
-            if p.is_file() {
-                return Some(p);
-            }
-        }
-    }
-    let fallback = dir.join("default.png");
-    if fallback.is_file() {
-        Some(fallback)
-    } else {
-        None
-    }
+        "junie" => ("junie", &include_bytes!("../assets/logos/junie.png")[..]),
+        _ => return None,
+    })
 }
 
-fn load_texture(ctx: &Context, name: &str, path: &Path) -> Option<TextureHandle> {
-    let bytes = std::fs::read(path).ok()?;
-    let mut img = image::load_from_memory(&bytes).ok()?.into_rgba8();
-    let ppp = ctx.pixels_per_point();
-  // Target ~18 logical px icons at native density when the asset is larger.
-    let target = (18.0 * ppp).round().max(1.0) as u32;
-    let (w, h) = (img.width(), img.height());
-    if w > target + 2 || h > target + 2 {
-        img = image::imageops::resize(
-            &img,
-            target,
-            target,
-            image::imageops::FilterType::Lanczos3,
-        );
+fn load_texture(ctx: &Context, name: &str, bytes: &[u8], px: u32) -> Option<TextureHandle> {
+    let mut img = image::load_from_memory_with_format(bytes, image::ImageFormat::Png)
+        .ok()?
+        .into_rgba8();
+    // Resample premultiplied so transparent (black) pixels don't darken the edges.
+    for p in img.pixels_mut() {
+        let a = p[3] as u16;
+        for c in 0..3 {
+            p[c] = ((p[c] as u16 * a + 127) / 255) as u8;
+        }
+    }
+    if img.width() != px || img.height() != px {
+        img = image::imageops::resize(&img, px, px, image::imageops::FilterType::Lanczos3);
+    }
+    // Lanczos can overshoot; keep the premultiplied invariant (color <= alpha).
+    for p in img.pixels_mut() {
+        let a = p[3];
+        for c in 0..3 {
+            p[c] = p[c].min(a);
+        }
     }
     let size = [img.width() as usize, img.height() as usize];
-    let color = ColorImage::from_rgba_unmultiplied(size, img.as_raw());
-    Some(ctx.load_texture(format!("logo-{name}"), color, TextureOptions::LINEAR))
+    let color = ColorImage::from_rgba_premultiplied(size, img.as_raw());
+    let options = TextureOptions {
+        magnification: TextureFilter::Linear,
+        minification: TextureFilter::Linear,
+        mipmap_mode: Some(TextureFilter::Linear),
+        ..Default::default()
+    };
+    Some(ctx.load_texture(format!("logo-{name}-{px}"), color, options))
+}
+
+/// Lucide fallback icon, its color, and the embedded logo key for a tab.
+pub fn agent_visual(tab: &Tab, config: &Config) -> (Icon, Color32, Option<&'static str>) {
+    let name = tab.session_name.to_lowercase();
+    let cmd = tab.command.as_deref().unwrap_or("").to_lowercase();
+    let hay = format!("{name} {cmd} {}", tab.profile_id);
+
+    for launcher in &config.launchers {
+        let ln = launcher.name.to_lowercase();
+        if hay.contains(&ln) || name == ln {
+            let ic = Icon::from_name(&launcher.icon).unwrap_or(Icon::Bot);
+            let color =
+                ui_theme::parse_hex_color(&launcher.color).unwrap_or(ui_theme::TEXT_MUTED);
+            let key = embedded_logo(launcher.logo_key()).map(|(key, _)| key);
+            return (ic, color, key);
+        }
+    }
+    if hay.contains("claude") {
+        return (Icon::Sparkles, ui_theme::rgb(0xD9, 0x77, 0x57), Some("claude"));
+    }
+    if hay.contains("opencode") {
+        return (Icon::Sparkles, ui_theme::rgb(0xD9, 0x77, 0x57), Some("opencode"));
+    }
+    if hay.contains("codex") || hay.contains("openai") {
+        return (Icon::Bot, ui_theme::rgb(0x10, 0xA3, 0x7F), Some("openai"));
+    }
+    if hay.contains("cursor") {
+        return (Icon::Bot, ui_theme::rgb(0x5A, 0xA0, 0xF2), Some("cursor"));
+    }
+    if hay.contains("grok") {
+        return (Icon::Bot, ui_theme::TEXT, Some("grok"));
+    }
+    if hay.contains("antigravity") {
+        return (Icon::Bot, ui_theme::rgb(0x5A, 0xA0, 0xF2), Some("antigravity"));
+    }
+    if hay.contains("copilot") {
+        return (Icon::Bot, ui_theme::TEXT, Some("copilot"));
+    }
+    if tab.command.is_some() {
+        return (Icon::Bot, ui_theme::TEXT_MUTED, None);
+    }
+    (Icon::Terminal, ui_theme::TEXT_MUTED, None)
 }
 
 /// `where.exe` check — true if the command resolves on PATH.

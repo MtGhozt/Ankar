@@ -487,8 +487,8 @@ fn draw_tab_bar(
 
         for (i, tab) in workspace.tabs.iter().enumerate() {
             let selected = i == active;
-            let (icon, color, logo_key) = tab_agent_visual(tab, config);
-            let logo_tex = logo_key.and_then(|k| logos.get(ui.ctx(), k));
+            let (icon, color, logo_key) = crate::logos::agent_visual(tab, config);
+            let logo_tex = logo_key.and_then(|k| logos.get(ui.ctx(), k, 16.0));
             let fill = if selected {
                 ui_theme::BG
             } else {
@@ -778,59 +778,6 @@ fn drag_resize_edge(
     };
     ui.painter().vline(edge_x, y_range, stroke);
     resp
-}
-
-fn tab_agent_visual(
-    tab: &crate::layout::Tab,
-    config: &Config,
-) -> (Icon, Color32, Option<&'static str>) {
-    let name = tab.session_name.to_lowercase();
-    let cmd = tab.command.as_deref().unwrap_or("").to_lowercase();
-    let hay = format!("{name} {cmd}");
-    for launcher in &config.launchers {
-        let ln = launcher.name.to_lowercase();
-        if hay.contains(&ln) || name == ln {
-            let ic = Icon::from_name(&launcher.icon).unwrap_or(Icon::Bot);
-            let color =
-                ui_theme::parse_hex_color(&launcher.color).unwrap_or(ui_theme::TEXT_MUTED);
-            let key = match launcher.logo_key() {
-                "opencode" => Some("opencode"),
-                "openai" | "codex" => Some("openai"),
-                "claude" | "anthropic" => Some("claude"),
-                "grok" => Some("grok"),
-                "antigravity" => Some("antigravity"),
-                "cursor" | "cursor-agent" => Some("cursor"),
-                "copilot" | "github-copilot" => Some("copilot"),
-                _ => None,
-            };
-            return (ic, color, key);
-        }
-    }
-    if hay.contains("claude") {
-        return (Icon::Sparkles, ui_theme::rgb(0xD9, 0x77, 0x57), Some("claude"));
-    }
-    if hay.contains("opencode") {
-        return (Icon::Sparkles, ui_theme::rgb(0xD9, 0x77, 0x57), Some("opencode"));
-    }
-    if hay.contains("codex") || hay.contains("openai") {
-        return (Icon::Bot, ui_theme::rgb(0x10, 0xA3, 0x7F), Some("openai"));
-    }
-    if hay.contains("cursor") {
-        return (Icon::Bot, ui_theme::rgb(0x5A, 0xA0, 0xF2), Some("cursor"));
-    }
-    if hay.contains("grok") {
-        return (Icon::Bot, ui_theme::TEXT, Some("grok"));
-    }
-    if hay.contains("antigravity") {
-        return (Icon::Bot, ui_theme::rgb(0x5A, 0xA0, 0xF2), Some("antigravity"));
-    }
-    if hay.contains("copilot") {
-        return (Icon::Bot, ui_theme::TEXT, Some("copilot"));
-    }
-    if tab.command.is_some() {
-        return (Icon::Bot, ui_theme::TEXT_MUTED, None);
-    }
-    (Icon::Terminal, ui_theme::TEXT_MUTED, None)
 }
 
 fn icon_square(ui: &mut egui::Ui, kind: Icon, tip: &str) -> egui::Response {
