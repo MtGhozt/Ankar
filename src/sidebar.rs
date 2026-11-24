@@ -956,6 +956,8 @@ fn draw_session_row(
 
     let full = ui.available_rect_before_wrap();
     let (row_rect, resp) = ui.allocate_exact_size(Vec2::new(full.width(), ROW_H), Sense::click());
+    // Not `resp.hovered()`: that turns false while the pointer is on the pin/archive buttons.
+    let row_hovered = ui.rect_contains_pointer(resp.rect);
 
     // Icon 26.7 box at x 10.67; glyph ≈18 centered. Title baseline ≈ icon_top + 20.
     let icon_rect = Rect::from_min_size(
@@ -1008,7 +1010,7 @@ fn draw_session_row(
                 CornerRadius::same(ui_theme::RADIUS_ROW),
                 ui_theme::ROW_SELECTED,
             );
-        } else if resp.hovered() {
+        } else if row_hovered {
             painter.rect_filled(
                 bg,
                 CornerRadius::same(ui_theme::RADIUS_ROW),
@@ -1056,7 +1058,7 @@ fn draw_session_row(
         );
 
         // Time on the title baseline; hover reveals archive/pin.
-        if resp.hovered() {
+        if row_hovered {
             let archive_r = Rect::from_center_size(
                 egui::pos2(time_right - 10.0, title_y),
                 Vec2::splat(18.0),
@@ -1095,7 +1097,7 @@ fn draw_session_row(
         }
     }
 
-    if resp.hovered() {
+    if row_hovered {
         let archive_r = Rect::from_center_size(
             egui::pos2(time_right - 10.0, title_y),
             Vec2::splat(18.0),

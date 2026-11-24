@@ -532,10 +532,19 @@ fn draw_tab_bar(
                 );
             }
 
-            if resp.hovered() && !selected {
+            // Not `resp.hovered()`: that turns false while the pointer is on the close button.
+            let tab_hovered = ui.rect_contains_pointer(rect);
+            if tab_hovered && !selected {
                 ui.painter()
                     .rect_filled(rect, CornerRadius::ZERO, ui_theme::HOVER);
             }
+
+            // Close on hover only (midterm); middle-click closes.
+            let show_close = tab_hovered;
+            let close_rect = egui::Rect::from_center_size(
+                egui::pos2(rect.right() - 14.0, rect.center().y),
+                Vec2::splat(18.0),
+            );
 
             let title = if tab.session_name.is_empty() {
                 tab.title.clone()
@@ -558,11 +567,16 @@ fn draw_tab_bar(
                 );
                 let title_x = rect.left() + 26.7;
                 let title_baseline = rect.top() + 25.33;
+                let title_right = if show_close {
+                    close_rect.left() - 4.0
+                } else {
+                    rect.right() - 8.0
+                };
                 paint_tab_title_fade(
                     ui,
                     &title,
                     egui::pos2(title_x, title_baseline),
-                    rect.right() - title_x - 8.0,
+                    title_right - title_x,
                     ui_theme::TEXT,
                     ui_theme::BG,
                 );
@@ -590,12 +604,6 @@ fn draw_tab_bar(
                 );
             }
 
-            // Close on hover only (midterm); middle-click closes.
-            let show_close = resp.hovered();
-            let close_rect = egui::Rect::from_center_size(
-                egui::pos2(rect.right() - 14.0, rect.center().y),
-                Vec2::splat(18.0),
-            );
             let close_id = ui.scope_id().with("tab_close").with(tab.id);
             let close_resp = ui.interact(close_rect, close_id, Sense::click());
             if show_close {
