@@ -129,6 +129,11 @@ impl AnkarApp {
 }
 
 impl eframe::App for AnkarApp {
+    /// eframe's default is translucent #0C0C0C, which shows through unpainted gaps.
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        [0.0, 0.0, 0.0, 1.0]
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let focused = ui.input(|i| i.focused);
         self.status
