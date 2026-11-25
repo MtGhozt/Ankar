@@ -3,7 +3,6 @@
 use super::ankar::AnkarStatsStore;
 use super::format::pct_change;
 use super::{cursor_agent, opencode, StatsSnapshot};
-use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -202,6 +201,10 @@ impl StatsLoader {
         self.sched.inflight
     }
 
+    pub fn clear_cache(&mut self) {
+        self.cache = None;
+    }
+
     pub fn cached(&self) -> Option<&StatsSnapshot> {
         self.cache.as_ref().map(|c| &c.snap)
     }
@@ -320,7 +323,6 @@ fn compute(range: StatsRange, ankar: &Arc<Mutex<AnkarStatsStore>>) -> StatsSnaps
         snap.delta_hours_pct = pct_change(cur_hours_secs, prev_hours_secs);
     }
 
-    let _ = PathBuf::new();
     snap
 }
 

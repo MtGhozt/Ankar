@@ -42,10 +42,20 @@ impl StatsPanel {
     }
 
     pub fn toggle(&mut self) {
-        self.open = !self.open;
         if self.open {
+            self.close();
+        } else {
+            self.open = true;
             self.loader.request(self.range, false);
         }
+    }
+
+    /// Close and free the snapshot and loader cache.
+    pub fn close(&mut self) {
+        self.open = false;
+        self.snapshot = None;
+        self.loader.clear_cache();
+        self.filter_agent = None;
     }
 
     pub fn draw(&mut self, ui: &mut Ui) {
@@ -62,7 +72,7 @@ impl StatsPanel {
         }
 
         if ui.input(|i| i.key_pressed(Key::Escape)) {
-            self.open = false;
+            self.close();
             return;
         }
 
