@@ -19,7 +19,11 @@ Ankar is a Windows desktop terminal written in Rust: eframe/egui 0.37 (glow), al
 | `src/app.rs` | `AnkarApp`: frame loop, tab bar, panels, shortcuts, splits, viewer pane, zoom |
 | `src/sidebar.rs` | Sessions list (groups, rows, filters, search) and the Sessions/Files switch |
 | `src/files.rs` | file tree (browse only) and the read-only viewer pane |
-| `src/footer.rs`, `src/gitinfo.rs` | shell footer: cwd chip, git branch, changed-file count |
+| `src/footer.rs`, `src/gitinfo.rs` | shell footer chips; git branch, changed files, +/- counts |
+| `src/dir_picker.rs` | in-app cd picker above the footer's cwd chip |
+| `src/changes.rs` | git watcher, diff parsing, changes pane (commit/push/PR/revert/discard) |
+| `src/inbox.rs` | notifications inbox panel |
+| `src/window_watch.rs` | window focus/DPI/size log; holds terminal resizes on bogus frames |
 | `src/folder_pick.rs` | native folder dialog on a worker thread |
 | `src/layout.rs` | `Workspace`, `Tab`, split tree, where a new session starts |
 | `src/status.rs`, `src/procs.rs` | Working/Waiting/Finished; process snapshot (agents, busy shells) |
@@ -34,6 +38,7 @@ Ankar is a Windows desktop terminal written in Rust: eframe/egui 0.37 (glow), al
 | `src/terminal/resize.rs` | resize debounce and the held frame after a resize |
 | `src/terminal/theme.rs`, `src/ui_theme.rs` | terminal palette; UI colours, fonts, icons |
 | `src/stats/` | local usage stats panel (read-only metadata) |
+| `build.rs`, `vendor/conpty/` | Microsoft ConPTY copied beside `ankar.exe` |
 | `docs/ram.md` | RAM measurements and method |
 | `docs/harness/` | this harness |
 

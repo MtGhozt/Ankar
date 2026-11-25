@@ -61,20 +61,30 @@ Fix: reports list what was not verified by eye (prompt 15).
 Guard: AGENTS.md rule "never claim something visual works unless you saw it".
 
 ## 2026-11-25 — Approved UI moved
-Symptom: 09b9bb1 moved the Sessions/Files switch into the top strip, which Matias had approved
-where it was.
+Symptom: 09b9bb1 moved the Sessions/Files switch into the top strip; prompt 14 then made the
+sidebar a full-height column and pushed the tab bar right of it. Matias had approved the
+full-width tab bar with the toggle at the window's top-left.
 Root cause: a layout task was read as permission to rearrange neighbouring UI.
-Fix: switch back under the toggle row (39cad81).
-Guard: `sidebar::tests::files_close_hides_the_whole_sidebar_and_the_switch_sits_under_the_header`;
+Fix: switch back (39cad81); full-width tab bar, toggle top-left, sidebar below (b24280b).
+Guard: `app::tests::toggle_sits_top_left_centred_above_the_divider_and_tabs_follow_it`,
+`sidebar::tests::files_close_hides_the_whole_sidebar_and_the_switch_sits_at_the_top`;
 rule: only change the UI a task lists.
 
 ## 2026-11-25 — Inbox ConPTY swallows terminal queries
-Symptom: Junie stayed on its light theme; Copilot could not read the palette.
-Root cause: Windows' built-in ConPTY strips OSC 10/11 and DA from the app's output, so the
-query never reaches Ankar. A newer conpty.dll + OpenConsole.exe passes them.
-Fix: logged at startup which ConPTY is used; README explains shipping the dll (bb650c0).
+Symptom: Junie stayed on its light theme; Copilot could not read the palette (no pills).
+Root cause: Windows' built-in ConPTY strips OSC 10/11/4 and DA from the app's output, so the
+query never reaches Ankar. Matias confirmed with Warp's newer conpty.dll on PATH (r15).
+Fix: ship Microsoft.Windows.Console.ConPTY 1.25.261109001 in `vendor/conpty`; build.rs puts
+`conpty.dll` and `x64\OpenConsole.exe` beside `ankar.exe` (5ad8b71).
 Guard: `terminal::osc::tests::conpty_passes_the_osc_11_background_query_through` (ignored;
-fails on inbox ConPTY by design).
+green with the vendored dll); the startup log names the ConPTY in use.
+
+## 2026-11-25 — build.rs copied into the wrong folder
+Symptom: the ConPTY copy step "worked" but nothing appeared beside `ankar.exe`.
+Root cause: the sandbox redirects `CARGO_TARGET_DIR`, and Cargo 1.100 nests build scripts as
+`build\ankar\<hash>\out`, so a fixed `OUT_DIR` ancestor count pointed at `release\build`.
+Fix: walk up to the ancestor named `build` and take its parent (5ad8b71).
+Guard: look for the files under `$env:CARGO_TARGET_DIR`, not `target\`.
 
 ## 2026-11-25 — Logging must write a file
 Symptom: "no log file" after asking for logs; release builds have no console.

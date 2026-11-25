@@ -11,7 +11,9 @@ the whole UI from state; nothing is retained between frames except that state.
 | `ankar-pty-<id>` loop | alacritty `EventLoop` | reads ConPTY through `OscTap`, feeds `Term` |
 | `ankar-pty-<id>` events | `TerminalSession::spawn` | answers queries (`PtyWrite`, colours, size), flags bell/exit/output |
 | file load | `FileViewer::open_path` | read capped file, syntect highlight, send `LoadResult` |
-| `ankar-git` | `ShellFooter::refresh` | `.git/HEAD` + `git status --porcelain`, at most every 5 s |
+| `ankar-git` | `changes::GitWatch::refresh` | `.git/HEAD`, `git status -z` + `git diff --numstat -z HEAD`, every 5 s |
+| `ankar-git-diff` | `ChangesPane::ensure_diffs` | one `git diff HEAD -- <file>` per file while the pane is open |
+| `ankar-git-job` | `ChangesPane::start` | commit, push, open PR URL, revert, discard all |
 | `ankar-folder-pick` | `FolderPick::open` | `SHBrowseForFolderW`, result over a channel |
 | screenshot callback | egui | colour check read-back, logs and sets a flag |
 
@@ -28,8 +30,8 @@ UI frame     -> TerminalView::show -> session.resize -> session.sync (snapshot) 
 ```
 
 - `sync` copies only the visible, non-default cells into `Snapshot`; hidden tabs drop theirs.
-- Cell metrics come from the measured Hack reference scaled by the terminal font size
-  (`ui_theme::cell_w/cell_h`, `term_row_top` snaps rows to device pixels).
+- Cell metrics: `ui_theme::cell_size(font)` = Hack advance (0.602 em) x `LINE_HEIGHT` 1.2;
+  `glyph_top_offset` centres each row's text; `term_row_top` snaps rows to device pixels.
 - Box drawing, blocks and braille are geometry, not glyphs (view.rs), snapped to whole pixels.
 
 ## Resize
@@ -41,26 +43,32 @@ UI frame     -> TerminalView::show -> session.resize -> session.sync (snapshot) 
    never disagree.
 4. If a frame was on screen, `sync` keeps returning it until the app has redrawn (output quiet
    for 30 ms) or 200 ms passed (`resize::hold_frame`), so TUIs never flash blank.
+5. `window_watch::WindowWatch` runs first each frame: logs window changes and calls
+   `terminal::hold_layout` for minimized or tiny frames, where `session.resize` does nothing.
 
 ## Session status
 
 - `procs::probe` (once a second, one Toolhelp32 snapshot): every tab learns `busy_child`
   (shell has a child other than conhost/OpenConsole); the active plain tab learns which agent
   runs in it (`detected`), which renames it.
-- `StatusTracker::tick` per frame: an OSC 7501 report wins; otherwise `guess_busy` = child
-  running and output within `waiting_timeout`. Idle shells are Waiting. Only agent-reported
-  work that ends after 30 s may toast.
+- `StatusTracker::tick` per frame builds `Signals` (exited, OSC 7501 report, `guess_busy`,
+  Enter since the last change via `last_submit`) and `next_status(prev, signals)` decides:
+  Idle -> Working -> Waiting -> Working…, Finished on exit. Agent work over 30 s that ends
+  goes to the inbox (and may toast); a non-zero exit goes to the inbox.
 
 ## Layout and panels (top to bottom, left to right)
 
-- Left: sidebar column (`Panel::left`, width 180..420, persisted): header with the toggle, the
-  Sessions/Files switch row, then the list or the file tree.
-- Top: tab bar (32 px, same height as the sidebar header so both dividers line up), caption
-  buttons, stats icon.
-- Bottom: shell footer (26 px) only when the active tab is a plain shell.
-- Centre: the tab's split tree (`render_layout`), and, when open for this tab, the file viewer
-  pane on the right (`files::pane_split`, draggable ratio, maximizable).
-- Overlays: palette, stats panel, zoom toast, colour check swatches.
+- Top: full-width tab bar (`Panel::top`, declared before the sidebar, 37 px): toggle at
+  top-left (`strip_slots`), tabs, then "± +N -N", inbox, stats, caption buttons.
+- Left: sidebar (`Panel::left`, width 180..420, persisted): Sessions/Files switch row, then
+  the list or the file tree.
+- Bottom: shell footer (26 px) only when the active tab is a plain shell; the cd picker
+  (`dir_picker`) floats above its cwd chip.
+- Centre: the tab's split tree (`render_layout`), and, when open for this tab, one right-hand
+  pane (`files::pane_split`): the file viewer or the changes pane (`changes.rs`).
+- `changes::GitWatch` (owned by the app) follows the active tab's project key and feeds the
+  footer, the tab-bar button and the changes pane.
+- Overlays: palette, stats panel, inbox panel, zoom toast, colour check, 1 px window outline.
 
 ## Persistence and files on disk
 
@@ -80,8 +88,9 @@ cwd of every tab each frame, and the group follows.
 
 - Terminal: `TermColors` (theme.rs), background `#000`, foreground `#d4d4d4`, cursor `#7699FE`.
   OSC 4/10/11/12 queries are answered from it with 16-bit channels and the query's terminator.
-- Inbox Windows ConPTY swallows OSC 10/11 and DA queries; a newer `conpty.dll` +
-  `x64\OpenConsole.exe` beside `ankar.exe` passes them (README, `logging::conpty_dll`).
+- Inbox Windows ConPTY swallows OSC 10/11/4 and DA queries. `build.rs` copies the vendored
+  `vendor/conpty/conpty.dll` + `x64\OpenConsole.exe` beside `ankar.exe` (debug and release);
+  alacritty loads the dll from the exe folder first (`logging::conpty_dll` logs which).
 
 ## Memory
 

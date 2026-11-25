@@ -15,8 +15,13 @@ asserts only fire there, so a release-only check is not enough.
 
 - Bugs start with a failing test that reproduces the report. Run it red, then fix.
 - Keep logic in pure functions and test those: layout maths (`sidebar::row_layout`,
-  `files::pane_split`, `resize::hold_frame`), parsers (`osc`, `gitinfo::parse_head`),
-  decisions (`status::guess_busy`, `procs::has_foreground_child`, `layout::new_session_cwd`).
+  `files::pane_split`, `app::strip_slots`, `ui_theme::cell_size`, `resize::hold_frame`),
+  parsers (`osc`, `gitinfo::parse_head/parse_porcelain_z/parse_numstat_z`,
+  `changes::parse_unified/compare_url`), decisions (`status::next_status`,
+  `dir_picker::visible_rows/step`, `window_watch::changes/layout_untrusted`,
+  `procs::has_foreground_child`, `layout::new_session_cwd`, `config::migrate`).
+- Panels that are hard to click headlessly (changes pane, inbox): render a few frames with
+  `run_ui` and fake state so egui's debug asserts (id clashes, layout) still run.
 - Terminal behaviour: drive `alacritty_terminal` directly with `ansi::Processor` on a `Term`
   and an mpsc event proxy; assert on the events and replies (see backend.rs tests).
 - Painting: build shapes with the same helpers `paint_grid` uses and assert on rects and
@@ -45,8 +50,10 @@ out.textures_delta.clear(); // dropping pending deltas panics in debug
 ## Ignored tests
 
 - `conpty_passes_the_osc_11_background_query_through` spawns a real ConPTY:
-  `cargo test conpty_passes -- --ignored`. Red on inbox ConPTY (expected), green with a newer
-  `conpty.dll` + `x64\OpenConsole.exe` on PATH or beside the test binary.
+  `cargo test conpty_passes -- --ignored`. Green with the vendored dll that build.rs copies;
+  red on the inbox ConPTY.
+- `real_repo_changes_and_diffs_load` runs git on this checkout and checks every diff's added
+  lines match numstat: `cargo test real_repo -- --ignored --nocapture`.
 
 ## What tests cannot show
 
@@ -65,3 +72,5 @@ Use these, and say in the report what was not verified by eye:
 - Editor writes can reach the disk a few seconds late: if the compiler reports code you
   already changed, wait and run again before debugging.
 - `examples/` holds local scratch programs; they still compile under `--all-targets`.
+- The agent sandbox sets `CARGO_TARGET_DIR` elsewhere: look for `ankar.exe` and the copied
+  ConPTY there, not under `target\`.
