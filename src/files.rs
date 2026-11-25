@@ -1,6 +1,6 @@
 use crate::ui_theme::{self, Icon};
 use egui::text::{LayoutJob, TextFormat};
-use egui::{Color32, FontId, Sense, Ui, Vec2};
+use egui::{Color32, FontId, Rect, Sense, Ui, Vec2};
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::Read;
@@ -77,6 +77,15 @@ pub struct FileViewer {
     load_rx: Option<Receiver<LoadResult>>,
     dir_cache: HashMap<PathBuf, Vec<DirEntryInfo>>,
     expanded: HashSet<PathBuf>,
+    /// The viewer pane right of the terminal shows `open_file`.
+    pub pane_open: bool,
+    pub maximized: bool,
+    /// Terminal share of the width while the pane is open.
+    pub pane_ratio: f32,
+    /// Last click landed in the viewer: Esc closes it instead of reaching the terminal.
+    pub pane_focused: bool,
+    /// A file was picked in the tree this frame: the pane moves to the active tab.
+    pub just_opened: bool,
 }
 
 impl FileViewer {
@@ -92,15 +101,15 @@ impl FileViewer {
         let root = root.or_else(dirs::home_dir);
         if self.root != root {
             self.root = root;
-            self.open_file = None;
-            self.cancel_load();
-            self.content = FileContent::Empty;
             self.dir_cache.clear();
         }
     }
 
-    /// Free syntect and the highlighted lines while the panel is hidden.
+    /// Free syntect and the highlighted lines while neither the tree nor the pane is shown.
     pub fn release(&mut self) {
+        if self.pane_open {
+            return;
+        }
         if self.syntect.is_none()
             && self.load_rx.is_none()
             && matches!(self.content, FileContent::Empty)
@@ -186,15 +195,9 @@ impl FileViewer {
         self.set_root(dirs::home_dir());
     }
 
-    /// Draw the tree. Returns a folder that asked for a new tab ("New tab here").
+    /// Draw the tree (browsing only; a clicked file opens in the viewer pane). Returns a folder
+    /// that asked for a new tab ("New tab here").
     pub fn draw(&mut self, ui: &mut Ui) -> Option<PathBuf> {
-        self.poll_load();
-        if matches!(self.content, FileContent::Empty) && self.load_rx.is_none() {
-            if let Some(path) = self.open_file.clone() {
-                self.open_path(ui.ctx(), path);
-            }
-        }
-
         // Just the path, truncated; the close X lives in the sidebar's header row.
         let (header, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 28.0), Sense::hover());
         if let Some(root) = &self.root {
@@ -264,15 +267,8 @@ impl FileViewer {
         let root = self.root.clone().unwrap_or(root);
         let mut clicked: Option<PathBuf> = None;
         let mut new_tab: Option<PathBuf> = None;
-        // The viewer keeps room under the tree; with no file open the tree takes the pane.
-        let tree_h = if self.open_file.is_some() {
-            ui.available_height() * 0.35
-        } else {
-            ui.available_height()
-        };
         egui::ScrollArea::vertical()
             .id_salt("file_tree")
-            .max_height(tree_h)
             .show(ui, |ui| {
                 // Highlighted root row reads as the tree header.
                 let root_name = root
@@ -294,42 +290,181 @@ impl FileViewer {
             });
 
         if let Some(path) = clicked {
-            self.open_path(ui.ctx(), path);
-        }
-
-        if let Some(path) = self.open_file.clone() {
-            ui.add_space(4.0);
-            let (sep2, _) =
-                ui.allocate_exact_size(Vec2::new(ui.available_width(), 1.0), Sense::hover());
-            ui.painter().rect_filled(sep2, 0.0, ui_theme::BORDER);
-            ui.add(egui::Label::new(ui_theme::text_sub(path.display().to_string())).truncate());
-            match &self.content {
-                FileContent::Empty | FileContent::Loading => {
-                    ui.label(ui_theme::text_sub("Loading…"));
-                }
-                FileContent::Error(msg) => {
-                    ui.label(ui_theme::text_sub(msg.clone()));
-                }
-                FileContent::Ready(text) => {
-                    let font = FontId::monospace(CONTENT_FONT_SIZE);
-                    let (row_h, char_w) =
-                        ui.fonts_mut(|f| (f.row_height(&font), f.glyph_width(&font, 'M')));
-                    egui::ScrollArea::both().id_salt("file_content").show_rows(
-                        ui,
-                        row_h,
-                        text.lines.len(),
-                        |ui, rows| {
-                            ui.set_min_width(text.max_cols as f32 * char_w);
-                            for line in &text.lines[rows] {
-                                ui.add(egui::Label::new(line.clone()).extend());
-                            }
-                        },
-                    );
-                }
+            if !self.pane_open {
+                self.pane_ratio = 0.5;
             }
+            self.pane_open = true;
+            self.just_opened = true;
+            self.open_path(ui.ctx(), path);
         }
         new_tab
     }
+
+    /// The read-only viewer pane: header (path, ⋮ menu, X) over line-numbered, highlighted text.
+    pub fn draw_pane(&mut self, ui: &mut Ui, rect: Rect) -> PaneAction {
+        self.poll_load();
+        if matches!(self.content, FileContent::Empty) && self.load_rx.is_none() {
+            if let Some(path) = self.open_file.clone() {
+                self.open_path(ui.ctx(), path);
+            }
+        }
+        let Some(path) = self.open_file.clone() else {
+            return PaneAction::Close;
+        };
+        let mut action = PaneAction::None;
+        let bg = ui.interact(rect, ui.scope_id().with("viewer_pane"), Sense::click());
+        if bg.clicked() || ui.input(|i| i.pointer.any_pressed() && i.pointer.interact_pos().is_some_and(|p| rect.contains(p))) {
+            self.pane_focused = true;
+        }
+        ui.painter().rect_filled(rect, 0.0, ui_theme::BG);
+
+        let header = Rect::from_min_size(rect.min, Vec2::new(rect.width(), 30.0));
+        let painter = ui.painter().with_clip_rect(rect);
+        painter.hline(header.x_range(), header.bottom() - 0.5, egui::Stroke::new(1.0, ui_theme::CHROME_DIVIDER));
+        let close = Rect::from_center_size(egui::pos2(header.right() - 16.0, header.center().y), Vec2::splat(22.0));
+        let menu = close.translate(Vec2::new(-26.0, 0.0));
+        painter.text(
+            egui::pos2(header.left() + 10.0, header.center().y),
+            egui::Align2::LEFT_CENTER,
+            ellipsize_start(&path.display().to_string(), ((menu.left() - header.left() - 20.0) / 6.5) as usize),
+            FontId::proportional(ui_theme::SIZE_UI),
+            ui_theme::TEXT_MUTED,
+        );
+
+        let x = ui.interact(close, ui.scope_id().with("viewer_close"), Sense::click()).on_hover_text("Close (Esc)");
+        icon_button(&painter, close, Icon::X, x.hovered());
+        if x.clicked() {
+            action = PaneAction::Close;
+        }
+        let m = ui.interact(menu, ui.scope_id().with("viewer_menu"), Sense::click());
+        if m.hovered() {
+            painter.rect_filled(menu, egui::CornerRadius::same(4), ui_theme::HOVER);
+        }
+        for dy in [-4.0, 0.0, 4.0] {
+            painter.circle_filled(menu.center() + Vec2::new(0.0, dy), 1.3, ui_theme::TEXT_MUTED);
+        }
+        egui::Popup::menu(&m).show(|ui| {
+            let label = if self.maximized { "Restore pane" } else { "Maximize pane" };
+            if ui.button(label).clicked() {
+                self.maximized = !self.maximized;
+            }
+            if ui.button("Copy file path").clicked() {
+                ui.ctx().copy_text(path.display().to_string());
+            }
+            if ui.button("Reveal in Explorer").clicked() {
+                reveal_in_explorer(&path);
+            }
+        });
+
+        let body = Rect::from_min_max(egui::pos2(rect.left(), header.bottom()), rect.max);
+        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(body.shrink2(Vec2::new(6.0, 4.0))));
+        match &self.content {
+            FileContent::Empty | FileContent::Loading => {
+                child.label(ui_theme::text_sub("Loading…"));
+            }
+            FileContent::Error(msg) => {
+                child.label(ui_theme::text_sub(msg.clone()));
+            }
+            FileContent::Ready(text) => {
+                let font = FontId::monospace(CONTENT_FONT_SIZE);
+                let (row_h, char_w) = child.fonts_mut(|f| (f.row_height(&font), f.glyph_width(&font, 'M')));
+                let gutter = gutter_digits(text.lines.len()) as f32 * char_w + 14.0;
+                egui::ScrollArea::both()
+                    .id_salt(("file_content", &path))
+                    .auto_shrink([false, false])
+                    .show_rows(&mut child, row_h, text.lines.len(), |ui, rows| {
+                        ui.set_min_width(gutter + text.max_cols as f32 * char_w);
+                        for (n, line) in text.lines[rows.clone()].iter().enumerate() {
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = 0.0;
+                                let (num, _) = ui.allocate_exact_size(Vec2::new(gutter, row_h), Sense::hover());
+                                ui.painter().text(
+                                    egui::pos2(num.right() - 10.0, num.center().y),
+                                    egui::Align2::RIGHT_CENTER,
+                                    (rows.start + n + 1).to_string(),
+                                    font.clone(),
+                                    ui_theme::TEXT_FAINT,
+                                );
+                                ui.add(egui::Label::new(line.clone()).extend());
+                            });
+                        }
+                    });
+            }
+        }
+        action
+    }
+
+    /// Close the pane and free its text.
+    pub fn close_pane(&mut self) {
+        self.pane_open = false;
+        self.maximized = false;
+        self.pane_focused = false;
+        self.open_file = None;
+        self.cancel_load();
+        self.content = FileContent::Empty;
+    }
+}
+
+fn icon_button(painter: &egui::Painter, rect: Rect, icon: Icon, hovered: bool) {
+    if hovered {
+        painter.rect_filled(rect, egui::CornerRadius::same(4), ui_theme::HOVER);
+    }
+    painter.text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        icon.codepoint().to_string(),
+        FontId::new(14.0, egui::FontFamily::Name(ui_theme::FONT_ICONS.into())),
+        ui_theme::TEXT_MUTED,
+    );
+}
+
+/// Keep the end of a long path (the file name matters most).
+fn ellipsize_start(s: &str, max_chars: usize) -> String {
+    let n = s.chars().count();
+    if n <= max_chars.max(4) {
+        return s.to_owned();
+    }
+    let keep = max_chars.max(4) - 1;
+    format!("…{}", s.chars().skip(n - keep).collect::<String>())
+}
+
+fn reveal_in_explorer(path: &Path) {
+    let mut cmd = std::process::Command::new("explorer.exe");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.raw_arg(format!("/select,\"{}\"", path.display()));
+    }
+    if let Err(e) = cmd.spawn() {
+        log::warn!("reveal {}: {e}", path.display());
+    }
+}
+
+pub const PANE_DIVIDER: f32 = 5.0;
+
+/// Terminal area (`None` when the viewer is maximized), divider and viewer for a viewer pane
+/// on the right of `area`. `ratio` is the terminal's share of the width.
+pub fn pane_split(area: Rect, ratio: f32, maximized: bool) -> (Option<Rect>, Rect, Rect) {
+    if maximized {
+        return (None, Rect::NOTHING, area);
+    }
+    let x = area.left() + area.width() * ratio.clamp(0.2, 0.8);
+    let half = PANE_DIVIDER * 0.5;
+    let term = Rect::from_min_max(area.min, egui::pos2(x - half, area.bottom()));
+    let divider = Rect::from_min_max(egui::pos2(x - half, area.top()), egui::pos2(x + half, area.bottom()));
+    let viewer = Rect::from_min_max(egui::pos2(x + half, area.top()), area.max);
+    (Some(term), divider, viewer)
+}
+
+fn gutter_digits(lines: usize) -> usize {
+    lines.max(1).to_string().len()
+}
+
+/// What the viewer pane asks the app to do this frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PaneAction {
+    None,
+    Close,
 }
 
 fn read_file_capped(path: &Path) -> std::io::Result<(String, bool)> {
@@ -595,6 +730,30 @@ fn syn_color(style: SynStyle) -> Color32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_viewer_takes_the_right_half_and_can_fill_the_area() {
+        let area = Rect::from_min_size(egui::pos2(100.0, 40.0), Vec2::new(800.0, 600.0));
+        let (term, div, view) = pane_split(area, 0.5, false);
+        let term = term.expect("terminal shown");
+        assert_eq!((term.left(), view.right()), (100.0, 900.0));
+        assert!((div.center().x - 500.0).abs() < 1e-3, "divider in the middle");
+        assert!(term.right() <= div.left() + 1e-3 && div.right() <= view.left() + 1e-3);
+        assert_eq!((term.height(), view.height()), (600.0, 600.0));
+        let (_, _, narrow) = pane_split(area, 0.97, false);
+        assert!(narrow.width() >= 800.0 * 0.2 - 3.0, "ratio clamped: viewer stays usable");
+        let (term, _, view) = pane_split(area, 0.5, true);
+        assert!(term.is_none());
+        assert_eq!(view, area, "maximized fills the area");
+    }
+
+    #[test]
+    fn gutter_fits_the_widest_line_number() {
+        assert_eq!(gutter_digits(0), 1);
+        assert_eq!(gutter_digits(9), 1);
+        assert_eq!(gutter_digits(10), 2);
+        assert_eq!(gutter_digits(5001), 4);
+    }
 
     #[test]
     fn gitignore_rules_dim_names_without_hiding_them() {

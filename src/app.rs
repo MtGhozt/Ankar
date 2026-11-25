@@ -1,6 +1,6 @@
 use crate::color_check;
 use crate::config::Config;
-use crate::files::FileViewer;
+use crate::files::{self, FileViewer};
 use crate::folder_pick::{self, FolderPick, PickFor};
 use crate::footer::{self, ShellFooter};
 use crate::launchers;
@@ -38,6 +38,10 @@ pub struct AnkarApp {
     stats: StatsPanel,
     ankar_stats: Arc<Mutex<AnkarStatsStore>>,
     footer: ShellFooter,
+    /// Tab the file viewer pane was opened in; it shows only there.
+    pane_tab: Option<u64>,
+    /// (pane shown, maximized) last frame: opening/closing it is a discrete layout jump.
+    last_pane_layout: (bool, bool),
     /// Footer visibility last frame (shell tab vs agent tab): a discrete layout jump.
     last_footer_shown: bool,
     /// Debug colour check in flight: swatch origin, and the flag the screenshot callback sets.
@@ -87,6 +91,8 @@ impl AnkarApp {
             stats: StatsPanel::new(ankar_stats.clone()),
             ankar_stats,
             footer: ShellFooter::default(),
+            pane_tab: None,
+            last_pane_layout: (false, false),
             last_footer_shown: false,
             color_check: None,
         })
@@ -499,10 +505,61 @@ impl eframe::App for AnkarApp {
                 let active = self.workspace.active_tab;
                 let font_size = self.config.font_size;
                 let dim = self.config.dim_inactive_panes;
-                let ratio_changed =
-                    render_layout(ui, &mut self.workspace.tabs[active], font_size, dim);
-                if ratio_changed {
-                    self.workspace.mark_dirty();
+                let active_id = self.workspace.tabs[active].id;
+                if std::mem::take(&mut self.files.just_opened) {
+                    self.pane_tab = Some(active_id);
+                }
+                let pane_esc = self.files.pane_open
+                    && self.files.pane_focused
+                    && self.pane_tab == Some(active_id)
+                    && ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape));
+                if pane_esc || self.pane_tab.is_some_and(|id| !self.workspace.tabs.iter().any(|t| t.id == id)) {
+                    self.files.close_pane();
+                    self.pane_tab = None;
+                }
+                let pane = self.files.pane_open && self.pane_tab == Some(active_id);
+                let pane_layout = (pane, pane && self.files.maximized);
+                if pane_layout != self.last_pane_layout {
+                    self.last_pane_layout = pane_layout;
+                    resize_now(&mut self.workspace);
+                }
+                let area = ui.available_rect_before_wrap();
+                let (term_rect, divider, viewer) = if pane {
+                    files::pane_split(area, self.files.pane_ratio, self.files.maximized)
+                } else {
+                    (Some(area), egui::Rect::NOTHING, egui::Rect::NOTHING)
+                };
+                if let Some(term_rect) = term_rect {
+                    if ui.input(|i| i.pointer.any_pressed() && i.pointer.interact_pos().is_some_and(|p| term_rect.contains(p))) {
+                        self.files.pane_focused = false;
+                    }
+                    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(term_rect));
+                    let ratio_changed =
+                        render_layout(&mut child, &mut self.workspace.tabs[active], font_size, dim);
+                    if ratio_changed {
+                        self.workspace.mark_dirty();
+                    }
+                }
+                if !pane {
+                    return;
+                }
+                if term_rect.is_some() {
+                    let resp = ui.interact(divider, ui.scope_id().with("viewer_divider"), egui::Sense::drag());
+                    if resp.hovered() || resp.dragged() {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+                    }
+                    if let Some(pos) = resp.interact_pointer_pos().filter(|_| resp.dragged()) {
+                        self.files.pane_ratio = ((pos.x - area.left()) / area.width()).clamp(0.2, 0.8);
+                    }
+                    if resp.drag_stopped() {
+                        resize_now(&mut self.workspace);
+                    }
+                    let color = if resp.hovered() || resp.dragged() { ui_theme::DIVIDER_ACTIVE } else { ui_theme::BORDER };
+                    ui.painter().vline(divider.center().x, divider.y_range(), Stroke::new(1.0, color));
+                }
+                if self.files.draw_pane(ui, viewer) == files::PaneAction::Close {
+                    self.files.close_pane();
+                    self.pane_tab = None;
                 }
             });
 
