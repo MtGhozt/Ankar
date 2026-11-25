@@ -412,6 +412,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn accumulated_busy_seconds_are_the_snapshot_row() {
+        let mut pending = 0.0;
+        let mut busy = 0u64;
+        for _ in 0..90 {
+            busy += take_whole_secs(&mut pending, 0.5);
+        }
+        let mut hours = AnkarHours::new();
+        hours.insert(
+            "2026-01-05T10".into(),
+            HashMap::from([("junie".into(), AnkarHourCell { busy, waiting: 0, starts: 1 })]),
+        );
+        let tz = jiff::tz::TimeZone::UTC;
+        let (_, _, _, agents, _, _) = AnkarStatsStore::snapshot_hours(&hours, &tz, 0, i64::MAX, None);
+        let row = agents.iter().find(|r| r.name == "Junie").unwrap();
+        assert_eq!(row.busy_secs, 45);
+        assert_eq!(super::super::format::format_hours_short(row.busy_secs), "45s");
+        assert_eq!(super::super::format::format_hours_short(0), "0s");
+    }
+
+    #[test]
     fn fractional_ticks_accumulate_and_gaps_are_ignored() {
         let mut p = 0.0;
         let total: u64 = (0..10).map(|_| take_whole_secs(&mut p, 0.1)).sum();

@@ -331,7 +331,9 @@ pub(super) fn draw_agents(
             format_hours_short(a.busy_secs),
             format_hours_short(a.waiting_secs)
         );
-        if a.tokens.is_none() {
+        if a.name == "Junie" && a.tokens.is_none() {
+            tip.push_str("\nTime is only what Ankar measured in the terminal.");
+        } else if a.tokens.is_none() {
             tip.push_str("\ncursor-agent and Ankar do not store tokens locally");
         }
         if !a.modes.is_empty() {

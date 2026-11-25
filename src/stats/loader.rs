@@ -2,7 +2,7 @@
 
 use super::ankar::AnkarStatsStore;
 use super::format::pct_change;
-use super::{cursor_agent, opencode, AgentFilter, StatsSnapshot};
+use super::{cursor_agent, junie, opencode, AgentFilter, StatsSnapshot};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -268,6 +268,7 @@ fn compute(
     let tz = jiff::tz::TimeZone::system();
     opencode::load_into(&mut windows[..n], &tz, since_ms, scan_since, until_ms, filter);
     cursor_agent::load_into(&mut windows[..n], &tz, since_ms, scan_since, until_ms, filter);
+    junie::load_into(&mut windows[..n], &tz, since_ms, scan_since, until_ms, filter);
     let [mut snap, mut prev] = windows;
 
     // Hold the Ankar lock only to copy the hour buckets; the UI waits on it every frame.
@@ -300,17 +301,9 @@ fn compute(
     // OpenCode sessions counted in snap.sessions; Ankar starts added for card.
     let tasks_total = snap.sessions.saturating_add(snap.ankar_starts);
 
-    // Primary hours: Ankar busy if any, else OpenCode, else cursor.
-    snap.agent_hours = if snap.ankar_busy_secs > 0 {
-        snap.ankar_busy_secs as f64 / 3600.0
-    } else if snap.opencode_hours > 0.0 {
-        snap.opencode_hours
-    } else {
-        snap.cursor_hours
-    };
-
-    // One row per tool after OpenCode, cursor-agent, and Ankar have each appended theirs.
+    // One row per tool after OpenCode, cursor-agent, Junie, and Ankar have each appended theirs.
     snap.agents = super::fold_agent_rows(std::mem::take(&mut snap.agents));
+    snap.agent_hours = super::summed_busy_secs(&snap.agents) as f64 / 3600.0;
 
     // Sort days & agents.
     snap.days.sort_by(|a, b| a.day.cmp(&b.day));
@@ -325,26 +318,21 @@ fn compute(
     // Previous window deltas (skip for All).
     if with_prev {
         if let Some(hours) = &hours {
-            let (busy, _, starts, _, _, _) =
+            let (busy, _, starts, agents, _, _) =
                 AnkarStatsStore::snapshot_hours(hours, &tz, prev_since, prev_until, filter);
             prev.ankar_busy_secs = busy;
             prev.ankar_starts = starts;
+            prev.agents.extend(agents);
         }
+        prev.agents = super::fold_agent_rows(std::mem::take(&mut prev.agents));
         let prev_tasks = prev.sessions.saturating_add(prev.ankar_starts);
-        let prev_hours_secs = if prev.ankar_busy_secs > 0 {
-            prev.ankar_busy_secs
-        } else {
-            (prev.opencode_hours * 3600.0) as u64
-        };
-        let cur_hours_secs = if snap.ankar_busy_secs > 0 {
-            snap.ankar_busy_secs
-        } else {
-            (snap.opencode_hours * 3600.0) as u64
-        };
         snap.delta_input_pct = pct_change(snap.tokens.input, prev.tokens.input);
         snap.delta_output_pct = pct_change(snap.tokens.output, prev.tokens.output);
         snap.delta_tasks_pct = pct_change(tasks_total, prev_tasks);
-        snap.delta_hours_pct = pct_change(cur_hours_secs, prev_hours_secs);
+        snap.delta_hours_pct = pct_change(
+            super::summed_busy_secs(&snap.agents),
+            super::summed_busy_secs(&prev.agents),
+        );
     }
 
     snap

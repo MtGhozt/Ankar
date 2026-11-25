@@ -1,10 +1,11 @@
-//! Local-only agent usage stats (OpenCode SQLite, cursor-agent meta, Ankar busy time).
+//! Local-only agent usage stats (OpenCode SQLite, cursor-agent meta, Junie summaries, Ankar busy time).
 //! No network, no telemetry. Heavy IO runs on a background thread when the panel opens.
 
 mod ankar;
 mod charts;
 mod cursor_agent;
 mod format;
+mod junie;
 mod loader;
 mod opencode;
 mod panel;
@@ -134,6 +135,11 @@ pub struct AgentRow {
     pub modes: String,
 }
 
+/// Busy seconds the AGENTS table is showing, every tool included.
+pub(crate) fn summed_busy_secs(agents: &[AgentRow]) -> u64 {
+    agents.iter().fold(0, |n, a| n.saturating_add(a.busy_secs))
+}
+
 struct Tool {
     id: &'static str,
     name: &'static str,
@@ -203,7 +209,7 @@ pub struct StatsSnapshot {
     pub subagents: u64,
     pub prompts: u64,
     pub steps: u64,
-    /// Primary agent hours (Ankar busy preferred; else OpenCode durations).
+    /// Hours summed from every AGENTS row.
     pub agent_hours: f64,
     pub opencode_hours: f64,
     pub cursor_hours: f64,

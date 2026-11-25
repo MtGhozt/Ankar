@@ -422,10 +422,15 @@ fn draw_metric(ui: &mut Ui, snap: Option<&StatsSnapshot>, range: StatsRange, i: 
         ),
         (_, Some(snap)) => (
             "AGENT TIME",
-            if snap.agent_hours >= 10.0 {
-                format!("{:.0} h", snap.agent_hours)
-            } else {
-                format!("{:.1} h", snap.agent_hours)
+            {
+                let secs = super::summed_busy_secs(&snap.agents);
+                if secs < 3600 {
+                    format_hours_short(secs)
+                } else if secs >= 10 * 3600 {
+                    format!("{:.0} h", secs as f64 / 3600.0)
+                } else {
+                    format!("{:.1} h", secs as f64 / 3600.0)
+                }
             },
             snap.delta_hours_pct,
             // Concurrency is not tracked, so say only what is known.
