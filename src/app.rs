@@ -469,8 +469,10 @@ fn flush_pty_resizes(workspace: &mut Workspace) {
 const TAB_WIDTH: f32 = 224.0;
 /// Tabs shrink down to this when the bar is crowded; beyond that they are clipped.
 const MIN_TAB_WIDTH: f32 = 96.0;
-/// Fixed slot at the right edge for the stats + files icons (2 × 22 px hit targets).
-const RIGHT_ICONS_W: f32 = 44.0;
+/// Gap between the window edge and the right icons (the edge eats a few px on Windows).
+const RIGHT_ICONS_PAD: f32 = 10.0;
+/// Fixed slot at the right edge: padding + stats and files icons (2 × 22 px hit targets).
+const RIGHT_ICONS_W: f32 = RIGHT_ICONS_PAD + 44.0;
 const TAB_BAR_H: f32 = 38.0;
 
 fn draw_tab_bar(
@@ -710,6 +712,8 @@ fn draw_tab_bar(
             .layout(egui::Layout::right_to_left(egui::Align::Center)),
         |ui| {
             ui.spacing_mut().item_spacing.x = 0.0;
+            // RTL: the first thing added sits at the window edge.
+            ui.add_space(RIGHT_ICONS_PAD);
             // Midterm right icons: 18px activity + files (RTL paints files first).
             if tab_bar_right_icon(ui, Icon::Folder, "Files (Ctrl+Shift+F)").clicked() {
                 files.show = !files.show;
