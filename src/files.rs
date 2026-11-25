@@ -193,37 +193,47 @@ impl FileViewer {
             }
         }
 
-        ui.horizontal(|ui| {
-            ui.set_min_height(28.0);
-            if let Some(root) = self.root.clone() {
-                ui.label(
-                    ui_theme::text_sub(root.display().to_string()),
-                );
-            }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let (rect, resp) = ui.allocate_exact_size(Vec2::splat(20.0), Sense::click());
-                if resp.hovered() {
-                    ui.painter().rect_filled(
-                        rect,
-                        egui::CornerRadius::same(ui_theme::RADIUS_KBD),
-                        ui_theme::HOVER,
+        // The X keeps its own slot; the (possibly long) path is truncated into what is left.
+        let (header, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 28.0), Sense::hover());
+        let close_rect = egui::Rect::from_center_size(
+            egui::pos2(header.right() - 10.0, header.center().y),
+            Vec2::splat(20.0),
+        );
+        if let Some(root) = &self.root {
+            let path_rect = egui::Rect::from_min_max(
+                header.min,
+                egui::pos2(close_rect.left() - 6.0, header.max.y),
+            );
+            ui.scope_builder(
+                egui::UiBuilder::new()
+                    .max_rect(path_rect)
+                    .layout(egui::Layout::left_to_right(egui::Align::Center)),
+                |ui| {
+                    ui.add(
+                        egui::Label::new(ui_theme::text_sub(root.display().to_string()))
+                            .truncate(),
                     );
-                }
-                ui.painter().text(
-                    rect.center(),
-                    egui::Align2::CENTER_CENTER,
-                    Icon::X.codepoint().to_string(),
-                    egui::FontId::new(
-                        12.0,
-                        egui::FontFamily::Name(ui_theme::FONT_ICONS.into()),
-                    ),
-                    ui_theme::TEXT_MUTED,
-                );
-                if resp.clicked() {
-                    self.show = false;
-                }
-            });
-        });
+                },
+            );
+        }
+        let close = ui.interact(close_rect, ui.scope_id().with("files_close"), Sense::click());
+        if close.hovered() {
+            ui.painter().rect_filled(
+                close_rect,
+                egui::CornerRadius::same(ui_theme::RADIUS_KBD),
+                ui_theme::HOVER,
+            );
+        }
+        ui.painter().text(
+            close_rect.center(),
+            egui::Align2::CENTER_CENTER,
+            Icon::X.codepoint().to_string(),
+            FontId::new(12.0, egui::FontFamily::Name(ui_theme::FONT_ICONS.into())),
+            ui_theme::TEXT_MUTED,
+        );
+        if close.clicked() {
+            self.show = false;
+        }
         let (sep, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 1.0), Sense::hover());
         ui.painter().rect_filled(sep, 0.0, ui_theme::BORDER);
         ui.add_space(4.0);
@@ -300,7 +310,7 @@ impl FileViewer {
             let (sep2, _) =
                 ui.allocate_exact_size(Vec2::new(ui.available_width(), 1.0), Sense::hover());
             ui.painter().rect_filled(sep2, 0.0, ui_theme::BORDER);
-            ui.label(ui_theme::text_sub(path.display().to_string()));
+            ui.add(egui::Label::new(ui_theme::text_sub(path.display().to_string())).truncate());
             match &self.content {
                 FileContent::Empty | FileContent::Loading => {
                     ui.label(ui_theme::text_sub("Loading…"));
@@ -362,6 +372,49 @@ fn list_dir_cached(dir: &Path, cache: &mut HashMap<PathBuf, Vec<DirEntryInfo>>) 
     items
 }
 
+/// A full-width row that is one click target. Its text is painted, not added as labels:
+/// selectable labels sense clicks themselves and would swallow the row's click.
+fn tree_row(ui: &mut Ui, chevron: Option<Icon>, icon: Icon, name: &str, selected: bool) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 24.0), Sense::click());
+    let fill = if selected {
+        ui_theme::SURFACE_SEL
+    } else if resp.hovered() {
+        ui_theme::HOVER
+    } else {
+        Color32::TRANSPARENT
+    };
+    let painter = ui.painter().with_clip_rect(rect);
+    painter.rect_filled(rect, egui::CornerRadius::same(ui_theme::RADIUS_ROW), fill);
+    let icons = |size| FontId::new(size, egui::FontFamily::Name(ui_theme::FONT_ICONS.into()));
+    let y = rect.center().y;
+    let mut x = rect.left() + 6.0;
+    if let Some(chevron) = chevron {
+        painter.text(
+            egui::pos2(x + 6.0, y),
+            egui::Align2::CENTER_CENTER,
+            chevron.codepoint().to_string(),
+            icons(12.0),
+            ui_theme::TEXT_MUTED,
+        );
+        x += 20.0;
+    }
+    painter.text(
+        egui::pos2(x + 7.0, y),
+        egui::Align2::CENTER_CENTER,
+        icon.codepoint().to_string(),
+        icons(14.0),
+        ui_theme::TEXT_MUTED,
+    );
+    painter.text(
+        egui::pos2(x + 22.0, y),
+        egui::Align2::LEFT_CENTER,
+        name,
+        FontId::proportional(ui_theme::SIZE_TITLE),
+        ui_theme::TEXT,
+    );
+    resp
+}
+
 fn draw_tree(
     ui: &mut Ui,
     dir: &Path,
@@ -375,26 +428,8 @@ fn draw_tree(
     for entry in items {
         if entry.is_dir {
             let open = expanded.contains(&entry.path);
-            let row = egui::Frame::NONE
-                .corner_radius(egui::CornerRadius::same(ui_theme::RADIUS_ROW))
-                .inner_margin(egui::Margin::symmetric(6, 2))
-                .show(ui, |ui| {
-                    ui.set_min_height(22.0);
-                    ui.horizontal(|ui| {
-                        let chevron = if open { Icon::ChevronDown } else { Icon::ChevronRight };
-                        ui.label(ui_theme::icon(chevron, 12.0, ui_theme::TEXT_MUTED));
-                        ui.label(ui_theme::icon(Icon::Folder, 14.0, ui_theme::TEXT_MUTED));
-                        ui.label(ui_theme::text_title(entry.name.clone()));
-                    });
-                });
-            let resp = row.response.interact(Sense::click());
-            if resp.hovered() {
-                ui.painter().rect_filled(
-                    resp.rect,
-                    egui::CornerRadius::same(ui_theme::RADIUS_ROW),
-                    ui_theme::HOVER,
-                );
-            }
+            let chevron = if open { Icon::ChevronDown } else { Icon::ChevronRight };
+            let resp = tree_row(ui, Some(chevron), Icon::Folder, &entry.name, false);
             if resp.clicked() {
                 if open {
                     expanded.remove(&entry.path);
@@ -409,30 +444,7 @@ fn draw_tree(
             }
         } else {
             let is_sel = selected == Some(&entry.path);
-            let fill = if is_sel {
-                ui_theme::SURFACE_SEL
-            } else {
-                Color32::TRANSPARENT
-            };
-            let row = egui::Frame::NONE
-                .fill(fill)
-                .corner_radius(egui::CornerRadius::same(ui_theme::RADIUS_ROW))
-                .inner_margin(egui::Margin::symmetric(6, 2))
-                .show(ui, |ui| {
-                    ui.set_min_height(22.0);
-                    ui.horizontal(|ui| {
-                        ui.label(ui_theme::icon(Icon::File, 14.0, ui_theme::TEXT_MUTED));
-                        ui.label(ui_theme::text_title(entry.name.clone()));
-                    });
-                });
-            let resp = row.response.interact(Sense::click());
-            if resp.hovered() && !is_sel {
-                ui.painter().rect_filled(
-                    resp.rect,
-                    egui::CornerRadius::same(ui_theme::RADIUS_ROW),
-                    ui_theme::HOVER,
-                );
-            }
+            let resp = tree_row(ui, None, Icon::File, &entry.name, is_sel);
             if resp.clicked() {
                 *clicked = Some(entry.path);
             }

@@ -295,7 +295,13 @@ impl eframe::App for AnkarApp {
                 .frame(
                     Frame::NONE
                         .fill(ui_theme::SURFACE_1)
-                        .inner_margin(egui::Margin::same(8)),
+                        // Extra right/bottom air: the window edge eats a few px on Windows.
+                        .inner_margin(egui::Margin {
+                            left: 8,
+                            right: 16,
+                            top: 8,
+                            bottom: 16,
+                        }),
                 )
                 .show_separator_line(false)
                 .show(ui, |ui| {
