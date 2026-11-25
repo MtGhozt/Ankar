@@ -432,6 +432,7 @@ fn paint_grid(
             y,
             cell_w,
             cell_h,
+            row_h,
             cells,
             selection,
             &colors,
@@ -513,11 +514,247 @@ fn paint_cursor(
     }
 }
 
-fn is_box_drawing(c: char) -> bool {
-    matches!(
-        c,
-        '\u{2500}'..='\u{257F}' | '\u{2580}'..='\u{259F}'
-    )
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Weight {
+    Light,
+    Heavy,
+}
+
+impl Weight {
+    /// Light strokes are ~1/8 of the cell; heavy ones are clearly double.
+    fn px(self, cell_w: f32, cell_h: f32) -> f32 {
+        let light = (cell_w.min(cell_h) / 8.0).round().max(1.0);
+        match self {
+            Self::Light => light,
+            Self::Heavy => (light * 2.0).max(light + 1.0),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct Arms {
+    up: Option<Weight>,
+    down: Option<Weight>,
+    left: Option<Weight>,
+    right: Option<Weight>,
+}
+
+fn arms(u: u8, d: u8, l: u8, r: u8) -> Option<Arms> {
+    let w = |v| match v {
+        1 => Some(Weight::Light),
+        2 => Some(Weight::Heavy),
+        _ => None,
+    };
+    Some(Arms { up: w(u), down: w(d), left: w(l), right: w(r) })
+}
+
+/// Arms of the U+2500–U+257F box glyphs that need no font glyph.
+/// Weights: 0 = none, 1 = light, 2 = heavy (`─` vs `━`, `│` vs `┃`).
+fn box_arms(c: char) -> Option<Arms> {
+    match c {
+        '─' | '┄' | '┈' => arms(0, 0, 1, 1),
+        '━' | '┅' | '┉' => arms(0, 0, 2, 2),
+        '│' | '┆' | '┊' => arms(1, 1, 0, 0),
+        '┃' | '┇' | '┋' => arms(2, 2, 0, 0),
+        '┌' => arms(0, 1, 0, 1),
+        '┍' => arms(0, 1, 0, 2),
+        '┎' => arms(0, 2, 0, 1),
+        '┏' => arms(0, 2, 0, 2),
+        '┐' => arms(0, 1, 1, 0),
+        '┑' => arms(0, 1, 2, 0),
+        '┒' => arms(0, 2, 1, 0),
+        '┓' => arms(0, 2, 2, 0),
+        '└' => arms(1, 0, 0, 1),
+        '┕' => arms(1, 0, 0, 2),
+        '┖' => arms(2, 0, 0, 1),
+        '┗' => arms(2, 0, 0, 2),
+        '┘' => arms(1, 0, 1, 0),
+        '┙' => arms(1, 0, 2, 0),
+        '┚' => arms(2, 0, 1, 0),
+        '┛' => arms(2, 0, 2, 0),
+        '├' => arms(1, 1, 0, 1),
+        '┝' => arms(1, 1, 0, 2),
+        '┞' => arms(2, 1, 0, 1),
+        '┟' => arms(1, 2, 0, 1),
+        '┠' => arms(2, 2, 0, 1),
+        '┡' => arms(2, 1, 0, 2),
+        '┢' => arms(1, 2, 0, 2),
+        '┣' => arms(2, 2, 0, 2),
+        '┤' => arms(1, 1, 1, 0),
+        '┥' => arms(1, 1, 2, 0),
+        '┦' => arms(2, 1, 1, 0),
+        '┧' => arms(1, 2, 1, 0),
+        '┨' => arms(2, 2, 1, 0),
+        '┩' => arms(2, 1, 2, 0),
+        '┪' => arms(1, 2, 2, 0),
+        '┫' => arms(2, 2, 2, 0),
+        '┬' => arms(0, 1, 1, 1),
+        '┭' => arms(0, 1, 2, 1),
+        '┮' => arms(0, 1, 1, 2),
+        '┯' => arms(0, 1, 2, 2),
+        '┰' => arms(0, 2, 1, 1),
+        '┱' => arms(0, 2, 2, 1),
+        '┲' => arms(0, 2, 1, 2),
+        '┳' => arms(0, 2, 2, 2),
+        '┴' => arms(1, 0, 1, 1),
+        '┵' => arms(1, 0, 2, 1),
+        '┶' => arms(1, 0, 1, 2),
+        '┷' => arms(1, 0, 2, 2),
+        '┸' => arms(2, 0, 1, 1),
+        '┹' => arms(2, 0, 2, 1),
+        '┺' => arms(2, 0, 1, 2),
+        '┻' => arms(2, 0, 2, 2),
+        '┼' => arms(1, 1, 1, 1),
+        '┽' => arms(1, 1, 2, 1),
+        '┾' => arms(1, 1, 1, 2),
+        '┿' => arms(1, 1, 2, 2),
+        '╀' => arms(2, 1, 1, 1),
+        '╁' => arms(1, 2, 1, 1),
+        '╂' => arms(2, 2, 1, 1),
+        '╃' => arms(2, 1, 2, 1),
+        '╄' => arms(2, 1, 1, 2),
+        '╅' => arms(1, 2, 2, 1),
+        '╆' => arms(1, 2, 1, 2),
+        '╇' => arms(2, 1, 2, 2),
+        '╈' => arms(1, 2, 2, 2),
+        '╉' => arms(2, 2, 2, 1),
+        '╊' => arms(2, 2, 1, 2),
+        '╋' => arms(2, 2, 2, 2),
+        // Half arms (╴╵╶╷ light, ╸╹╺╻ heavy, ╼–╿ mixed).
+        '╴' => arms(0, 0, 1, 0),
+        '╵' => arms(1, 0, 0, 0),
+        '╶' => arms(0, 0, 0, 1),
+        '╷' => arms(0, 1, 0, 0),
+        '╸' => arms(0, 0, 2, 0),
+        '╹' => arms(2, 0, 0, 0),
+        '╺' => arms(0, 0, 0, 2),
+        '╻' => arms(0, 2, 0, 0),
+        '╼' => arms(0, 0, 1, 2),
+        '╽' => arms(1, 2, 0, 0),
+        '╾' => arms(0, 0, 2, 1),
+        '╿' => arms(2, 1, 0, 0),
+        _ => None,
+    }
+}
+
+fn is_arc(c: char) -> bool {
+    matches!(c, '╭'..='╰')
+}
+
+/// Glyphs painted as geometry; everything else in the box/block ranges keeps the font.
+fn is_box_geometry(c: char) -> bool {
+    box_arms(c).is_some()
+        || is_arc(c)
+        || matches!(c, '\u{2580}'..='\u{259F}')
+}
+
+type Frac = (f32, f32, f32, f32);
+
+fn push_rect(shapes: &mut Vec<Shape>, x: f32, y: f32, w: f32, h: f32, fg: Color32, fx: Frac) {
+    let rect = Rect::from_min_max(
+        Pos2::new(x + w * fx.0, y + h * fx.1),
+        Pos2::new(x + w * fx.2, y + h * fx.3),
+    );
+    shapes.push(Shape::Rect(RectShape::filled(
+        rect,
+        CornerRadius::ZERO,
+        fg,
+    )));
+}
+
+/// U+2580–U+259F as cell fractions (eighths, halves, shades, quadrants).
+fn paint_block(
+    shapes: &mut Vec<Shape>,
+    c: char,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    fg: Color32,
+) -> bool {
+    let parts: &[Frac] = match c {
+        '▀' => &[(0.0, 0.0, 1.0, 0.5)],
+        '▔' => &[(0.0, 0.0, 1.0, 0.125)],
+        '▁' => &[(0.0, 0.875, 1.0, 1.0)],
+        '▂' => &[(0.0, 0.75, 1.0, 1.0)],
+        '▃' => &[(0.0, 0.625, 1.0, 1.0)],
+        '▄' => &[(0.0, 0.5, 1.0, 1.0)],
+        '▅' => &[(0.0, 0.375, 1.0, 1.0)],
+        '▆' => &[(0.0, 0.25, 1.0, 1.0)],
+        '▇' => &[(0.0, 0.125, 1.0, 1.0)],
+        '█' => &[(0.0, 0.0, 1.0, 1.0)],
+        '▉' => &[(0.0, 0.0, 0.875, 1.0)],
+        '▊' => &[(0.0, 0.0, 0.75, 1.0)],
+        '▋' => &[(0.0, 0.0, 0.625, 1.0)],
+        '▌' => &[(0.0, 0.0, 0.5, 1.0)],
+        '▍' => &[(0.0, 0.0, 0.375, 1.0)],
+        '▎' => &[(0.0, 0.0, 0.25, 1.0)],
+        '▏' => &[(0.0, 0.0, 0.125, 1.0)],
+        '▐' => &[(0.5, 0.0, 1.0, 1.0)],
+        '▕' => &[(0.875, 0.0, 1.0, 1.0)],
+        '░' => &[(0.0, 0.0, 1.0, 1.0)],
+        '▒' => &[(0.0, 0.0, 1.0, 1.0)],
+        '▓' => &[(0.0, 0.0, 1.0, 1.0)],
+        '▖' => &[(0.0, 0.5, 0.5, 1.0)],
+        '▗' => &[(0.5, 0.5, 1.0, 1.0)],
+        '▘' => &[(0.0, 0.0, 0.5, 0.5)],
+        '▝' => &[(0.5, 0.0, 1.0, 0.5)],
+        '▚' => &[(0.0, 0.0, 0.5, 0.5), (0.5, 0.5, 1.0, 1.0)],
+        '▞' => &[(0.5, 0.0, 1.0, 0.5), (0.0, 0.5, 0.5, 1.0)],
+        '▙' => &[(0.0, 0.0, 0.5, 0.5), (0.0, 0.5, 0.5, 1.0), (0.5, 0.5, 1.0, 1.0)],
+        '▛' => &[(0.0, 0.0, 0.5, 0.5), (0.5, 0.0, 1.0, 0.5), (0.0, 0.5, 0.5, 1.0)],
+        '▜' => &[(0.0, 0.0, 0.5, 0.5), (0.5, 0.0, 1.0, 0.5), (0.5, 0.5, 1.0, 1.0)],
+        '▟' => &[(0.5, 0.0, 1.0, 0.5), (0.5, 0.5, 1.0, 1.0), (0.0, 0.5, 0.5, 1.0)],
+        _ => return false,
+    };
+    let fg = match c {
+        '░' => fg.gamma_multiply(0.25),
+        '▒' => fg.gamma_multiply(0.5),
+        '▓' => fg.gamma_multiply(0.75),
+        _ => fg,
+    };
+    for &part in parts {
+        push_rect(shapes, x, y, w, h, fg, part);
+    }
+    true
+}
+
+/// Quarter-circle elbow for ╭ ╮ ╯ ╰, with a straight arm reaching each cell edge.
+fn paint_arc(
+    shapes: &mut Vec<Shape>,
+    c: char,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    stroke: Stroke,
+) {
+    let cx = x + w * 0.5;
+    let cy = y + h * 0.5;
+    let r = (w.min(h) * 0.25).max(1.0);
+    let (center, a0, a1) = match c {
+        '╭' => (Pos2::new(cx + r, cy + r), std::f32::consts::PI, 1.5 * std::f32::consts::PI),
+        '╮' => (Pos2::new(cx - r, cy + r), 1.5 * std::f32::consts::PI, 2.0 * std::f32::consts::PI),
+        '╯' => (Pos2::new(cx - r, cy - r), 0.0, 0.5 * std::f32::consts::PI),
+        _ => (Pos2::new(cx + r, cy - r), 0.5 * std::f32::consts::PI, std::f32::consts::PI), // ╰
+    };
+    let mut points = Vec::with_capacity(9);
+    for i in 0..=8 {
+        let a = a0 + (a1 - a0) * (i as f32 / 8.0);
+        points.push(Pos2::new(center.x + r * a.cos(), center.y + r * a.sin()));
+    }
+    let first = points[0];
+    let last = points[8];
+    // Straight arms from the arc ends out to the edges.
+    let (first_edge, last_edge) = match c {
+        '╭' => (Pos2::new(cx, y + h), Pos2::new(x + w, cy)),
+        '╮' => (Pos2::new(cx, y + h), Pos2::new(x, cy)),
+        '╯' => (Pos2::new(x, cy), Pos2::new(cx, y)),
+        _ => (Pos2::new(x + w, cy), Pos2::new(cx, y)),
+    };
+    shapes.push(Shape::line_segment([first_edge, first], stroke));
+    shapes.push(Shape::line_segment([last, last_edge], stroke));
+    shapes.push(Shape::line(points, stroke));
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -527,13 +764,15 @@ fn paint_row_box_drawing(
     y: f32,
     cell_w: f32,
     cell_h: f32,
+    row_h: f32,
     cells: &[&VisibleCell],
     selection: Option<SelectionRange>,
     colors: &super::theme::TermColors,
     ppp: f32,
 ) {
     for cell in cells {
-        if !is_box_drawing(cell.c) {
+        let c = cell.c;
+        if !is_box_geometry(c) {
             continue;
         }
         let (fg, _bg, width_cells) = cell_colors(
@@ -550,78 +789,41 @@ fn paint_row_box_drawing(
         let w = (x_end - x).max(cell_w * width_cells);
         let cx = x + w * 0.5;
         let cy = y + cell_h * 0.5;
-        let stroke = Stroke::new(1.25, fg);
-        let hline = |shapes: &mut Vec<Shape>, x0: f32, x1: f32| {
+        if paint_block(shapes, c, x, y, w, row_h, fg) {
+            continue;
+        }
+        if is_arc(c) {
+            paint_arc(
+                shapes,
+                c,
+                x,
+                y,
+                w,
+                row_h,
+                Stroke::new(Weight::Light.px(cell_w, cell_h), fg),
+            );
+            continue;
+        }
+        let Some(arms) = box_arms(c) else {
+            continue;
+        };
+        let mut line = |a: Pos2, b: Pos2, weight: Weight| {
             shapes.push(Shape::LineSegment {
-                points: [Pos2::new(x0, cy), Pos2::new(x1, cy)],
-                stroke,
+                points: [a, b],
+                stroke: Stroke::new(weight.px(cell_w, cell_h), fg),
             });
         };
-        let vline = |shapes: &mut Vec<Shape>, y0: f32, y1: f32| {
-            shapes.push(Shape::LineSegment {
-                points: [Pos2::new(cx, y0), Pos2::new(cx, y1)],
-                stroke,
-            });
-        };
-        match cell.c {
-            '─' | '━' => hline(shapes, x, x + w),
-            '│' | '┃' => vline(shapes, y, y + cell_h),
-            '┌' | '╭' => {
-                hline(shapes, cx, x + w);
-                vline(shapes, cy, y + cell_h);
-            }
-            '┐' | '╮' => {
-                hline(shapes, x, cx);
-                vline(shapes, cy, y + cell_h);
-            }
-            '└' | '╰' => {
-                hline(shapes, cx, x + w);
-                vline(shapes, y, cy);
-            }
-            '┘' | '╯' => {
-                hline(shapes, x, cx);
-                vline(shapes, y, cy);
-            }
-            '├' => {
-                hline(shapes, cx, x + w);
-                vline(shapes, y, y + cell_h);
-            }
-            '┤' => {
-                hline(shapes, x, cx);
-                vline(shapes, y, y + cell_h);
-            }
-            '▀' => {
-                shapes.push(Shape::Rect(RectShape::filled(
-                    Rect::from_min_size(Pos2::new(x, y), Vec2::new(w, cell_h * 0.5)),
-                    CornerRadius::ZERO,
-                    fg,
-                )));
-            }
-            '▄' => {
-                shapes.push(Shape::Rect(RectShape::filled(
-                    Rect::from_min_size(
-                        Pos2::new(x, y + cell_h * 0.5),
-                        Vec2::new(w, cell_h * 0.5),
-                    ),
-                    CornerRadius::ZERO,
-                    fg,
-                )));
-            }
-            '█' => {
-                shapes.push(Shape::Rect(RectShape::filled(
-                    Rect::from_min_size(Pos2::new(x, y), Vec2::new(w, cell_h)),
-                    CornerRadius::ZERO,
-                    fg,
-                )));
-            }
-            _ => {
-                // Fallback: full cell block so unknown box glyphs still join.
-                shapes.push(Shape::Rect(RectShape::filled(
-                    Rect::from_min_size(Pos2::new(x, y), Vec2::new(w, cell_h)),
-                    CornerRadius::ZERO,
-                    fg.gamma_multiply(0.35),
-                )));
-            }
+        if let Some(weight) = arms.up {
+            line(Pos2::new(cx, y), Pos2::new(cx, cy), weight);
+        }
+        if let Some(weight) = arms.down {
+            line(Pos2::new(cx, cy), Pos2::new(cx, y + row_h), weight);
+        }
+        if let Some(weight) = arms.left {
+            line(Pos2::new(x, cy), Pos2::new(cx, cy), weight);
+        }
+        if let Some(weight) = arms.right {
+            line(Pos2::new(cx, cy), Pos2::new(x + w, cy), weight);
         }
     }
 }
@@ -763,7 +965,7 @@ fn paint_row_text(
             c.c != ' '
                 && c.c != '\t'
                 && !c.flags.contains(Flags::WIDE_CHAR_SPACER)
-                && !is_box_drawing(c.c)
+                && !is_box_geometry(c.c)
         })
         .collect();
     sorted.sort_by_key(|c| c.col);
@@ -858,5 +1060,24 @@ fn paint_row_underlines(
             points: [Pos2::new(x, y2), Pos2::new(x + width, y2)],
             stroke: Stroke::new(1.0, fg),
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn heavy_is_thicker_and_blocks_keep_their_fraction() {
+        let (w, h) = (8.0, 16.0);
+        assert!(Weight::Heavy.px(w, h) > Weight::Light.px(w, h));
+        assert_eq!(box_arms('│').unwrap().up, Some(Weight::Light));
+        assert_eq!(box_arms('┃').unwrap().up, Some(Weight::Heavy));
+        let mut shapes = Vec::new();
+        assert!(paint_block(&mut shapes, '▌', 0.0, 0.0, w, h, Color32::WHITE));
+        let rect = shapes[0].visual_bounding_rect();
+        assert!((rect.width() - w * 0.5).abs() < 0.01);
+        assert!(is_box_geometry('▎') && is_box_geometry('╹'));
+        assert!(!is_box_geometry('╱')); // diagonals keep the font glyph
     }
 }
