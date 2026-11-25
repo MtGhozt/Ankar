@@ -47,6 +47,16 @@ fn control_width(row_w: f32) -> f32 {
     (row_w - 11.0).min(CONTROL_W)
 }
 
+/// New session button and the folder button right of it, together as wide as the search field.
+fn action_rects(row: Rect) -> (Rect, Rect) {
+    const FOLDER: f32 = 30.0;
+    const GAP: f32 = 7.33;
+    let new_w = (control_width(row.width()) - GAP - FOLDER).min(260.0);
+    let new_rect = Rect::from_min_size(egui::pos2(row.left() + 6.0, row.top()), Vec2::new(new_w, 30.0));
+    let folder = Rect::from_min_size(egui::pos2(new_rect.right() + GAP, row.top()), Vec2::splat(FOLDER));
+    (new_rect, folder)
+}
+
 /// Vertical centres and x anchors inside a session row.
 struct RowLayout {
     icon_y: f32,
@@ -248,15 +258,31 @@ pub fn draw(
         }
         return;
     }
-    // --- Top action: New session 260×30 at mockup x 6; right-click picks a folder ---
+    // --- Top actions: New session 260×30 at mockup x 6, folder 30×30 beside it ---
     ui.add_space(7.33);
     let row = ui.available_rect_before_wrap();
     let (actions_rect, _) = ui.allocate_exact_size(Vec2::new(row.width(), 30.0), Sense::hover());
     let side_l = 6.0;
-    let new_rect = Rect::from_min_size(
-        egui::pos2(actions_rect.left() + side_l, actions_rect.top()),
-        Vec2::new(control_width(actions_rect.width()).min(260.0), 30.0),
-    );
+    let (new_rect, folder_rect) = action_rects(actions_rect);
+
+    {
+        let folder = ui
+            .interact(folder_rect, search_field_id().with("new_in_folder"), Sense::click())
+            .on_hover_text("New session in folder…");
+        let fill = if folder.hovered() { ui_theme::ROW_HOVER } else { ui_theme::BUTTON_BG };
+        painter.rect_filled(folder_rect, CornerRadius::same(ui_theme::RADIUS_ROW), fill);
+        paint_button_top_highlight(&painter, folder_rect, ui_theme::RADIUS_ROW);
+        painter.text(
+            folder_rect.center(),
+            Align2::CENTER_CENTER,
+            Icon::FolderPlus.codepoint().to_string(),
+            FontId::new(16.0, FontFamily::Name(ui_theme::FONT_ICONS.into())),
+            ui_theme::TEXT,
+        );
+        if folder.clicked() {
+            new_in_folder = true;
+        }
+    }
 
     {
         let new_resp = ui.interact(
@@ -1502,6 +1528,18 @@ mod tests {
             let (top_pad, bottom_pad) = (l.title_y - row.top(), row.bottom() - l.sub_y);
             assert!((top_pad - bottom_pad).abs() < 0.5, "two lines centred: {top_pad} vs {bottom_pad}");
             assert!((l.icon_y - row.center().y).abs() < 0.5);
+        }
+    }
+
+    #[test]
+    fn the_folder_button_sits_right_of_new_session_and_ends_with_the_search_field() {
+        for width in [180.0, 309.33, 420.0] {
+            let row = Rect::from_min_size(egui::pos2(0.0, 40.0), Vec2::new(width, 30.0));
+            let (new, folder) = action_rects(row);
+            assert!(folder.left() > new.right(), "width {width}");
+            assert!((folder.right() - (6.0 + control_width(width))).abs() < 0.01, "width {width}");
+            assert_eq!(folder.size(), Vec2::splat(30.0));
+            assert!(new.width() <= 260.0 && new.width() > 100.0);
         }
     }
 
