@@ -5,6 +5,7 @@ use crate::files::{self, FileViewer};
 use crate::folder_pick::{self, PickFor};
 use crate::footer::{self, FooterAction, ShellFooter};
 use crate::inbox::Inbox;
+use crate::window_watch::WindowWatch;
 use crate::launchers;
 use crate::layout::{LayoutNode, SessionStatus, SplitDir, Workspace};
 use crate::logos::LogoAtlas;
@@ -44,6 +45,8 @@ pub struct AnkarApp {
     git: GitWatch,
     changes: ChangesPane,
     inbox: Inbox,
+    /// Logs window focus/occlusion/DPI/size changes and spots frames with no real layout.
+    window: WindowWatch,
     /// Font size and when it was set, for the "12 px" toast.
     zoom_toast: Option<(f32, std::time::Instant)>,
     /// Tab the file viewer pane was opened in; it shows only there.
@@ -102,6 +105,7 @@ impl AnkarApp {
             git: GitWatch::default(),
             changes: ChangesPane::default(),
             inbox: Inbox::default(),
+            window: WindowWatch::default(),
             zoom_toast: None,
             pane_tab: None,
             last_pane_layout: (false, false),
@@ -261,6 +265,13 @@ impl eframe::App for AnkarApp {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let (window, dpi_changed) = self.window.frame(ui.ctx());
+        crate::terminal::hold_layout(window.layout_untrusted());
+        if dpi_changed {
+            // New cell metrics: apply the new grid at once instead of painting the old one
+            // at the new scale for a debounce.
+            resize_now(&mut self.workspace);
+        }
         let focused = ui.input(|i| i.focused);
         self.status
             .tick(&mut self.workspace, &self.config, focused, &mut self.inbox);

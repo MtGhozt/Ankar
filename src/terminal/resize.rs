@@ -2,9 +2,22 @@
 //! so a size is only ever *applied* (to both) once it has been stable for `DEBOUNCE`;
 //! until then the old grid keeps being painted untouched.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 pub const DEBOUNCE: Duration = Duration::from_millis(80);
+
+/// Set by the app for frames whose layout is not real (minimized, a transient tiny window):
+/// terminals keep their size and their last frame instead of shrinking to it.
+static LAYOUT_HELD: AtomicBool = AtomicBool::new(false);
+
+pub fn hold_layout(held: bool) {
+    LAYOUT_HELD.store(held, Ordering::Relaxed);
+}
+
+pub fn layout_held() -> bool {
+    LAYOUT_HELD.load(Ordering::Relaxed)
+}
 
 /// Grid size for a content rect: floor from the exact content area, `None` for a collapsed
 /// pane (0 rows/cols). Minimum 2 columns so a fullwidth character still fits.

@@ -24,6 +24,7 @@ mod stats;
 mod status;
 mod terminal;
 mod ui_theme;
+mod window_watch;
 
 use anyhow::Context;
 

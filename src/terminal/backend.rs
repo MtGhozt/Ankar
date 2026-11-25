@@ -456,6 +456,9 @@ impl TerminalSession {
     /// the alternate screen a resize just changes the dimensions — no rewrapped rows, no old
     /// frames pushed into scrollback.
     pub fn resize(&mut self, pixel_w: f32, pixel_h: f32, metrics: CellMetrics) -> ResizeState {
+        if super::resize::layout_held() {
+            return ResizeState::from_pending(self.debounce.is_pending());
+        }
         let Some((cols, lines)) =
             grid_size(pixel_w, pixel_h, metrics.width, metrics.height)
         else {
