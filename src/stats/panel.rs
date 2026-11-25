@@ -4,7 +4,7 @@ use super::format::{format_hours_short, format_pct_delta, format_tokens, format_
 use super::loader::{StatsLoader, StatsRange};
 use super::{Source, StatsSnapshot};
 use egui::{
-    Align2, Color32, CornerRadius, FontId, Frame, Key, Margin, Rect, RichText, Sense, Stroke,
+    Align2, Color32, CornerRadius, FontId, Frame, Margin, Rect, RichText, Sense, Stroke,
     Ui, Vec2,
 };
 use std::sync::{Arc, Mutex};
@@ -28,6 +28,10 @@ pub struct StatsPanel {
     loader: StatsLoader,
     snapshot: Option<StatsSnapshot>,
     filter_agent: Option<String>,
+    /// Opened this frame: the app moves the pane to the active tab and closes the other panes.
+    pub just_opened: bool,
+    /// Last click landed in the pane: Esc closes it instead of reaching the terminal.
+    pub focused: bool,
 }
 
 impl StatsPanel {
@@ -38,6 +42,8 @@ impl StatsPanel {
             loader: StatsLoader::new(ankar),
             snapshot: None,
             filter_agent: None,
+            just_opened: false,
+            focused: false,
         }
     }
 
@@ -46,6 +52,8 @@ impl StatsPanel {
             self.close();
         } else {
             self.open = true;
+            self.just_opened = true;
+            self.focused = true;
             self.loader.request(self.range, false);
         }
     }
@@ -53,65 +61,68 @@ impl StatsPanel {
     /// Close and free the snapshot and loader cache.
     pub fn close(&mut self) {
         self.open = false;
+        self.just_opened = false;
+        self.focused = false;
         self.snapshot = None;
         self.loader.clear_cache();
         self.filter_agent = None;
     }
 
-    pub fn draw(&mut self, ui: &mut Ui) {
-        if !self.open {
-            return;
+    /// Esc: clears the agent filter first, else closes. Returns true when it closed.
+    pub fn esc(&mut self) -> bool {
+        if self.filter_agent.take().is_some() {
+            return false;
         }
+        self.close();
+        true
+    }
 
+    /// Draws the pane into `rect`. Returns true when the user closed it (`esc` chip).
+    pub fn draw_pane(&mut self, ui: &mut Ui, rect: Rect) -> bool {
+        if !self.open {
+            return false;
+        }
         if let Some(snap) = self.loader.poll() {
             self.snapshot = Some(snap);
+        }
+        if self.snapshot.is_none() {
+            self.snapshot = self.loader.cached().cloned();
         }
         if self.loader.is_loading() {
             ui.ctx()
                 .request_repaint_after(std::time::Duration::from_millis(100));
         }
 
-        if ui.input(|i| i.key_pressed(Key::Escape)) {
-            self.close();
-            return;
+        // A focusable background keeps egui's keyboard focus off the terminal while we have it.
+        let id = ui.scope_id().with("stats_pane");
+        ui.interact(rect, id, Sense::click().union(Sense::focusable_noninteractive()));
+        if let Some(p) = ui.input(|i| i.pointer.any_pressed().then(|| i.pointer.interact_pos()).flatten()) {
+            self.focused = rect.contains(p);
         }
+        if self.focused {
+            ui.memory_mut(|m| m.request_focus(id));
+        }
+        ui.painter().rect_filled(rect, 0.0, BG);
 
-        let screen = ui.ctx().viewport_rect();
-        let size = Vec2::new(
-            (screen.width() * 0.92).clamp(720.0, 1100.0),
-            (screen.height() * 0.90).clamp(480.0, 780.0),
-        );
-        let pos = egui::pos2(
-            screen.center().x - size.x * 0.5,
-            screen.center().y - size.y * 0.5,
-        );
-
-        // Dim backdrop.
-        ui.painter()
-            .rect_filled(screen, 0.0, Color32::from_black_alpha(160));
-
-        egui::Area::new(egui::Id::unique("ankar_stats_panel"))
-            .order(egui::Order::Foreground)
-            .fixed_pos(pos)
-            .show(ui.ctx(), |ui| {
-                Frame::NONE
-                    .fill(BG)
-                    .stroke(Stroke::new(1.0, CARD_BORDER))
-                    .corner_radius(CornerRadius::same(10))
-                    .inner_margin(Margin::same(16))
-                    .show(ui, |ui| {
-                        ui.set_min_size(size);
-                        ui.set_max_size(size);
-                        self.draw_contents(ui);
-                    });
+        let mut inner = ui.new_child(egui::UiBuilder::new().max_rect(rect.shrink(16.0)));
+        inner.set_clip_rect(rect.intersect(ui.clip_rect()));
+        let mut close = false;
+        egui::ScrollArea::vertical()
+            .id_salt("stats_page")
+            .auto_shrink([false, false])
+            .show(&mut inner, |ui| {
+                close = self.draw_contents(ui);
             });
+        if close {
+            self.close();
+        }
+        close
     }
 
-    fn draw_contents(&mut self, ui: &mut Ui) {
-        let snap = self
-            .snapshot
-            .clone()
-            .or_else(|| self.loader.cached().cloned());
+    /// Page content. Returns true when the `esc` chip was clicked.
+    fn draw_contents(&mut self, ui: &mut Ui) -> bool {
+        let snap = self.snapshot.as_ref();
+        let mut close = false;
 
         // Header
         ui.horizontal(|ui| {
@@ -122,14 +133,14 @@ impl StatsPanel {
                         .color(TEXT)
                         .strong(),
                 );
-                let sub = snap
-                    .as_ref()
-                    .map(|s| s.range_label.clone())
-                    .unwrap_or_else(|| "…".into());
+                let sub = snap.map(|s| s.range_label.as_str()).unwrap_or("…");
                 ui.label(RichText::new(sub).size(12.0).color(MUTED));
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(RichText::new("esc").size(11.0).color(MUTED));
+                let esc = ui
+                    .add(egui::Button::new(RichText::new("esc").size(11.0).color(MUTED)).frame(false))
+                    .on_hover_cursor(egui::CursorIcon::PointingHand);
+                close = esc.clicked();
                 ui.add_space(8.0);
                 for r in StatsRange::all().into_iter().rev() {
                     let active = self.range == r;
@@ -178,141 +189,53 @@ impl StatsPanel {
                 ui.spinner();
                 ui.label(RichText::new("Loading local stats…").color(MUTED));
             });
-            return;
+            return close;
         }
 
         let Some(snap) = snap else {
             ui.label(RichText::new("No data yet.").color(MUTED));
-            return;
+            return close;
         };
 
-        // Metric cards
-        let card_w = ((ui.available_width() - 36.0) / 4.0).max(140.0);
-        ui.horizontal(|ui| {
-            metric_card(
-                ui,
-                card_w,
-                &format_tokens(snap.tokens.input),
-                snap.delta_input_pct,
-                &cache_subtext(&snap),
-                &spark_from_days(&snap, true),
-                "Input tokens",
-                &format!(
-                    "reasoning {} · cache read {} · write {}",
-                    format_tokens(snap.tokens.reasoning),
-                    format_tokens(snap.tokens.cache_read),
-                    format_tokens(snap.tokens.cache_write)
-                ),
-            );
-            ui.add_space(12.0);
-            let per_turn = snap.tokens.output.checked_div(snap.steps).unwrap_or(0);
-            metric_card(
-                ui,
-                card_w,
-                &format_tokens(snap.tokens.output),
-                snap.delta_output_pct,
-                &format!("{} per turn", format_tokens(per_turn)),
-                &spark_from_days(&snap, false),
-                "Output tokens",
-                "Assistant output tokens (OpenCode)",
-            );
-            ui.add_space(12.0);
-            let tasks = snap.sessions.saturating_add(snap.ankar_starts);
-            metric_card(
-                ui,
-                card_w,
-                &format_with_commas(tasks),
-                snap.delta_tasks_pct,
-                &format!("{} turns", format_with_commas(snap.steps)),
-                &spark_tasks(&snap),
-                "Tasks",
-                &format!(
-                    "OpenCode+cursor sessions {} · Ankar starts {}",
-                    snap.sessions, snap.ankar_starts
-                ),
-            );
-            ui.add_space(12.0);
-            let hours_label = if snap.agent_hours >= 10.0 {
-                format!("{:.0} h", snap.agent_hours)
-            } else {
-                format!("{:.1} h", snap.agent_hours)
-            };
-            metric_card(
-                ui,
-                card_w,
-                &hours_label,
-                snap.delta_hours_pct,
-                "agent time",
-                &spark_hours(&snap),
-                "Agent time",
-                &format!(
-                    "Ankar busy {} · OpenCode {:.1} h · cursor-agent {:.1} h",
-                    format_hours_short(snap.ankar_busy_secs),
-                    snap.opencode_hours,
-                    snap.cursor_hours
-                ),
-            );
-        });
+        // Metric cards: 4 across, 2x2 when the pane is narrow.
+        let avail = ui.available_width();
+        let narrow = avail < NARROW_W;
+        let cols = if narrow { 2 } else { 4 };
+        let card_w = ((avail - GAP * (cols - 1) as f32) / cols as f32 - BOX_PAD).max(100.0);
+        for row in 0..4 / cols {
+            if row > 0 {
+                ui.add_space(GAP);
+            }
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 0.0;
+                for i in row * cols..(row + 1) * cols {
+                    if i % cols > 0 {
+                        ui.add_space(GAP);
+                    }
+                    draw_metric(ui, snap, i, card_w);
+                }
+            });
+        }
 
         ui.add_space(14.0);
 
         // Middle: tokens by day + heatmap
-        let mid_h = 200.0;
-        let left_w = ui.available_width() * 0.58;
-        ui.horizontal(|ui| {
-            Frame::NONE
-                .stroke(Stroke::new(1.0, CARD_BORDER))
-                .corner_radius(CornerRadius::same(8))
-                .inner_margin(12.0)
-                .show(ui, |ui| {
-                    ui.set_min_size(Vec2::new(left_w - 8.0, mid_h));
-                    ui.set_max_width(left_w - 8.0);
-                    draw_tokens_by_day(ui, &snap);
-                });
-            ui.add_space(12.0);
-            Frame::NONE
-                .stroke(Stroke::new(1.0, CARD_BORDER))
-                .corner_radius(CornerRadius::same(8))
-                .inner_margin(12.0)
-                .show(ui, |ui| {
-                    ui.set_min_height(mid_h);
-                    ui.set_width(ui.available_width());
-                    draw_heatmap(ui, &snap);
-                });
-        });
+        boxes(ui, narrow, 200.0, |ui| draw_tokens_by_day(ui, snap), |ui| draw_heatmap(ui, snap));
 
         ui.add_space(14.0);
 
         // Bottom: models + agents
-        let bot_h = ui.available_height() - 36.0;
-        let half = ui.available_width() * 0.5 - 8.0;
-        ui.horizontal(|ui| {
-            Frame::NONE
-                .stroke(Stroke::new(1.0, CARD_BORDER))
-                .corner_radius(CornerRadius::same(8))
-                .inner_margin(12.0)
-                .show(ui, |ui| {
-                    ui.set_min_size(Vec2::new(half, bot_h.max(180.0)));
-                    ui.set_max_width(half);
-                    draw_models(ui, &snap);
-                });
-            ui.add_space(12.0);
-            Frame::NONE
-                .stroke(Stroke::new(1.0, CARD_BORDER))
-                .corner_radius(CornerRadius::same(8))
-                .inner_margin(12.0)
-                .show(ui, |ui| {
-                    ui.set_min_height(bot_h.max(180.0));
-                    ui.set_width(ui.available_width());
-                    self.draw_agents(ui, &snap);
-                });
-        });
+        boxes(
+            ui,
+            narrow,
+            180.0,
+            |ui| draw_models(ui, snap),
+            |ui| draw_agents(ui, snap, &mut self.filter_agent),
+        );
 
         ui.add_space(8.0);
-        if !snap.warnings.is_empty() {
-            for w in &snap.warnings {
-                ui.label(RichText::new(w).size(11.0).color(MUTED));
-            }
+        for w in &snap.warnings {
+            ui.label(RichText::new(w).size(11.0).color(MUTED));
         }
         let ago = snap
             .computed_at
@@ -327,9 +250,123 @@ impl StatsPanel {
             .size(11.0)
             .color(MUTED),
         );
+        ui.add_space(24.0);
+        close
     }
+}
 
-    fn draw_agents(&mut self, ui: &mut Ui, snap: &StatsSnapshot) {
+/// Below this pane width the cards go 2x2 and the paired boxes stack.
+const NARROW_W: f32 = 640.0;
+const GAP: f32 = 12.0;
+/// Inner margin (2 x 12) plus the 1 px stroke on both sides of a box.
+const BOX_PAD: f32 = 26.0;
+
+/// Card `i` of the top row.
+fn draw_metric(ui: &mut Ui, snap: &StatsSnapshot, i: usize, w: f32) {
+    match i {
+        0 => metric_card(
+            ui,
+            w,
+            &format_tokens(snap.tokens.input),
+            snap.delta_input_pct,
+            &cache_subtext(snap),
+            &spark_from_days(snap, true),
+            "Input tokens",
+            &format!(
+                "reasoning {} · cache read {} · write {}",
+                format_tokens(snap.tokens.reasoning),
+                format_tokens(snap.tokens.cache_read),
+                format_tokens(snap.tokens.cache_write)
+            ),
+        ),
+        1 => metric_card(
+            ui,
+            w,
+            &format_tokens(snap.tokens.output),
+            snap.delta_output_pct,
+            &format!(
+                "{} per turn",
+                format_tokens(snap.tokens.output.checked_div(snap.steps).unwrap_or(0))
+            ),
+            &spark_from_days(snap, false),
+            "Output tokens",
+            "Assistant output tokens (OpenCode)",
+        ),
+        2 => metric_card(
+            ui,
+            w,
+            &format_with_commas(snap.sessions.saturating_add(snap.ankar_starts)),
+            snap.delta_tasks_pct,
+            &format!("{} turns", format_with_commas(snap.steps)),
+            &spark_tasks(snap),
+            "Tasks",
+            &format!(
+                "OpenCode+cursor sessions {} · Ankar starts {}",
+                snap.sessions, snap.ankar_starts
+            ),
+        ),
+        _ => metric_card(
+            ui,
+            w,
+            &if snap.agent_hours >= 10.0 {
+                format!("{:.0} h", snap.agent_hours)
+            } else {
+                format!("{:.1} h", snap.agent_hours)
+            },
+            snap.delta_hours_pct,
+            "agent time",
+            &spark_hours(snap),
+            "Agent time",
+            &format!(
+                "Ankar busy {} · OpenCode {:.1} h · cursor-agent {:.1} h",
+                format_hours_short(snap.ankar_busy_secs),
+                snap.opencode_hours,
+                snap.cursor_hours
+            ),
+        ),
+    }
+}
+
+/// Two bordered boxes: side by side (58/42) or stacked when `narrow`.
+fn boxes(
+    ui: &mut Ui,
+    narrow: bool,
+    min_h: f32,
+    left: impl FnOnce(&mut Ui),
+    right: impl FnOnce(&mut Ui),
+) {
+    let avail = ui.available_width();
+    if narrow {
+        boxed(ui, avail, min_h, left);
+        ui.add_space(GAP);
+        boxed(ui, avail, min_h, right);
+        return;
+    }
+    let left_w = (avail - GAP) * 0.58;
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        boxed(ui, left_w, min_h, left);
+        ui.add_space(GAP);
+        boxed(ui, avail - GAP - left_w, min_h, right);
+    });
+}
+
+/// A bordered box `outer_w` wide in total.
+fn boxed(ui: &mut Ui, outer_w: f32, min_h: f32, add: impl FnOnce(&mut Ui)) {
+    Frame::NONE
+        .stroke(Stroke::new(1.0, CARD_BORDER))
+        .corner_radius(CornerRadius::same(8))
+        .inner_margin(12.0)
+        .show(ui, |ui| {
+            let w = (outer_w - BOX_PAD).max(0.0);
+            ui.set_min_size(Vec2::new(w, min_h));
+            ui.set_max_width(w);
+            add(ui);
+        });
+}
+
+fn draw_agents(ui: &mut Ui, snap: &StatsSnapshot, filter_agent: &mut Option<String>) {
+    {
         ui.horizontal(|ui| {
             ui.label(
                 RichText::new("AGENTS")
@@ -345,7 +382,7 @@ impl StatsPanel {
         });
         ui.add_space(6.0);
         ui.horizontal(|ui| {
-            ui.add_space(ui.available_width() - 180.0);
+            ui.add_space((ui.available_width() - 180.0).max(0.0));
             ui.label(RichText::new("input").size(10.0).color(MUTED));
             ui.add_space(28.0);
             ui.label(RichText::new("output").size(10.0).color(MUTED));
@@ -361,11 +398,10 @@ impl StatsPanel {
             .unwrap_or(1)
             .max(1);
 
-        egui::ScrollArea::vertical()
-            .max_height(ui.available_height() - 8.0)
-            .show(ui, |ui| {
+        {
+            {
                 for a in &snap.agents {
-                    if let Some(f) = &self.filter_agent {
+                    if let Some(f) = filter_agent.as_ref() {
                         if &a.name != f {
                             continue;
                         }
@@ -438,17 +474,18 @@ impl StatsPanel {
                     });
                     let resp = row.response.interact(Sense::click());
                     if resp.clicked() {
-                        if self.filter_agent.as_deref() == Some(a.name.as_str()) {
-                            self.filter_agent = None;
+                        if filter_agent.as_deref() == Some(a.name.as_str()) {
+                            *filter_agent = None;
                         } else {
-                            self.filter_agent = Some(a.name.clone());
+                            *filter_agent = Some(a.name.clone());
                         }
                     }
                     if a.tokens.is_none() {
                         resp.on_hover_text("cursor-agent does not store tokens locally");
                     }
                 }
-            });
+            }
+        }
     }
 }
 
@@ -823,7 +860,7 @@ fn draw_models(ui: &mut Ui, snap: &StatsSnapshot) {
 
     ui.add_space(8.0);
     ui.horizontal(|ui| {
-        ui.add_space(ui.available_width() - 200.0);
+        ui.add_space((ui.available_width() - 200.0).max(0.0));
         ui.label(RichText::new("input").size(10.0).color(MUTED));
         ui.add_space(28.0);
         ui.label(RichText::new("output").size(10.0).color(MUTED));
@@ -839,9 +876,8 @@ fn draw_models(ui: &mut Ui, snap: &StatsSnapshot) {
         .unwrap_or(1)
         .max(1);
 
-    egui::ScrollArea::vertical()
-        .max_height(ui.available_height() - 8.0)
-        .show(ui, |ui| {
+    {
+        {
             for m in &snap.models {
                 ui.horizontal(|ui| {
                     let (dot, _) = ui.allocate_exact_size(Vec2::splat(12.0), Sense::hover());
@@ -893,7 +929,8 @@ fn draw_models(ui: &mut Ui, snap: &StatsSnapshot) {
                     );
                 });
             }
-        });
+        }
+    }
 }
 
 fn provider_color(p: &str) -> Color32 {

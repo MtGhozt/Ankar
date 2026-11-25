@@ -129,7 +129,7 @@ impl AnkarApp {
             self.pane_tab = None;
             return;
         }
-        if !self.files.pane_open && !self.changes.open {
+        if !self.files.pane_open && !self.changes.open && !self.stats.open {
             self.files.pane_ratio = 0.5;
         }
         self.changes.open_here();
@@ -611,26 +611,57 @@ impl eframe::App for AnkarApp {
                 let font_size = self.config.font_size;
                 let dim = self.config.dim_inactive_panes;
                 let active_id = self.workspace.tabs[active].id;
-                // The viewer and the changes pane share the right-hand slot: opening one closes the other.
+                // The viewer, the changes pane and the stats pane share the right-hand slot:
+                // opening one closes the others.
+                if std::mem::take(&mut self.stats.just_opened) {
+                    if !self.files.pane_open && !self.changes.open {
+                        self.files.pane_ratio = 0.5;
+                    }
+                    self.files.close_pane();
+                    self.changes.close();
+                    self.pane_tab = Some(active_id);
+                }
                 if std::mem::take(&mut self.files.just_opened) {
                     self.changes.close();
+                    self.stats.close();
                     self.pane_tab = Some(active_id);
                 }
                 if std::mem::take(&mut self.changes.just_opened) {
                     self.files.close_pane();
+                    self.stats.close();
                     self.pane_tab = Some(active_id);
                 }
+                let esc_pressed = |ui: &egui::Ui| ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape));
                 let pane_esc = self.files.pane_open
                     && self.files.pane_focused
                     && self.pane_tab == Some(active_id)
-                    && ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape));
-                if pane_esc || self.pane_tab.is_some_and(|id| !self.workspace.tabs.iter().any(|t| t.id == id)) {
+                    && esc_pressed(ui);
+                let stats_esc = self.stats.open
+                    && self.stats.focused
+                    && self.pane_tab == Some(active_id)
+                    && esc_pressed(ui)
+                    && self.stats.esc();
+                if pane_esc || stats_esc || self.pane_tab.is_some_and(|id| !self.workspace.tabs.iter().any(|t| t.id == id)) {
                     self.files.close_pane();
                     self.changes.close();
+                    self.stats.close();
                     self.pane_tab = None;
                 }
-                let pane = (self.files.pane_open || self.changes.open) && self.pane_tab == Some(active_id);
-                let maximized = if self.changes.open { self.changes.maximized } else { self.files.maximized };
+                if self.stats.open && self.pane_tab != Some(active_id) {
+                    // Switched tab: the pane belongs to the tab it opened in.
+                    self.stats.close();
+                }
+                if !(self.files.pane_open || self.changes.open || self.stats.open) {
+                    self.pane_tab = None;
+                }
+                let pane = (self.files.pane_open || self.changes.open || self.stats.open) && self.pane_tab == Some(active_id);
+                let maximized = if self.stats.open {
+                    false
+                } else if self.changes.open {
+                    self.changes.maximized
+                } else {
+                    self.files.maximized
+                };
                 let pane_layout = (pane, pane && maximized);
                 if pane_layout != self.last_pane_layout {
                     self.last_pane_layout = pane_layout;
@@ -645,6 +676,7 @@ impl eframe::App for AnkarApp {
                 if let Some(term_rect) = term_rect {
                     if ui.input(|i| i.pointer.any_pressed() && i.pointer.interact_pos().is_some_and(|p| term_rect.contains(p))) {
                         self.files.pane_focused = false;
+                        self.stats.focused = false;
                     }
                     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(term_rect));
                     let ratio_changed =
@@ -670,7 +702,11 @@ impl eframe::App for AnkarApp {
                     let color = if resp.hovered() || resp.dragged() { ui_theme::DIVIDER_ACTIVE } else { ui_theme::BORDER };
                     ui.painter().vline(divider.center().x, divider.y_range(), Stroke::new(1.0, color));
                 }
-                if self.changes.open {
+                if self.stats.open {
+                    if self.stats.draw_pane(ui, viewer) {
+                        self.pane_tab = None;
+                    }
+                } else if self.changes.open {
                     match self.changes.draw(ui, viewer, &git, &self.git) {
                         Some(ChangesAction::Close) => {
                             self.changes.close();
@@ -695,7 +731,6 @@ impl eframe::App for AnkarApp {
             self.apply_palette_action(&ctx, action);
         }
 
-        self.stats.draw(ui);
         paint_window_outline(&ctx);
         window_edge_resize(ui.ctx());
         paint_zoom_toast(&ctx, &mut self.zoom_toast);

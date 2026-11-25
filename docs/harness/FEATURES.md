@@ -95,7 +95,9 @@ What exists today, by theme. Update when behaviour changes; keep it short.
 - Right of the tabs: "± +N -N" (in a git repo), inbox, stats, caption buttons.
 - Command palette (Ctrl+Shift+K): tabs, profiles, launchers, actions, archived sessions,
   "Open log folder", "Debug: check colors (log)".
-- Stats panel (Ctrl+Shift+I): local usage from read-only metadata.
+- Stats panel (Ctrl+Shift+I, tab-bar icon, palette): local usage from read-only metadata. Opens as
+  the right split pane (shares the slot with viewer/changes); one page scroll; closes with Esc
+  (first clears the agent filter), the `esc` chip, Ctrl+Shift+I or the icon.
 
 ## Diagnostics
 
