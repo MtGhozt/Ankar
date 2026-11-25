@@ -1,4 +1,5 @@
 use crate::config::Config;
+use crate::files::FileViewer;
 use crate::launchers;
 use crate::layout::{SessionStatus, Workspace};
 use crate::logos::LogoAtlas;
@@ -25,9 +26,20 @@ pub enum SessionFilter {
     Working,
 }
 
+/// What the sidebar column shows under its icon switch.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum SidebarView {
+    Sessions,
+    Files,
+}
+
+/// Height of the Sessions | Files icon row at the top of the sidebar.
+const VIEW_BAR_H: f32 = 34.0;
+
 pub struct SidebarState {
     pub archived: Vec<ArchivedSession>,
     pub show: bool,
+    pub view: SidebarView,
     pub search: String,
     pub filter: SessionFilter,
     pub show_archived: bool,
@@ -49,6 +61,7 @@ impl Default for SidebarState {
         Self {
             archived: Vec::new(),
             show: true,
+            view: SidebarView::Sessions,
             search: String::new(),
             filter: SessionFilter::All,
             show_archived: false,
@@ -79,17 +92,18 @@ pub fn draw(
     workspace: &mut Workspace,
     config: &mut Config,
     sidebar: &mut SidebarState,
+    files: &mut FileViewer,
     logos: &mut LogoAtlas,
     allow_config_save: bool,
-    sidebar_rect: Rect,
 ) {
+    let sidebar_rect = ui.max_rect();
     let _ = sidebar.now();
     ui.spacing_mut().item_spacing = Vec2::ZERO;
     let painter = ui.painter().clone();
     // midterm footer: launchers y 951–974, archived baseline 1016 in 1033 window → ~92 / ~46 from bottom.
     let divider_launcher_y = sidebar_rect.bottom() - 92.0;
     let divider_archived_y = sidebar_rect.bottom() - 46.0;
-    let filter_bottom_y = sidebar_rect.top() + 113.33;
+    let filter_bottom_y = sidebar_rect.top() + VIEW_BAR_H + 113.33;
     let archived_list_h = if sidebar.show_archived {
         (sidebar.archived.len() as f32 * 28.0).min(160.0) + 8.0
     } else {
@@ -106,6 +120,60 @@ pub fn draw(
     let mut forget = None;
     let mut toggle_group: Option<String> = None;
     let mut start_rename: Option<usize> = None;
+
+    // --- Sessions | Files icon switch (like Warp's left panel tabs) ---
+    let (bar, _) = ui.allocate_exact_size(Vec2::new(sidebar_rect.width(), VIEW_BAR_H), Sense::hover());
+    let views = [
+        (SidebarView::Sessions, Icon::Terminal, "Sessions"),
+        (SidebarView::Files, Icon::File, "Files (Ctrl+Shift+F)"),
+    ];
+    for (i, (view, icon, tip)) in views.into_iter().enumerate() {
+        let rect = Rect::from_min_size(
+            egui::pos2(bar.left() + 8.0 + i as f32 * 30.0, bar.center().y - 12.0),
+            Vec2::new(28.0, 24.0),
+        );
+        let resp = ui
+            .interact(rect, search_field_id().with(("view", i)), Sense::click())
+            .on_hover_text(tip);
+        let on = sidebar.view == view;
+        if on || resp.hovered() {
+            let fill = if on { ui_theme::SEGMENT_ACTIVE } else { ui_theme::ROW_HOVER };
+            painter.rect_filled(rect, CornerRadius::same(ui_theme::RADIUS_KBD), fill);
+        }
+        painter.text(
+            rect.center(),
+            Align2::CENTER_CENTER,
+            icon.codepoint().to_string(),
+            FontId::new(15.0, FontFamily::Name(ui_theme::FONT_ICONS.into())),
+            if on { ui_theme::TEXT } else { ui_theme::TEXT_MUTED },
+        );
+        if resp.clicked() {
+            sidebar.view = view;
+        }
+    }
+    painter.hline(
+        bar.x_range(),
+        bar.bottom() - 0.5,
+        Stroke::new(1.0, ui_theme::SIDEBAR_DIVIDER),
+    );
+
+    if sidebar.view == SidebarView::Files {
+        let area = Rect::from_min_max(
+            egui::pos2(bar.left() + 10.0, bar.bottom() + 4.0),
+            egui::pos2(sidebar_rect.right() - 8.0, sidebar_rect.bottom() - 8.0),
+        );
+        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(area));
+        child.set_clip_rect(area);
+        child.spacing_mut().item_spacing = ui.ctx().global_style().spacing.item_spacing;
+        let (new_tab, closed) = files.draw(&mut child);
+        if let Some(cwd) = new_tab {
+            let _ = workspace.open_tab(ui.ctx(), &crate::shell::default_profile(), Some(cwd));
+        }
+        if closed {
+            sidebar.view = SidebarView::Sessions;
+        }
+        return;
+    }
 
     // --- Top actions: New session 260×30 + folder 30×30 (mockup x 6 / 273.33) ---
     ui.add_space(7.33);

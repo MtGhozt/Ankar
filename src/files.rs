@@ -77,7 +77,6 @@ pub struct FileViewer {
     load_rx: Option<Receiver<LoadResult>>,
     dir_cache: HashMap<PathBuf, Vec<DirEntryInfo>>,
     expanded: HashSet<PathBuf>,
-    pub show: bool,
 }
 
 impl FileViewer {
@@ -187,8 +186,9 @@ impl FileViewer {
         self.set_root(dirs::home_dir());
     }
 
-    /// Draw the pane. Returns a folder that asked for a new tab ("New tab here").
-    pub fn draw(&mut self, ui: &mut Ui) -> Option<PathBuf> {
+    /// Draw the tree. Returns a folder that asked for a new tab ("New tab here") and whether
+    /// the X was pressed (the sidebar then goes back to Sessions).
+    pub fn draw(&mut self, ui: &mut Ui) -> (Option<PathBuf>, bool) {
         self.poll_load();
         if matches!(self.content, FileContent::Empty) && self.load_rx.is_none() {
             if let Some(path) = self.open_file.clone() {
@@ -234,9 +234,7 @@ impl FileViewer {
             FontId::new(12.0, egui::FontFamily::Name(ui_theme::FONT_ICONS.into())),
             ui_theme::TEXT_MUTED,
         );
-        if close.clicked() {
-            self.show = false;
-        }
+        let closed = close.clicked();
         let (sep, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 1.0), Sense::hover());
         ui.painter().rect_filled(sep, 0.0, ui_theme::BORDER);
         ui.add_space(4.0);
@@ -246,7 +244,7 @@ impl FileViewer {
         }
         let Some(root) = self.root.clone() else {
             ui.label(ui_theme::text_sub("No home folder."));
-            return None;
+            return (None, closed);
         };
 
         ui.horizontal(|ui| {
@@ -355,7 +353,7 @@ impl FileViewer {
                 }
             }
         }
-        new_tab
+        (new_tab, closed)
     }
 }
 

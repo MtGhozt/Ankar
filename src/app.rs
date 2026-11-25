@@ -5,7 +5,7 @@ use crate::layout::{LayoutNode, SessionStatus, SplitDir, Workspace};
 use crate::logos::LogoAtlas;
 use crate::palette::{CommandPalette, PaletteAction};
 use crate::persist;
-use crate::sidebar::{self, SidebarState};
+use crate::sidebar::{self, SidebarState, SidebarView};
 use crate::stats::{AnkarStatsStore, StatsPanel};
 use crate::status::StatusTracker;
 use crate::terminal::TerminalView;
@@ -24,8 +24,8 @@ pub struct AnkarApp {
     config_load_failed: bool,
     sidebar: SidebarState,
     show_profile_menu: bool,
-    /// (sidebar, files) visibility last frame, to spot discrete layout jumps.
-    last_panels: (bool, bool),
+    /// Sidebar visibility last frame, to spot the discrete layout jump.
+    last_sidebar_show: bool,
     status: StatusTracker,
     palette: CommandPalette,
     files: FileViewer,
@@ -61,7 +61,7 @@ impl AnkarApp {
                 s
             },
             show_profile_menu: false,
-            last_panels: (true, false),
+            last_sidebar_show: true,
             status: StatusTracker::default(),
             palette: CommandPalette::default(),
             files: FileViewer::default(),
@@ -91,7 +91,8 @@ impl AnkarApp {
                 self.sidebar.show = !self.sidebar.show;
             }
             PaletteAction::ToggleFiles => {
-                self.files.show = !self.files.show;
+                self.sidebar.view = SidebarView::Files;
+                self.sidebar.show = true;
             }
             PaletteAction::NewTab => {
                 let profile = crate::shell::default_profile();
@@ -198,7 +199,6 @@ impl eframe::App for AnkarApp {
             &mut self.show_profile_menu,
             &mut self.sidebar,
             &mut self.palette,
-            &mut self.files,
             &mut self.stats,
         );
 
@@ -212,7 +212,6 @@ impl eframe::App for AnkarApp {
                     ui,
                     &mut self.workspace,
                     &mut self.sidebar,
-                    &mut self.files,
                     &mut self.show_profile_menu,
                     &self.config,
                     &mut self.logos,
@@ -239,16 +238,14 @@ impl eframe::App for AnkarApp {
                 .show(ui, |ui| {
                     ui.set_width(ui.available_width());
                     ui.set_clip_rect(ui.max_rect());
-                    let sidebar_rect = ui.max_rect();
-
                     sidebar::draw(
                         ui,
                         &mut self.workspace,
                         &mut self.config,
                         &mut self.sidebar,
+                        &mut self.files,
                         &mut self.logos,
                         !self.config_load_failed,
-                        sidebar_rect,
                     );
                 });
 
@@ -271,54 +268,9 @@ impl eframe::App for AnkarApp {
             }
         }
 
-        let mut new_tab_cwd: Option<PathBuf> = None;
-        if self.files.show {
-            let max_w = Config::max_files_width(window_w);
-            let width = Config::clamp_files_width(self.config.files_width, window_w);
-            let panel = egui::Panel::left("files_v4")
-                .exact_size(width)
-                .resizable(false)
-                .frame(
-                    Frame::NONE
-                        .fill(ui_theme::SURFACE_1)
-                        // Air on the window edge; the drag handle sits on the right edge.
-                        .inner_margin(egui::Margin {
-                            left: 16,
-                            right: 8,
-                            top: 8,
-                            bottom: 16,
-                        }),
-                )
-                .show_separator_line(false)
-                .show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    new_tab_cwd = self.files.draw(ui);
-                });
-
-            let resize = drag_resize_edge(
-                ui,
-                ui.scope_id().with("files_resize_v4"),
-                panel.response.rect.right(),
-                panel.response.rect.y_range(),
-            );
-            if resize.dragged() {
-                // Dragging the right edge rightward grows the pane.
-                let dx = ui.input(|i| i.pointer.delta().x);
-                self.config.files_width =
-                    Config::clamp_files_width(width + dx, window_w).min(max_w);
-            }
-            if resize.drag_stopped() {
-                resize_now(&mut self.workspace);
-                if !self.config_load_failed {
-                    let _ = self.config.save();
-                }
-            }
-        } else {
+        // The tree is dropped (caches, highlighter) while the sidebar is not showing it.
+        if !(self.sidebar.show && self.sidebar.view == SidebarView::Files) {
             self.files.release();
-        }
-        if let Some(cwd) = new_tab_cwd {
-            let profile = crate::shell::default_profile();
-            let _ = self.workspace.open_tab(ui.ctx(), &profile, Some(cwd));
         }
 
         let recent_dirs = if self.show_profile_menu {
@@ -411,9 +363,8 @@ impl eframe::App for AnkarApp {
         }
 
         // Showing/hiding a panel is a discrete jump: no point debouncing it.
-        let panels = (self.sidebar.show, self.files.show);
-        if panels != self.last_panels {
-            self.last_panels = panels;
+        if self.sidebar.show != self.last_sidebar_show {
+            self.last_sidebar_show = self.sidebar.show;
             resize_now(&mut self.workspace);
         }
 
@@ -498,12 +449,10 @@ fn resize_now(workspace: &mut Workspace) {
 const TAB_WIDTH: f32 = 224.0;
 /// Tabs shrink down to this when the bar is crowded; beyond that they are clipped.
 const MIN_TAB_WIDTH: f32 = 96.0;
-/// Gap between the window edge and the right icons (the edge eats a few px on Windows).
-const RIGHT_ICONS_PAD: f32 = 10.0;
 /// Windows-style caption buttons.
 const WIN_BTN_W: f32 = 46.0;
-/// Fixed slot at the right edge: stats and files icons (2 × 22 px), gap, 3 caption buttons.
-const RIGHT_ICONS_W: f32 = RIGHT_ICONS_PAD + 44.0 + 6.0 + 3.0 * WIN_BTN_W;
+/// Fixed slot at the right edge: stats icon (22 px), gap, 3 caption buttons.
+const RIGHT_ICONS_W: f32 = 22.0 + 6.0 + 3.0 * WIN_BTN_W;
 const TAB_BAR_H: f32 = 32.0;
 /// Caption-button hover for close, as in Windows.
 const CLOSE_RED: Color32 = Color32::from_rgb(0xE8, 0x11, 0x23);
@@ -515,7 +464,6 @@ fn draw_tab_bar(
     ui: &mut egui::Ui,
     workspace: &mut Workspace,
     sidebar: &mut SidebarState,
-    files: &mut FileViewer,
     show_menu: &mut bool,
     config: &Config,
     logos: &mut LogoAtlas,
@@ -776,10 +724,7 @@ fn draw_tab_bar(
                 cmd(egui::ViewportCommand::Minimized(true));
             }
             ui.add_space(6.0);
-            // Midterm right icons: 18px activity + files (RTL paints files first).
-            if tab_bar_right_icon(ui, Icon::Folder, "Files (Ctrl+Shift+F)").clicked() {
-                files.show = !files.show;
-            }
+            // Midterm right icon: 18px activity.
             if tab_bar_right_icon(ui, Icon::ChartColumn, "Agent usage (Ctrl+Shift+I)").clicked()
             {
                 open_stats = true;
@@ -1070,7 +1015,6 @@ fn handle_shortcuts(
     show_menu: &mut bool,
     sidebar: &mut SidebarState,
     palette: &mut CommandPalette,
-    files: &mut FileViewer,
     stats: &mut StatsPanel,
 ) {
     let ctx = ui.ctx().clone();
@@ -1100,7 +1044,8 @@ fn handle_shortcuts(
             sidebar.show = !sidebar.show;
         }
         if i.consume_key(cs, Key::F) {
-            files.show = !files.show;
+            sidebar.view = SidebarView::Files;
+            sidebar.show = true;
         }
         if i.consume_key(cs, Key::L) {
             sidebar.show = true;
