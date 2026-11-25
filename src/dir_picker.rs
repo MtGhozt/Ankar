@@ -5,6 +5,7 @@
 use crate::ui_theme::{self, Icon};
 use egui::{Align2, Color32, CornerRadius, FontFamily, FontId, Frame, Key, Modifiers, Rect, Sense, Stroke, Vec2};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 const WIDTH: f32 = 360.0;
 const ROW_H: f32 = 24.0;
@@ -60,6 +61,21 @@ fn visible_rows(entries: &[Entry], has_parent: bool, query: &str) -> Vec<Row> {
         .collect()
 }
 
+/// Path to show, and whether a picker click may type another `cd`.
+/// `pending` is the target just typed and how long ago that was.
+pub fn cwd_follow(reported: &Path, pending: Option<(&Path, Duration)>) -> (PathBuf, bool) {
+    let Some((target, elapsed)) = pending else {
+        return (reported.to_path_buf(), true);
+    };
+    if reported == target {
+        return (target.to_path_buf(), true);
+    }
+    if elapsed < Duration::from_secs(1) {
+        return (target.to_path_buf(), false);
+    }
+    (reported.to_path_buf(), true)
+}
+
 fn selectable(row: Row, entries: &[Entry]) -> bool {
     match row {
         Row::Parent => true,
@@ -104,11 +120,15 @@ impl DirPicker {
         self.selected = first_selectable(&rows, &self.entries);
     }
 
-    /// Draws the popup with its bottom-left at `anchor`; returns the folder to cd into. Closes
-    /// when the shell's cwd is no longer the folder it lists (another tab, or a cd elsewhere).
+    /// Draws the popup with its bottom-left at `anchor`; returns the folder to cd into.
+    /// Stays open across a cd and reloads the listing when `cwd` (the path being shown) changes.
     pub fn show(&mut self, ctx: &egui::Context, anchor: egui::Pos2, chip: Rect, cwd: &Path) -> Option<PathBuf> {
         if self.dir.as_deref().is_some_and(|d| d != cwd) {
-            self.dir = None;
+            self.entries = list(cwd);
+            self.dir = Some(cwd.to_path_buf());
+            self.query.clear();
+            let rows = visible_rows(&self.entries, cwd.parent().is_some(), "");
+            self.selected = first_selectable(&rows, &self.entries);
         }
         let dir = self.dir.clone()?;
         let rows = visible_rows(&self.entries, dir.parent().is_some(), &self.query);
@@ -184,14 +204,10 @@ impl DirPicker {
         if esc || clicked_away {
             self.dir = None;
         }
-        let target = chosen.map(|row| match row {
+        chosen.map(|row| match row {
             Row::Parent => dir.parent().unwrap_or(&dir).to_path_buf(),
             Row::Entry(i) => dir.join(&self.entries[i].name),
-        });
-        if target.is_some() {
-            self.dir = None;
-        }
-        target
+        })
     }
 
     /// One row; returns it when clicked.
@@ -241,6 +257,16 @@ mod tests {
 
     fn e(name: &str, is_dir: bool) -> Entry {
         Entry { name: name.into(), is_dir }
+    }
+
+    #[test]
+    fn pending_cd_shows_until_the_shell_agrees_or_a_second_passes() {
+        let here = Path::new(r"C:\Programacion\Terminal");
+        let parent = Path::new(r"C:\Programacion");
+        assert_eq!(cwd_follow(here, None), (here.into(), true));
+        assert_eq!(cwd_follow(here, Some((parent, Duration::from_millis(999)))), (parent.into(), false));
+        assert_eq!(cwd_follow(parent, Some((parent, Duration::from_millis(10)))), (parent.into(), true));
+        assert_eq!(cwd_follow(here, Some((parent, Duration::from_secs(1)))), (here.into(), true));
     }
 
     #[test]
