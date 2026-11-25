@@ -13,7 +13,9 @@ const VERSION: u32 = 1;
 const RETENTION_DAYS: i64 = 180;
 const FLUSH_EVERY: Duration = Duration::from_secs(60);
 
-type AnkarRangeSnap = (
+pub type AnkarHours = HashMap<String, HashMap<String, AnkarHourCell>>;
+
+pub type AnkarRangeSnap = (
     u64,
     u64,
     u64,
@@ -26,7 +28,7 @@ type AnkarRangeSnap = (
 struct StatsFile {
     version: u32,
     #[serde(default)]
-    hours: HashMap<String, HashMap<String, AnkarHourCell>>,
+    hours: AnkarHours,
 }
 
 impl Default for StatsFile {
@@ -130,7 +132,18 @@ impl AnkarStatsStore {
         self.last_flush = Instant::now();
     }
 
-    pub fn snapshot_for_range(&self, since_ms: i64, until_ms: i64) -> AnkarRangeSnap {
+    /// Copy of the hour buckets, so the lock can be released before aggregating.
+    pub fn hours_clone(&self) -> AnkarHours {
+        self.data.hours.clone()
+    }
+
+    /// Aggregate cloned hour buckets for `[since_ms, until_ms)`; no lock needed.
+    pub fn snapshot_hours(
+        hours: &AnkarHours,
+        tz: &jiff::tz::TimeZone,
+        since_ms: i64,
+        until_ms: i64,
+    ) -> AnkarRangeSnap {
         let mut busy = 0u64;
         let mut waiting = 0u64;
         let mut starts = 0u64;
@@ -138,8 +151,8 @@ impl AnkarStatsStore {
         let mut by_day: HashMap<String, DayBucket> = HashMap::new();
         let mut activity = [[0u32; 24]; 7];
 
-        for (hour_key, agents) in &self.data.hours {
-            let Some((day, hour, weekday, ts_ms)) = parse_hour_key(hour_key) else {
+        for (hour_key, agents) in hours {
+            let Some((day, hour, weekday, ts_ms)) = parse_hour_key(hour_key, tz) else {
                 continue;
             };
             if ts_ms < since_ms || ts_ms >= until_ms {
@@ -215,7 +228,10 @@ fn local_hour_key() -> String {
         .to_string()
 }
 
-fn parse_hour_key(key: &str) -> Option<(String, usize, usize, i64)> {
+fn parse_hour_key(
+    key: &str,
+    tz: &jiff::tz::TimeZone,
+) -> Option<(String, usize, usize, i64)> {
     // YYYY-MM-DDTHH
     if key.len() < 13 {
         return None;
@@ -227,7 +243,7 @@ fn parse_hour_key(key: &str) -> Option<(String, usize, usize, i64)> {
     }
     let date = jiff::civil::Date::strptime("%Y-%m-%d", &day).ok()?;
     let dt = date.at(hour as i8, 0, 0, 0);
-    let z = dt.to_zoned_datetime(jiff::tz::TimeZone::system()).ok()?;
+    let z = dt.to_zoned_datetime(tz.clone()).ok()?;
     let weekday = z.weekday().to_monday_zero_offset() as usize;
     let ts_ms = z.timestamp().as_millisecond();
     Some((day, hour, weekday, ts_ms))

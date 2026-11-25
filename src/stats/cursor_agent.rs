@@ -17,7 +17,12 @@ pub fn chats_root() -> Option<PathBuf> {
     }
 }
 
-pub fn load_into(snap: &mut StatsSnapshot, since_ms: i64, until_ms: i64) {
+pub fn load_into(
+    snap: &mut StatsSnapshot,
+    tz: &jiff::tz::TimeZone,
+    since_ms: i64,
+    until_ms: i64,
+) {
     let Some(root) = chats_root() else {
         snap.warnings
             .push("cursor-agent: no local chats folder (~/.cursor/chats)".into());
@@ -81,14 +86,14 @@ pub fn load_into(snap: &mut StatsSnapshot, since_ms: i64, until_ms: i64) {
                 continue;
             }
             chats = chats.saturating_add(1);
-            bump_activity(&mut snap.activity, created);
+            bump_activity(&mut snap.activity, tz, created);
 
             let updated = updated.unwrap_or(created).max(created);
             let dur_ms = (updated - created).clamp(0, 6 * 60 * 60 * 1000) as u64;
             let secs = dur_ms / 1000;
             busy_secs = busy_secs.saturating_add(secs);
 
-            let day = local_day(created);
+            let day = local_day(tz, created);
             let d = days.entry(day.clone()).or_insert_with(|| DayBucket {
                 day,
                 ..DayBucket::default()
@@ -135,11 +140,11 @@ fn as_i64(v: &serde_json::Value, key: &str) -> Option<i64> {
     None
 }
 
-fn bump_activity(activity: &mut [[u32; 24]; 7], time_ms: i64) {
+fn bump_activity(activity: &mut [[u32; 24]; 7], tz: &jiff::tz::TimeZone, time_ms: i64) {
     let Ok(ts) = jiff::Timestamp::from_millisecond(time_ms) else {
         return;
     };
-    let z = ts.to_zoned_datetime(jiff::tz::TimeZone::system());
+    let z = ts.to_zoned_datetime(tz.clone());
     let wd = z.weekday().to_monday_zero_offset() as usize;
     let hour = z.hour() as usize;
     if let Some(row) = activity.get_mut(wd) {
@@ -149,11 +154,11 @@ fn bump_activity(activity: &mut [[u32; 24]; 7], time_ms: i64) {
     }
 }
 
-fn local_day(time_ms: i64) -> String {
+fn local_day(tz: &jiff::tz::TimeZone, time_ms: i64) -> String {
     let Ok(ts) = jiff::Timestamp::from_millisecond(time_ms) else {
         return "1970-01-01".into();
     };
-    ts.to_zoned_datetime(jiff::tz::TimeZone::system())
+    ts.to_zoned_datetime(tz.clone())
         .strftime("%Y-%m-%d")
         .to_string()
 }

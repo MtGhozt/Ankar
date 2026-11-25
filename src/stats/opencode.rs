@@ -75,6 +75,7 @@ pub fn mtime_pair(path: &Path) -> (Option<u64>, Option<u64>) {
 
 pub fn load_into(
     snap: &mut StatsSnapshot,
+    tz: &jiff::tz::TimeZone,
     since_ms: i64,
     until_ms: i64,
 ) {
@@ -115,13 +116,13 @@ pub fn load_into(
 
     let mut v2_ids: HashMap<String, ()> = HashMap::new();
     if has_v2 {
-        if let Err(e) = aggregate_v2(&conn, snap, since_ms, until_ms, &mut v2_ids) {
+        if let Err(e) = aggregate_v2(&conn, snap, tz, since_ms, until_ms, &mut v2_ids) {
             snap.warnings
                 .push(format!("OpenCode v2 query failed: {e}"));
         }
     }
     if has_v1 {
-        if let Err(e) = aggregate_v1(&conn, snap, since_ms, until_ms, &v2_ids) {
+        if let Err(e) = aggregate_v1(&conn, snap, tz, since_ms, until_ms, &v2_ids) {
             snap.warnings
                 .push(format!("OpenCode v1 query failed: {e}"));
         }
@@ -172,6 +173,7 @@ fn table_names(conn: &Connection) -> Vec<String> {
 fn aggregate_v2(
     conn: &Connection,
     snap: &mut StatsSnapshot,
+    tz: &jiff::tz::TimeZone,
     since_ms: i64,
     until_ms: i64,
     v2_ids: &mut HashMap<String, ()>,
@@ -249,8 +251,8 @@ fn aggregate_v2(
     })?;
 
     for row in rows.flatten() {
-        bump_activity(&mut snap.activity, row.time_created);
-        let day = local_day(row.time_created);
+        bump_activity(&mut snap.activity, tz, row.time_created);
+        let day = local_day(tz, row.time_created);
         let day_e = days.entry(day.clone()).or_insert_with(|| DayBucket {
             day,
             ..DayBucket::default()
@@ -369,6 +371,7 @@ fn aggregate_v2(
 fn aggregate_v1(
     conn: &Connection,
     snap: &mut StatsSnapshot,
+    tz: &jiff::tz::TimeZone,
     since_ms: i64,
     until_ms: i64,
     v2_ids: &HashMap<String, ()>,
@@ -432,7 +435,7 @@ fn aggregate_v1(
             continue;
         }
         let t = t_created.unwrap_or(0);
-        bump_activity(&mut snap.activity, t);
+        bump_activity(&mut snap.activity, tz, t);
         if role == "user" {
             snap.prompts = snap.prompts.saturating_add(1);
             continue;
@@ -529,13 +532,13 @@ struct MsgRow {
     t_completed: Option<i64>,
 }
 
-fn bump_activity(activity: &mut [[u32; 24]; 7], time_ms: i64) {
+fn bump_activity(activity: &mut [[u32; 24]; 7], tz: &jiff::tz::TimeZone, time_ms: i64) {
     if time_ms <= 0 {
         return;
     }
     let ts = jiff::Timestamp::from_millisecond(time_ms).ok();
     let Some(ts) = ts else { return };
-    let z = ts.to_zoned_datetime(jiff::tz::TimeZone::system());
+    let z = ts.to_zoned_datetime(tz.clone());
     let wd = z.weekday().to_monday_zero_offset() as usize;
     let hour = z.hour() as usize;
     if let Some(row) = activity.get_mut(wd) {
@@ -545,11 +548,11 @@ fn bump_activity(activity: &mut [[u32; 24]; 7], time_ms: i64) {
     }
 }
 
-fn local_day(time_ms: i64) -> String {
+fn local_day(tz: &jiff::tz::TimeZone, time_ms: i64) -> String {
     let Ok(ts) = jiff::Timestamp::from_millisecond(time_ms) else {
         return "1970-01-01".into();
     };
-    let z = ts.to_zoned_datetime(jiff::tz::TimeZone::system());
+    let z = ts.to_zoned_datetime(tz.clone());
     z.strftime("%Y-%m-%d").to_string()
 }
 
@@ -605,7 +608,7 @@ mod tests {
         let conn = mem_v2();
         let mut snap = StatsSnapshot::default();
         let mut ids = HashMap::new();
-        aggregate_v2(&conn, &mut snap, 0, 10_000, &mut ids).unwrap();
+        aggregate_v2(&conn, &mut snap, &jiff::tz::TimeZone::UTC, 0, 10_000, &mut ids).unwrap();
         assert_eq!(snap.sessions, 1);
         assert_eq!(snap.steps, 2);
         assert_eq!(snap.tokens.input, 30);
