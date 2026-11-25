@@ -4,8 +4,12 @@ Open work, most important first. Remove items when done (and add them to FEATURE
 
 ## Next
 
-- Stats panel UI (prompt 08): not started on this branch.
+- Stats panel via prompt 18.
 - Pin tabs in the tab bar (sessions can be pinned in the sidebar only).
+
+## Ideas (not scheduled)
+
+- Warp-style command blocks (the input history).
 
 ## Verify by eye (written, never seen running)
 

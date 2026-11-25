@@ -6,8 +6,9 @@ What exists today, by theme. Update when behaviour changes; keep it short.
 
 - ConPTY shells via alacritty_terminal 0.26: PowerShell, cmd, WSL profiles. A current
   ConPTY ships in `vendor/conpty` (build.rs copies it beside `ankar.exe`) so OSC 4/10/11 work.
-- Font 12 px by default (an old 13 is migrated once, `config_version`); rows are 1.2x the
-  font size with glyphs centred (14.4 px at 12).
+- Font 12 px by default (an old 13 is migrated once, `config_version`); cell height is the
+  font's ascent + descent + line gap, rounded to a pixel (glyphs centred in the row). At 12 px
+  and scale 1.0 the cell is 7.225 x 14 px; startup and resize log the metrics.
 - TERM=xterm-256color, COLORTERM=truecolor, COLORFGBG=15;0, TERM_PROGRAM=Ankar + version.
 - Replies: OSC 4/10/11/12 colour queries (16-bit, same terminator), DA1/DA2, XTVERSION,
   text-area size; every query and reply is logged at debug.
@@ -24,7 +25,8 @@ What exists today, by theme. Update when behaviour changes; keep it short.
 
 - Tabs with split panes (Ctrl+Shift+D / E), focus with Alt+arrows, close with Ctrl+Shift+W.
 - New session (button, Ctrl+Shift+T): default shell in the active tab's cwd, else `C:\`.
-- Folder button right of New session (and its right-click menu): new session in a picked folder.
+- Folder button right of New session: in-app directory picker (search, ".. (Parent Directory)",
+  folders only, starts at `C:\`, Enter starts a session there). No Windows browse dialog.
 - Plain shells take the name/icon of the agent running inside them (process snapshot).
 - Status: Idle (no dot) until the first work; Working while an agent reports it (OSC 7501)
   or, after Enter, while a child prints; Waiting once that work stops; Finished on exit.
@@ -43,8 +45,12 @@ What exists today, by theme. Update when behaviour changes; keep it short.
 - Rows: two lines centred, time right-aligned at the edge, pin/archive on hover left of it.
 - New session button, search (Ctrl+Shift+L) and All/Waiting/Working pills keep their natural
   width; only the rows grow with the sidebar.
-- Files: browse-only tree from the shell cwd, gitignored entries dimmed; "New tab here" on
-  folders; the Files X hides the whole sidebar.
+- Files: opens at the active tab's cwd, re-roots when that tab or its cwd changes, and still
+  lets you navigate up. Home (`%USERPROFILE%`) and a current-tab-folder button sit together.
+  Browse-only tree, gitignored entries dimmed; selected-row highlight lines up with the indent;
+  "New tab here" on folders; the Files X hides the whole sidebar.
+- Archived (N): scrollable overlay upward over the sidebar (max about 60% of sidebar height).
+  Esc or the header closes it. Launcher icons show their name on hover.
 
 ## File viewer
 
@@ -58,8 +64,16 @@ What exists today, by theme. Update when behaviour changes; keep it short.
 
 - Under plain shell tabs, Warp-style chips (#1a1a1a, 1 px #333, 11 px): folder + cwd, drawn
   git-branch icon + branch, file icon + changed files with +N green / -N red.
-- The cwd chip opens an in-app picker above it: "Search directories...", ".. (Parent
-  Directory)", folders then greyed files; arrows or click, Enter cds, typing filters, Esc.
+- Chips sit in a block about 8 px above the window bottom, with about 6 px padding and a 1 px
+  `#2a2a2a` top border. Popups (cd picker, branch menu) open upward and stay on screen.
+- The shown cwd follows the live shell: a picker cd shows that folder immediately and stays
+  until the shell reports a new path (or a different picker cd). Repeat picker cds within about
+  a second are ignored.
+- The cwd chip opens the picker: "Search directories...", ".. (Parent Directory)", folders then
+  greyed files; arrows or click, Enter cds, typing filters, Esc.
+- The branch chip opens a menu of local branches (current marked, recent first); choosing one
+  runs `git switch` off the UI thread. A dirty tree shows git's error in the popup (no
+  create/delete).
 - The files chip opens the changes pane.
 
 ## Changes pane

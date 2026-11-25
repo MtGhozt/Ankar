@@ -14,7 +14,6 @@ the whole UI from state; nothing is retained between frames except that state.
 | `ankar-git` | `changes::GitWatch::refresh` | `.git/HEAD`, `git status -z` + `git diff --numstat -z HEAD`, every 5 s |
 | `ankar-git-diff` | `ChangesPane::ensure_diffs` | one `git diff HEAD -- <file>` per file while the pane is open |
 | `ankar-git-job` | `ChangesPane::start` | commit, push, open PR URL, revert, discard all |
-| `ankar-folder-pick` | `FolderPick::open` | `SHBrowseForFolderW`, result over a channel |
 | screenshot callback | egui | colour check read-back, logs and sets a flag |
 
 Shared state between threads is `Arc<Mutex<..>>` / atomics owned by `TerminalSession` (cwd,
@@ -30,8 +29,9 @@ UI frame     -> TerminalView::show -> session.resize -> session.sync (snapshot) 
 ```
 
 - `sync` copies only the visible, non-default cells into `Snapshot`; hidden tabs drop theirs.
-- Cell metrics: `ui_theme::cell_size(font)` = Hack advance (0.602 em) x `LINE_HEIGHT` 1.2;
-  `glyph_top_offset` centres each row's text; `term_row_top` snaps rows to device pixels.
+- Cell metrics: `ui_theme::cell_size(font)` = Hack advance from the font x
+  `round(ascent + descent + line_gap)`; `glyph_top_offset` centres each row's text;
+  `term_row_top` snaps rows to device pixels. Logged at startup and on resize.
 - Box drawing, blocks and braille are geometry, not glyphs (view.rs), snapped to whole pixels.
 
 ## Resize

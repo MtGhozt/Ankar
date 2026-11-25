@@ -108,3 +108,17 @@ Fix: `AGENTS.md` § Token budget; `ankar-step` subagent; lesson recorded here (p
 Guard: coordinator + subagents; quiet gate; narrow reads; report ≤10 lines per step.
 
 ## 2026-11-25 — an "inherit" subagent in 19 ran on Grok 4.7 High Fast, so unpinned subagents are banned.
+
+## 2026-11-25 — Footer cwd stuck on spawn directory
+Symptom: the footer cwd never moved after cd from the picker.
+Root cause: a picker `cd` does not emit OSC 7; the chip stayed on the directory the shell was
+spawned in.
+Fix: follow the live session cwd; a picker-issued cd stays shown until the shell reports a new
+one (`dir_picker::cwd_follow`).
+Guard: `dir_picker::tests::pending_cd_stays_on_the_target_until_the_shell_reports`.
+
+## 2026-11-25 — Bottom popups covered by the taskbar
+Symptom: footer chip menus were hard to click near the screen edge.
+Root cause: egui popup areas opened downward and could sit under the taskbar.
+Fix: footer cd and branch popups pivot upward (`clamp_footer_popup_anchor`, `LEFT_BOTTOM`).
+Guard: FEATURES.md footer chips; eye-check on a taskbar-autohide setup.
