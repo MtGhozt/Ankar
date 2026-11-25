@@ -54,7 +54,7 @@ Pixels on the real screen, focus between windows, other apps' hotkeys, a TUI's r
 Use these, and say in the report what was not verified by eye:
 
 - The log: `%APPDATA%\ankar\ankar-log.txt`. Set `log_level = "debug"` in config.toml (or
-  RUST_LOG) for PTY queries/replies and every Ctrl key.
+  RUST_LOG) for PTY queries/replies; `ankar=trace` adds every key pressed with Ctrl.
 - Palette → "Debug: check colors (log)": logs painted vs read-back pixels.
 - `docs/ram.md` for memory, read with `Get-Process ankar`.
 

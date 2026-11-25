@@ -54,8 +54,8 @@ Fix: file load + syntect on a thread, capped reads, a dir cache; git and dialogs
 Guard: AGENTS.md rule; review any `fs::`/`Command` call reachable from `ui()`.
 
 ## 2026-11-25 — Visual fixes claimed but never seen
-Symptom: the prompt 14 report said Junie was dark, Copilot fixed and Ctrl+Shift+T working;
-in the real app none of it was true.
+Symptom: the prompt 14 report said Junie was dark and Copilot fixed; in the real app neither
+was true. (Ctrl+Shift+T was never broken: Matias was pressing Ctrl+Alt+T, see the r15 log.)
 Root cause: changes were "verified" by tests and reasoning only; nobody looked at the app.
 Fix: reports list what was not verified by eye (prompt 15).
 Guard: AGENTS.md rule "never claim something visual works unless you saw it".

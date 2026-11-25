@@ -66,5 +66,5 @@ What exists today, by theme. Update when behaviour changes; keep it short.
 - `%APPDATA%\ankar\ankar-log.txt`, truncated each start; level from RUST_LOG, else
   `log_level` in config.toml, default info. Startup logs version, build mark, exe path,
   config path, ConPTY in use, font sizes.
-- Every Ctrl+Shift key event eframe delivers is logged at info (other Ctrl keys at debug).
+- Every key pressed with Ctrl is logged at trace only (`log_level = "ankar=trace"`).
 - "Debug: check colors" paints #0a0a0a, #1e1e1e, #7699FE and logs the framebuffer pixels.

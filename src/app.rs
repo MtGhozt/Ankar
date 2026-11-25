@@ -229,7 +229,7 @@ impl AnkarApp {
 
 impl eframe::App for AnkarApp {
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
-        if log::log_enabled!(log::Level::Info) {
+        if log::log_enabled!(log::Level::Trace) {
             log_ctrl_events(&raw_input.events, ctx.memory(|m| m.focused()));
         }
     }
@@ -1283,18 +1283,15 @@ fn paint_zoom_toast(ctx: &Context, toast: &mut Option<(f32, std::time::Instant)>
     ctx.request_repaint_after(left);
 }
 
-/// Debug aid for "my shortcut does nothing": every key event eframe delivers while Ctrl is down,
-/// before egui or any shortcut sees it. Ctrl+Shift chords at info (they are rare), the rest at
-/// debug. Nothing logged for a chord means the OS or another app took it first.
+/// Debug aid for "my shortcut does nothing", at trace only: every key event eframe delivers while
+/// Ctrl is down, before any shortcut sees it. Nothing logged means another app took the chord.
 fn log_ctrl_events(events: &[egui::Event], focused: Option<egui::Id>) {
     for e in events {
         if let egui::Event::Key { key, physical_key, pressed, repeat, modifiers } = e {
             if !modifiers.ctrl {
                 continue;
             }
-            let level = if modifiers.shift && *pressed { log::Level::Info } else { log::Level::Debug };
-            log::log!(
-                level,
+            log::trace!(
                 "key with ctrl: logical={key:?} physical={physical_key:?} mods={modifiers:?} pressed={pressed} repeat={repeat} focus={focused:?}"
             );
         }
