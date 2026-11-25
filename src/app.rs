@@ -1375,6 +1375,11 @@ mod tests {
     use super::*;
     use egui::viewport::ResizeDirection::*;
 
+    /// epaint debug-asserts that a frame's texture uploads were handled before the output drops.
+    fn discard(mut out: egui::FullOutput) {
+        out.textures_delta.clear();
+    }
+
     #[test]
     fn chord_matches_by_logical_or_physical_key() {
         let cs = Modifiers::COMMAND | Modifiers::SHIFT;
@@ -1391,7 +1396,7 @@ mod tests {
             let mut hit = false;
             ctx.begin_pass(raw);
             ctx.input_mut(|i| hit = consume_chord(i, cs, Key::T));
-            let _ = ctx.end_pass();
+            discard(ctx.end_pass());
             hit
         };
         assert!(hit(key_event(Key::T, Some(Key::T))));
@@ -1430,10 +1435,10 @@ mod tests {
             let mut stats = StatsPanel::new(Arc::new(Mutex::new(AnkarStatsStore::default())));
             let mut left_over = usize::MAX;
             let raw = egui::RawInput { events: vec![event], ..Default::default() };
-            let _ = ctx.run_ui(raw, |ui| {
+            discard(ctx.run_ui(raw, |ui| {
                 handle_shortcuts(ui, &mut ws, &mut menu, &mut sidebar, &mut palette, &mut stats);
                 left_over = ui.input(|i| i.events.len());
-            });
+            }));
             assert_eq!(ws.tabs.len(), 1, "a session was opened");
             assert_eq!(left_over, 0, "the key event never reaches the terminal");
         }
@@ -1446,7 +1451,7 @@ mod tests {
             let ctx = Context::default();
             ctx.begin_pass(egui::RawInput { events: vec![ev], ..Default::default() });
             let size = ctx.input_mut(|i| zoom_request(i, 12.0));
-            let _ = ctx.end_pass();
+            discard(ctx.end_pass());
             size
         };
         let ctrl = Modifiers::COMMAND;

@@ -433,7 +433,7 @@ mod tests {
     #[test]
     fn xtversion_is_answered_with_a_dcs_naming_ankar() {
         let want = format!("\x1bP>|Ankar {}\x1b\\", env!("CARGO_PKG_VERSION"));
-        assert_eq!(replies(&[b"\x1b[>q"]), [want.clone()]);
+        assert_eq!(replies(&[b"\x1b[>q"]), std::slice::from_ref(&want));
         assert_eq!(replies(&[b"abc\x1b[>0", b"q"]), [want], "split across reads, explicit 0");
         // DECSCUSR, DA2 and other CSI finals are not XTVERSION.
         assert!(replies(&[b"\x1b[2 q\x1b[>c\x1b[?25h\x1b[31;1m"]).is_empty());
