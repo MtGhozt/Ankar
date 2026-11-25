@@ -1187,6 +1187,31 @@ mod tests {
         );
     }
 
+    #[test]
+    fn half_heavy_lines_meet_the_next_row_without_a_gap() {
+        let ppp = 1.25;
+        let spans = |ch: char, row: i32| {
+            let mut c = cell(ch);
+            c.line = row;
+            let y = ui_theme::term_row_top(0.0, row, ppp);
+            let h = ui_theme::term_row_top(0.0, row + 1, ppp) - y;
+            let mut shapes = Vec::new();
+            paint_row_box_drawing(
+                &mut shapes, 0.0, y, CELL_W, CELL_H, h, &[&c], None,
+                &TermColors::default(), None, ppp,
+            );
+            (y, y + h, shapes.iter().map(|s| s.visual_bounding_rect()).collect::<Vec<_>>())
+        };
+        // ╻ runs from the middle to the exact bottom, ╹ from the exact top to the middle.
+        let (y0, y1, down) = spans('╻', 3);
+        assert_eq!(down.len(), 1);
+        assert!((down[0].max.y - y1).abs() < 1e-4, "╻ reaches the bottom pixel");
+        let (n0, _, up) = spans('╹', 4);
+        assert!((up[0].min.y - n0).abs() < 1e-4, "╹ starts at the top pixel");
+        assert!((y1 - n0).abs() < 1e-4, "next row starts where this one ends");
+        assert!(y0 < down[0].min.y);
+    }
+
     fn snapshot_with_cursor(shape: CursorShape, color: Option<Rgb>) -> Snapshot {
         Snapshot {
             cursor: Point::new(Line(2), Column(5)),
