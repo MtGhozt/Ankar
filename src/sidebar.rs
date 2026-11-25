@@ -170,7 +170,7 @@ pub fn draw(
             ui_theme::TEXT,
         );
         // Shortcut right edge at x 254.7 (mockup); shrink string if it would collide.
-        let shortcut_right = new_rect.left() + (254.7 - 6.0);
+        let shortcut_right = (new_rect.left() + (254.7 - 6.0)).min(new_rect.right() - 8.0);
         let mut shortcut = "Ctrl+Shift+T";
         let mut sg = painter.layout_no_wrap(
             shortcut.to_owned(),
@@ -185,11 +185,14 @@ pub fn draw(
                 ui_theme::TEXT_MUTED,
             );
         }
-        painter.galley(
-            egui::pos2(shortcut_right - sg.size().x, y_mid - sg.size().y * 0.5),
-            sg,
-            ui_theme::TEXT_MUTED,
-        );
+        // At the narrowest sidebar even the short form can collide with the label: drop it.
+        if shortcut_right - sg.size().x >= label_rect.right() + 8.0 {
+            painter.galley(
+                egui::pos2(shortcut_right - sg.size().x, y_mid - sg.size().y * 0.5),
+                sg,
+                ui_theme::TEXT_MUTED,
+            );
+        }
         if new_resp.clicked() {
             new_session = true;
         }
@@ -465,6 +468,9 @@ pub fn draw(
         // midterm: first box (16.67, …) 22×22; centers pitch ≈ 35.
         let mut x = sidebar_rect.left() + 16.67;
         let y_center = launcher_rect.center().y;
+        // Squeeze the pitch so every launcher still fits on a narrow sidebar.
+        let pitch = 35.0_f32
+            .min((sidebar_rect.width() - 16.67 - 8.0 - 22.0) / launchers.len().saturating_sub(1).max(1) as f32);
         for launcher in &launchers {
             let btn_rect = Rect::from_min_size(
                 egui::pos2(x, y_center - 11.0),
@@ -511,7 +517,7 @@ pub fn draw(
                     );
                 }
             }
-            x += 35.0;
+            x += pitch;
         }
     });
 
@@ -565,7 +571,12 @@ pub fn draw(
                 .max_height(list_max)
                 .show(ui, |ui| {
                     for i in 0..sidebar.archived.len() {
-                        let name = sidebar.archived[i].name.clone();
+                        let name = ellipsize(
+                            ui,
+                            &sidebar.archived[i].name,
+                            FontId::new(ui_theme::SIZE_SUB, FontFamily::Proportional),
+                            (ui.available_width() - 90.0).max(40.0),
+                        );
                         ui.horizontal(|ui| {
                             ui.label(ui_theme::text_sub(name));
                             ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
@@ -820,6 +831,24 @@ fn draw_filter_bar(
             ui_theme::TEXT_MUTED
         };
 
+        // Narrow sidebar: the mockup x positions no longer fit, so just center
+        // label + count in the segment (no dot / spinner) and clip to it.
+        if seg_w < 90.0 {
+            let p = painter.with_clip_rect(seg_rect);
+            let label_g = p.layout_no_wrap((*label).to_owned(), font.clone(), text_color);
+            let count_g = (*seg_filter == SessionFilter::All || *count > 0)
+                .then(|| p.layout_no_wrap(count.to_string(), font.clone(), ui_theme::TEXT_MUTED));
+            let total = label_g.size().x + count_g.as_ref().map_or(0.0, |g| 3.0 + g.size().x);
+            let x = (seg_rect.center().x - total * 0.5).max(seg_rect.left() + 2.0);
+            let y = y_mid - label_g.size().y * 0.5;
+            let count_x = x + label_g.size().x + 3.0;
+            p.galley(egui::pos2(x, y), label_g, text_color);
+            if let Some(g) = count_g {
+                p.galley(egui::pos2(count_x, y), g, ui_theme::TEXT_MUTED);
+            }
+            continue;
+        }
+
         match seg_filter {
             SessionFilter::All => {
                 // "All" @ x 42.67, count @ x 62.67 — both 13px.
@@ -917,11 +946,12 @@ fn draw_group_header(
         );
         x = hdr_rect.left() + 18.0;
     }
+    let font = FontId::new(ui_theme::SIZE_UI_SMALL, FontFamily::Proportional);
     painter.text(
         egui::pos2(x, hdr_rect.center().y),
         Align2::LEFT_CENTER,
-        name,
-        FontId::new(ui_theme::SIZE_UI_SMALL, FontFamily::Proportional),
+        ellipsize(ui, name, font.clone(), hdr_rect.right() - x - 8.0),
+        font,
         ui_theme::TEXT_MUTED,
     );
     if interactive && resp.clicked() {
@@ -970,7 +1000,9 @@ fn draw_session_row(
     let sub_y = title_y + 16.67;
     let text_left = row_rect.left() + 42.67;
     let time_right = row_rect.left() + (296.0_f32).min(row_rect.width() - 8.0);
-    let text_w = (time_right - text_left - 8.0).max(40.0);
+    // On hover the pin/archive buttons take the time's place: keep the title clear of them.
+    let hover_pad = if row_hovered { 32.0 } else { 0.0 };
+    let text_w = (time_right - text_left - 8.0 - hover_pad).max(40.0);
 
     if sidebar.rename_idx == Some(idx) {
         let edit_rect = Rect::from_min_size(

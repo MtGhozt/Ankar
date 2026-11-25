@@ -1,4 +1,4 @@
-use super::backend::{CellMetrics, TerminalSession, VisibleCell};
+use super::backend::{CellMetrics, TerminalSession, VisibleCell, RESIZE_DEBOUNCE};
 use super::bindings::{map_key, KeyAction};
 use crate::ui_theme::{self, CELL_H, CELL_W, PANE_PAD_X, PANE_PAD_Y};
 use alacritty_terminal::index::{Column, Line, Point};
@@ -38,7 +38,9 @@ impl TerminalView {
             height: CELL_H,
         };
         let content = content_rect(response.rect, ppp);
-        session.resize(content.width(), content.height(), metrics);
+        if session.resize(content.width(), content.height(), metrics) {
+            ui.ctx().request_repaint_after(RESIZE_DEBOUNCE);
+        }
 
         // Only take focus on click/drag — never every frame, or sidebar search
         // and other TextEdits can never keep the keyboard.

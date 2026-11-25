@@ -19,6 +19,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 const MAX_SCROLLBACK: usize = 50_000;
+/// The PTY (ConPTY / the TUI) only hears about a new size once it has been stable this long.
+pub const RESIZE_DEBOUNCE: Duration = Duration::from_millis(100);
 
 #[derive(Clone, Copy, Debug)]
 pub struct CellMetrics {
@@ -117,6 +119,10 @@ impl Default for Snapshot {
 pub struct TerminalSession {
     term: Arc<FairMutex<Term<EventProxy>>>,
     size: TerminalSize,
+    /// Last size the PTY was told about (`None` until the first resize).
+    pty_size: Option<TerminalSize>,
+    /// Set while `size` is newer than `pty_size`; restarted on every change.
+    pending_resize: Option<Instant>,
     notifier: Notifier,
     snapshot: Snapshot,
     exited: Arc<AtomicBool>,
@@ -279,6 +285,8 @@ impl TerminalSession {
         Ok(Self {
             term,
             size: terminal_size,
+            pty_size: None,
+            pending_resize: None,
             notifier,
             snapshot: Snapshot::default(),
             exited,
@@ -349,38 +357,52 @@ impl TerminalSession {
         term.scroll_display(Scroll::Delta(lines));
     }
 
-    pub fn resize(&mut self, pixel_w: f32, pixel_h: f32, metrics: CellMetrics) {
+    /// Updates the grid at once, but tells the PTY only after the size is stable
+    /// (see `RESIZE_DEBOUNCE`; the first size goes out immediately). Returns true while a
+    /// resize is still pending, so the caller must repaint after the debounce.
+    pub fn resize(&mut self, pixel_w: f32, pixel_h: f32, metrics: CellMetrics) -> bool {
         let cell_w = metrics.width.max(1.0);
         let cell_h = metrics.height.max(1.0);
         let cols = (pixel_w / cell_w).floor() as u16;
         let lines = (pixel_h / cell_h).floor() as u16;
-        if cols == 0 || lines == 0 {
+        let changed = cols != self.size.num_cols
+            || lines != self.size.num_lines
+            || (self.size.cell_width - cell_w).abs() >= 0.01
+            || (self.size.cell_height - cell_h).abs() >= 0.01;
+        if cols != 0 && lines != 0 && changed {
+            self.size = TerminalSize {
+                cell_width: cell_w,
+                cell_height: cell_h,
+                num_cols: cols,
+                num_lines: lines,
+            };
+            if let Ok(mut g) = self.window_size.lock() {
+                *g = self.size.into();
+            }
+            self.term.lock().resize(TermSize::new(cols as usize, lines as usize));
+            self.pending_resize = Some(Instant::now());
+            if self.pty_size.is_none() {
+                self.flush_resize();
+            }
+        }
+        if self.pending_resize.is_some_and(|t| t.elapsed() >= RESIZE_DEBOUNCE) {
+            self.flush_resize();
+        }
+        self.pending_resize.is_some()
+    }
+
+    /// Sends the pending size to the PTY now (no-op if it already has that size).
+    pub fn flush_resize(&mut self) {
+        if self.pending_resize.take().is_none() {
             return;
         }
-        if cols == self.size.num_cols
-            && lines == self.size.num_lines
-            && (self.size.cell_width - cell_w).abs() < 0.01
-            && (self.size.cell_height - cell_h).abs() < 0.01
-        {
-            return;
+        let same = self
+            .pty_size
+            .is_some_and(|s| s.num_cols == self.size.num_cols && s.num_lines == self.size.num_lines);
+        if !same {
+            self.notifier.on_resize(self.size.into());
+            self.pty_size = Some(self.size);
         }
-
-        self.size = TerminalSize {
-            cell_width: cell_w,
-            cell_height: cell_h,
-            num_cols: cols,
-            num_lines: lines,
-        };
-
-        self.notifier.on_resize(self.size.into());
-        if let Ok(mut g) = self.window_size.lock() {
-            *g = self.size.into();
-        }
-        let mut term = self.term.lock();
-        term.resize(TermSize::new(
-            self.size.num_cols as usize,
-            self.size.num_lines as usize,
-        ));
     }
 
     pub fn sync(&mut self) -> &Snapshot {

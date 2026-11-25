@@ -278,8 +278,11 @@ impl eframe::App for AnkarApp {
                 self.config.sidebar_width =
                     Config::clamp_sidebar_width(width + dx, window_w).min(max_w);
             }
-            if resize.drag_stopped() && !self.config_load_failed {
-                let _ = self.config.save();
+            if resize.drag_stopped() {
+                flush_pty_resizes(&mut self.workspace);
+                if !self.config_load_failed {
+                    let _ = self.config.save();
+                }
             }
         }
 
@@ -312,8 +315,11 @@ impl eframe::App for AnkarApp {
                 self.config.files_width =
                     Config::clamp_files_width(width - dx, window_w).min(max_w);
             }
-            if resize.drag_stopped() && !self.config_load_failed {
-                let _ = self.config.save();
+            if resize.drag_stopped() {
+                flush_pty_resizes(&mut self.workspace);
+                if !self.config_load_failed {
+                    let _ = self.config.save();
+                }
             }
         } else {
             self.files.release();
@@ -444,6 +450,13 @@ impl eframe::App for AnkarApp {
         if !self.config_load_failed {
             let _ = self.config.save();
         }
+    }
+}
+
+/// Drag released: the PTYs get the final size now instead of waiting for the debounce.
+fn flush_pty_resizes(workspace: &mut Workspace) {
+    for session in workspace.tabs.iter_mut().flat_map(|t| t.sessions.values_mut()) {
+        session.flush_resize();
     }
 }
 

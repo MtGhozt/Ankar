@@ -222,10 +222,10 @@ impl Launcher {
 }
 
 impl Config {
-    /// Sidebar width in logical px: min 240, max 40% of the window.
+    /// Sidebar width in logical px: min 200, max 40% of the window.
     pub fn clamp_sidebar_width(width: f32, window_width: f32) -> f32 {
-        let max_w = (window_width * 0.4).max(240.0);
-        width.clamp(240.0, max_w)
+        let max_w = (window_width * 0.4).max(200.0);
+        width.clamp(200.0, max_w)
     }
 
     pub fn max_sidebar_width(window_width: f32) -> f32 {
@@ -336,7 +336,7 @@ font_size = {font_size}
 # Scrollback lines per terminal (default 2000; hard cap 50000)
 scrollback_lines = {scrollback_lines}
 
-# Sidebar width in logical px (min 240, max 40% of window) — drag the edge to resize
+# Sidebar width in logical px (min 200, max 40% of window) — drag the edge to resize
 sidebar_width = {sidebar_width}
 
 # Files panel width in logical px (min 200, max 45% of window) — drag the edge to resize
