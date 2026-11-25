@@ -172,12 +172,7 @@ pub fn draw(
     let divider_launcher_y = sidebar_rect.bottom() - 92.0;
     let divider_archived_y = sidebar_rect.bottom() - 46.0;
     let filter_bottom_y = sidebar_rect.top() + SWITCH_ROW_H + 113.33;
-    let archived_list_h = if sidebar.show_archived {
-        (sidebar.archived.len() as f32 * 28.0).min(160.0) + 8.0
-    } else {
-        0.0
-    };
-    let scroll_h = (divider_launcher_y - filter_bottom_y - archived_list_h).max(60.0);
+    let scroll_h = (divider_launcher_y - filter_bottom_y).max(60.0);
     let mut activate = None;
     let mut archive_idx = None;
     let mut close_idx = None;
@@ -603,13 +598,17 @@ pub fn draw(
                 Vec2::splat(22.0),
             );
             let tip = logos.launcher_tooltip(&launcher.name, &launcher.command, &launcher.args);
+            let detail = tip
+                .strip_prefix(&format!("{}\n", launcher.name))
+                .unwrap_or(tip.as_str());
+            let hover = format!("{}\n{detail}", launcher.name);
             let installed = logos.is_installed(&launcher.command);
             // Painted into the 22 px box shrunk by 2 on each side.
             let tex = logos.get(ui.ctx(), launcher.logo_key(), 18.0);
             paint_launcher_button(ui, btn_rect, tex.as_ref(), launcher, installed);
             let resp = ui
                 .interact(btn_rect, ui.scope_id().with(&launcher.name), Sense::click())
-                .on_hover_text(tip);
+                .on_hover_text(hover);
             if resp.hovered() {
                 ui.painter().rect_filled(
                     btn_rect.expand(2.0),
@@ -689,58 +688,79 @@ pub fn draw(
         if arch_resp.clicked() {
             sidebar.show_archived = !sidebar.show_archived;
         }
+    });
 
-        if sidebar.show_archived {
-            let list_max = (archived_rect.height() - row_h - 8.0).max(40.0);
-            egui::ScrollArea::vertical()
-                .id_salt("sidebar_archived")
-                .max_height(list_max)
-                .show(ui, |ui| {
-                    for i in 0..sidebar.archived.len() {
-                        let name = ellipsize(
-                            ui,
-                            &sidebar.archived[i].name,
-                            FontId::new(ui_theme::SIZE_SUB, FontFamily::Proportional),
-                            (ui.available_width() - 90.0).max(40.0),
-                        );
-                        ui.horizontal(|ui| {
-                            ui.label(ui_theme::text_sub(name));
-                            ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
-                                if sidebar.confirm_delete == Some(i) {
-                                    if ui
-                                        .add(egui::Button::new(ui_theme::text_kbd("Yes")).frame(false))
-                                        .clicked()
-                                    {
-                                        forget = Some(i);
-                                        sidebar.confirm_delete = None;
-                                    }
-                                    if ui
-                                        .add(egui::Button::new(ui_theme::text_kbd("No")).frame(false))
-                                        .clicked()
-                                    {
-                                        sidebar.confirm_delete = None;
-                                    }
-                                    ui.label(ui_theme::text_kbd("Delete?"));
-                                } else {
-                                    if icon_btn(ui, Icon::Trash2, ui_theme::TEXT_MUTED, 20.0)
-                                        .on_hover_text("Delete")
-                                        .clicked()
-                                    {
-                                        sidebar.confirm_delete = Some(i);
-                                    }
-                                    if icon_btn(ui, Icon::ArchiveRestore, ui_theme::TEXT_MUTED, 20.0)
-                                        .on_hover_text("Restore")
-                                        .clicked()
-                                    {
-                                        restore = Some(i);
-                                    }
+    if sidebar.show_archived {
+        if ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+            sidebar.show_archived = false;
+        }
+        let max_h = sidebar_rect.height() * 0.6;
+        let arch_count = sidebar.archived.len();
+        let list_h = ((arch_count as f32 * 28.0) + 8.0).min(max_h).max(if arch_count > 0 { 40.0 } else { 0.0 });
+        egui::Area::new(egui::Id::unique("sidebar_archived_overlay"))
+            .order(egui::Order::Foreground)
+            .pivot(Align2::LEFT_BOTTOM)
+            .fixed_pos(egui::pos2(sidebar_rect.left(), divider_archived_y))
+            .show(ui.ctx(), |ui| {
+                Frame::NONE
+                    .fill(ui_theme::SIDEBAR_BG)
+                    .stroke(Stroke::new(1.0, ui_theme::SIDEBAR_DIVIDER))
+                    .corner_radius(CornerRadius::same(ui_theme::RADIUS_ROW))
+                    .shadow(ui_theme::popup_shadow())
+                    .inner_margin(Margin::symmetric(0, 4))
+                    .show(ui, |ui| {
+                        ui.set_width(sidebar_rect.width());
+                        egui::ScrollArea::vertical()
+                            .id_salt("sidebar_archived")
+                            .max_height(list_h)
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| {
+                                for i in 0..sidebar.archived.len() {
+                                    let name = ellipsize(
+                                        ui,
+                                        &sidebar.archived[i].name,
+                                        FontId::new(ui_theme::SIZE_SUB, FontFamily::Proportional),
+                                        (ui.available_width() - 90.0).max(40.0),
+                                    );
+                                    ui.horizontal(|ui| {
+                                        ui.label(ui_theme::text_sub(name));
+                                        ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                                            if sidebar.confirm_delete == Some(i) {
+                                                if ui
+                                                    .add(egui::Button::new(ui_theme::text_kbd("Yes")).frame(false))
+                                                    .clicked()
+                                                {
+                                                    forget = Some(i);
+                                                    sidebar.confirm_delete = None;
+                                                }
+                                                if ui
+                                                    .add(egui::Button::new(ui_theme::text_kbd("No")).frame(false))
+                                                    .clicked()
+                                                {
+                                                    sidebar.confirm_delete = None;
+                                                }
+                                                ui.label(ui_theme::text_kbd("Delete?"));
+                                            } else {
+                                                if icon_btn(ui, Icon::Trash2, ui_theme::TEXT_MUTED, 20.0)
+                                                    .on_hover_text("Delete")
+                                                    .clicked()
+                                                {
+                                                    sidebar.confirm_delete = Some(i);
+                                                }
+                                                if icon_btn(ui, Icon::ArchiveRestore, ui_theme::TEXT_MUTED, 20.0)
+                                                    .on_hover_text("Restore")
+                                                    .clicked()
+                                                {
+                                                    restore = Some(i);
+                                                }
+                                            }
+                                        });
+                                    });
                                 }
                             });
-                        });
-                    }
-                });
-        }
-    });
+                    });
+            });
+    }
 
     // --- Apply deferred actions ---
     if let Some(key) = toggle_group {
