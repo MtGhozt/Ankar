@@ -1,6 +1,8 @@
 use crate::color_check;
 use crate::config::Config;
 use crate::files::FileViewer;
+use crate::folder_pick::{self, FolderPick, PickFor};
+use crate::footer::{self, ShellFooter};
 use crate::launchers;
 use crate::layout::{LayoutNode, SessionStatus, SplitDir, Workspace};
 use crate::logos::LogoAtlas;
@@ -35,6 +37,9 @@ pub struct AnkarApp {
     logos: LogoAtlas,
     stats: StatsPanel,
     ankar_stats: Arc<Mutex<AnkarStatsStore>>,
+    footer: ShellFooter,
+    /// Footer visibility last frame (shell tab vs agent tab): a discrete layout jump.
+    last_footer_shown: bool,
     /// Debug colour check in flight: swatch origin, and the flag the screenshot callback sets.
     color_check: Option<(egui::Pos2, Option<Arc<std::sync::atomic::AtomicBool>>)>,
 }
@@ -81,8 +86,33 @@ impl AnkarApp {
             logos,
             stats: StatsPanel::new(ankar_stats.clone()),
             ankar_stats,
+            footer: ShellFooter::default(),
+            last_footer_shown: false,
             color_check: None,
         })
+    }
+
+    /// Acts on the folder dialog once it closes: a new session there, or `cd` the active shell.
+    fn poll_folder_pick(&mut self, ctx: &Context) {
+        let Some(choice) = self.sidebar.folder_pick.as_ref().and_then(|p| p.poll()) else {
+            return;
+        };
+        let purpose = self.sidebar.folder_pick.take().map(|p| p.purpose);
+        let Some(dir) = choice else {
+            return;
+        };
+        match purpose {
+            Some(PickFor::NewSession) => self.workspace.new_session_in(ctx, dir),
+            Some(PickFor::Cd) => {
+                if let Some(tab) = self.workspace.active_tab_mut() {
+                    let pane = tab.focused_pane;
+                    if let Some(session) = tab.sessions.get_mut(&pane) {
+                        session.write(folder_pick::cd_command(&dir).into_bytes());
+                    }
+                }
+            }
+            None => {}
+        }
     }
 
     /// Paints the swatches on top of everything, screenshots that frame, logs what came back.
@@ -203,7 +233,7 @@ impl eframe::App for AnkarApp {
         }
         if self.last_probe.elapsed() >= Duration::from_secs(1) {
             self.last_probe = std::time::Instant::now();
-            crate::procs::detect_active(&mut self.workspace);
+            crate::procs::probe(&mut self.workspace);
         }
         ui.ctx()
             .request_repaint_after(std::time::Duration::from_secs(1));
@@ -233,17 +263,15 @@ impl eframe::App for AnkarApp {
 
         {
             let mut cwd_dirty = false;
-            if let Some(tab) = self.workspace.active_tab_mut() {
-                let focused = tab.focused_pane;
-                if let Some(session) = tab.sessions.get(&focused) {
-                    if let Some(new_cwd) = session.cwd() {
-                        if tab.cwd.as_ref() != Some(&new_cwd) {
-                            // The sidebar group follows the shell (OSC 7) into another project.
-                            tab.project_key = persist::project_key_for(Some(&new_cwd));
-                            tab.cwd = Some(new_cwd);
-                            cwd_dirty = true;
-                        }
-                    }
+            for tab in &mut self.workspace.tabs {
+                let Some(new_cwd) = tab.sessions.get(&tab.focused_pane).and_then(|s| s.cwd()) else {
+                    continue;
+                };
+                if tab.cwd.as_ref() != Some(&new_cwd) {
+                    // The sidebar group follows the shell (OSC 7) into another project.
+                    tab.project_key = persist::project_key_for(Some(&new_cwd));
+                    tab.cwd = Some(new_cwd);
+                    cwd_dirty = true;
                 }
             }
             if cwd_dirty {
@@ -431,6 +459,31 @@ impl eframe::App for AnkarApp {
             self.last_sidebar_show = self.sidebar.show;
             resize_now(&mut self.workspace);
         }
+
+        let shell_tab = self
+            .workspace
+            .active_tab()
+            .filter(|t| t.command.is_none() && t.detected.is_none())
+            .map(|t| (t.cwd.clone(), t.project_key.clone()));
+        if shell_tab.is_some() != self.last_footer_shown {
+            self.last_footer_shown = shell_tab.is_some();
+            resize_now(&mut self.workspace);
+        }
+        if let Some((cwd, project_key)) = shell_tab {
+            egui::Panel::bottom("shell_footer")
+                .exact_size(footer::FOOTER_H)
+                .frame(Frame::NONE.fill(ui_theme::BG))
+                .show_separator_line(false)
+                .show(ui, |ui| {
+                    let rect = ui.max_rect();
+                    let pick = self.footer.draw(ui, rect, cwd.as_deref(), &project_key);
+                    if pick && self.sidebar.folder_pick.is_none() {
+                        self.sidebar.folder_pick =
+                            Some(FolderPick::open(ui.ctx(), PickFor::Cd, "Change directory", cwd.clone()));
+                    }
+                });
+        }
+        self.poll_folder_pick(ui.ctx());
 
         egui::CentralPanel::default()
             .frame(Frame::NONE.fill(ui_theme::BG))

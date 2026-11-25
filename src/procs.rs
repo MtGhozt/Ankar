@@ -84,25 +84,37 @@ pub fn agent_under(shell_pid: u32, procs: &[ProcEntry]) -> Option<&'static str> 
     None
 }
 
+/// Console hosts ConPTY parks next to the shell; they are not work the user started.
+const HOSTS: &[&str] = &["conhost.exe", "openconsole.exe"];
+
+/// True while the shell runs a command (any child that is not a console host).
+pub fn has_foreground_child(shell_pid: u32, procs: &[ProcEntry]) -> bool {
+    procs.iter().any(|p| {
+        p.ppid == shell_pid && p.pid != shell_pid && !HOSTS.contains(&p.exe.to_ascii_lowercase().as_str())
+    })
+}
+
+/// One snapshot per probe. Every tab learns whether its shell runs a command (`busy_child`).
 /// Plain-terminal tabs take the identity of the agent running inside them, and drop it again
-/// when it exits. Only the active tab is probed; launcher-started tabs never change.
-pub fn detect_active(workspace: &mut Workspace) {
-    let Some(tab) = workspace.active_tab_mut() else {
-        return;
-    };
-    if tab.command.is_some() {
-        return;
-    }
-    let pids: Vec<u32> = tab
-        .sessions
-        .values()
-        .filter(|s| !s.is_exited())
-        .filter_map(|s| s.shell_pid())
-        .collect();
-    let procs = if pids.is_empty() { Vec::new() } else { snapshot() };
-    let found = pids.iter().find_map(|&pid| agent_under(pid, &procs));
-    if tab.detected.as_deref() != found {
-        tab.detected = found.map(str::to_owned);
+/// when it exits; only the active tab is checked for that, launcher-started tabs never change.
+pub fn probe(workspace: &mut Workspace) {
+    let procs = snapshot();
+    let active = workspace.active_tab;
+    for (i, tab) in workspace.tabs.iter_mut().enumerate() {
+        let pids: Vec<u32> = tab
+            .sessions
+            .values()
+            .filter(|s| !s.is_exited())
+            .filter_map(|s| s.shell_pid())
+            .collect();
+        tab.busy_child = pids.iter().any(|&pid| has_foreground_child(pid, &procs));
+        if i != active || tab.command.is_some() {
+            continue;
+        }
+        let found = pids.iter().find_map(|&pid| agent_under(pid, &procs));
+        if tab.detected.as_deref() != found {
+            tab.detected = found.map(str::to_owned);
+        }
     }
 }
 
@@ -129,6 +141,15 @@ mod tests {
         assert_eq!(agent_under(11, &procs), Some("opencode"));
         assert_eq!(agent_under(12, &procs), None, "the agent itself has no agent below it");
         assert_eq!(agent_under(1, &[p(2, 1, "git.exe")]), None);
+    }
+
+    #[test]
+    fn a_shell_at_its_prompt_has_no_foreground_child() {
+        let procs = [p(10, 1, "pwsh.exe"), p(11, 1, "conhost.exe"), p(12, 10, "OpenConsole.exe")];
+        assert!(!has_foreground_child(10, &procs), "console hosts do not count");
+        let busy = [p(10, 1, "pwsh.exe"), p(13, 10, "cargo.exe")];
+        assert!(has_foreground_child(10, &busy));
+        assert!(!has_foreground_child(13, &busy));
     }
 
     #[test]

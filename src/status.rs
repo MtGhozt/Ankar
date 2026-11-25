@@ -9,6 +9,12 @@ const MIN_WORK_FOR_TOAST: Duration = Duration::from_secs(30);
 /// No OSC 7501 for this long while "working" means the agent is gone.
 const AGENT_STALE: Duration = Duration::from_secs(5 * 60);
 
+/// A session without OSC 7501 reports works only while its shell runs a child that is still
+/// printing; a shell at its prompt is idle however recently it redrew.
+fn guess_busy(has_child: bool, bell: bool, idle: Duration, timeout: Duration) -> bool {
+    has_child && !bell && idle < timeout
+}
+
 /// Track previous statuses so we only notify on transitions.
 pub struct StatusTracker {
     prev: HashMap<u64, SessionStatus>,
@@ -36,6 +42,8 @@ impl StatusTracker {
             let mut any_alive = false;
             let mut any_waiting = false;
             let mut any_working = false;
+            // Guessed from a running child; shown as Working but never toasts.
+            let mut child_working = false;
             let mut all_exited = true;
             let mut exit_code = None;
             let mut activity = None;
@@ -63,7 +71,10 @@ impl StatusTracker {
                     }
                     Some(_) => any_waiting = true,
                     None => {
-                        if session.saw_bell() || session.idle_for() >= timeout {
+                        let bell = session.saw_bell();
+                        if guess_busy(tab.busy_child, bell, session.idle_for(), timeout) {
+                            child_working = true;
+                        } else {
                             any_waiting = true;
                         }
                     }
@@ -82,7 +93,7 @@ impl StatusTracker {
 
             let new_status = if all_exited && !tab.sessions.is_empty() {
                 SessionStatus::Finished
-            } else if any_working {
+            } else if any_working || child_working {
                 SessionStatus::Active
             } else if any_waiting && any_alive {
                 SessionStatus::Waiting
@@ -114,5 +125,19 @@ impl StatusTracker {
             self.prev.insert(tab.id, new_status);
             tab.status = new_status;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_idle_shell_waits_and_only_a_running_child_works() {
+        let (s, t) = (Duration::from_secs, Duration::from_secs(10));
+        assert!(!guess_busy(false, false, s(0), t), "prompt just redrawn: still idle");
+        assert!(guess_busy(true, false, s(1), t), "cargo build printing");
+        assert!(!guess_busy(true, false, s(10), t), "child quiet past the timeout waits");
+        assert!(!guess_busy(true, true, s(0), t), "a bell asks for attention");
     }
 }

@@ -1,5 +1,6 @@
 use crate::config::Config;
 use crate::files::FileViewer;
+use crate::folder_pick::{FolderPick, PickFor};
 use crate::launchers;
 use crate::layout::{SessionStatus, Workspace};
 use crate::logos::LogoAtlas;
@@ -10,7 +11,7 @@ use egui::{
     Sense, Stroke, TextureHandle, Ui, Vec2,
 };
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 /// Stable focus id for the sidebar search field.
@@ -114,6 +115,8 @@ pub struct SidebarState {
     pub confirm_delete: Option<usize>,
     last_relative_tick: Instant,
     cached_now: Instant,
+    /// Native folder dialog in flight (New session in folder…, footer cd); the app polls it.
+    pub folder_pick: Option<FolderPick>,
 }
 
 impl Default for SidebarState {
@@ -134,6 +137,7 @@ impl Default for SidebarState {
             confirm_delete: None,
             last_relative_tick: now,
             cached_now: now,
+            folder_pick: None,
         }
     }
 }
@@ -265,36 +269,15 @@ pub fn draw(
         }
         return;
     }
-    // --- Top actions: New session 260×30 + folder 30×30 (mockup x 6 / 273.33) ---
+    // --- Top action: New session 260×30 at mockup x 6; right-click picks a folder ---
     ui.add_space(7.33);
     let row = ui.available_rect_before_wrap();
     let (actions_rect, _) = ui.allocate_exact_size(Vec2::new(row.width(), 30.0), Sense::hover());
     let side_l = 6.0;
     let new_rect = Rect::from_min_size(
         egui::pos2(actions_rect.left() + side_l, actions_rect.top()),
-        Vec2::new(260.0, 30.0),
+        Vec2::new(control_width(actions_rect.width()).min(260.0), 30.0),
     );
-    let folder_rect = Rect::from_min_size(
-        egui::pos2(actions_rect.left() + 273.33, actions_rect.top()),
-        Vec2::splat(30.0),
-    );
-    // Clamp folder into row if sidebar is narrow.
-    let folder_rect = if folder_rect.right() > actions_rect.right() - 2.0 {
-        Rect::from_min_size(
-            egui::pos2(actions_rect.right() - 32.0, actions_rect.top()),
-            Vec2::splat(30.0),
-        )
-    } else {
-        folder_rect
-    };
-    let new_rect = if new_rect.right() + 6.0 > folder_rect.left() {
-        Rect::from_min_size(
-            new_rect.min,
-            Vec2::new((folder_rect.left() - 6.0 - new_rect.left()).max(120.0), 30.0),
-        )
-    } else {
-        new_rect
-    };
 
     {
         let new_resp = ui.interact(
@@ -354,33 +337,12 @@ pub fn draw(
         if new_resp.clicked() {
             new_session = true;
         }
-    }
-
-    {
-        let folder_resp = ui
-            .interact(
-                folder_rect,
-                search_field_id().with("new_in_folder"),
-                Sense::click(),
-            )
-            .on_hover_text("New session in active folder");
-        let fill = if folder_resp.hovered() {
-            ui_theme::ROW_HOVER
-        } else {
-            ui_theme::BUTTON_BG
-        };
-        painter.rect_filled(folder_rect, CornerRadius::same(ui_theme::RADIUS_ROW), fill);
-        paint_button_top_highlight(&painter, folder_rect, ui_theme::RADIUS_ROW);
-        painter.text(
-            folder_rect.center(),
-            Align2::CENTER_CENTER,
-            Icon::FolderPlus.codepoint().to_string(),
-            FontId::new(17.0, FontFamily::Name(ui_theme::FONT_ICONS.into())),
-            ui_theme::TEXT_MUTED,
-        );
-        if folder_resp.clicked() {
-            new_in_folder = true;
-        }
+        new_resp.context_menu(|ui| {
+            if ui.button("New session in folder…").clicked() {
+                new_in_folder = true;
+                ui.close();
+            }
+        });
     }
 
     // Gap mockup: buttons bottom 75.33 → search top 86 = 10.67
@@ -514,8 +476,6 @@ pub fn draw(
     let filter = sidebar.filter;
     let mut groups: BTreeMap<String, Vec<usize>> = BTreeMap::new();
     let mut pinned: Vec<usize> = Vec::new();
-    let home = dirs::home_dir();
-
     for (i, tab) in workspace.tabs.iter().enumerate() {
         if !matches_filter(tab.status, filter) {
             continue;
@@ -536,7 +496,7 @@ pub fn draw(
         if tab.pinned {
             pinned.push(i);
         } else {
-            let key = project_group_key(&tab.project_key, home.as_deref());
+            let key = project_group_key(&tab.project_key);
             groups.entry(key).or_default().push(i);
         }
     }
@@ -578,7 +538,7 @@ pub fn draw(
 
             for key in keys {
                 let indices = groups.get(&key).cloned().unwrap_or_default();
-                let display = group_display_name(&key);
+                let display = key.clone();
                 let collapsed = config.collapsed_groups.iter().any(|g| g == &key);
                 let key_clone = key.clone();
                 draw_group_header(ui, &display, collapsed, true, || {
@@ -792,10 +752,9 @@ pub fn draw(
     if new_session {
         workspace.new_session(ui.ctx());
     }
-    if new_in_folder {
-        let profile = crate::shell::default_profile();
-        let cwd = workspace.active_tab().and_then(|t| t.cwd.clone());
-        let _ = workspace.open_tab(ui.ctx(), &profile, cwd);
+    if new_in_folder && sidebar.folder_pick.is_none() {
+        let start = crate::layout::new_session_cwd(workspace.active_tab().and_then(|t| t.cwd.as_deref()));
+        sidebar.folder_pick = Some(FolderPick::open(ui.ctx(), PickFor::NewSession, "New session in folder", Some(start)));
     }
     if let Some(i) = start_rename {
         if let Some(tab) = workspace.tabs.get(i) {
@@ -904,26 +863,19 @@ fn matches_filter(status: SessionStatus, filter: SessionFilter) -> bool {
     }
 }
 
-/// Sidebar group of a session: its project folder's name. The home folder is no project (the
-/// group would be the user name), so those sessions fall under "other".
-fn project_group_key(project_key: &str, home: Option<&Path>) -> String {
-    if project_key.is_empty()
-        || project_key == "(no project)"
-        || home.is_some_and(|h| Path::new(project_key) == h)
-    {
-        return "other".into();
+/// Sidebar group of a session: the last folder of its project path (git root, else cwd);
+/// a drive root is its drive (`C:\` -> `C:`).
+fn project_group_key(project_key: &str) -> String {
+    if project_key.is_empty() || project_key == "(no project)" {
+        return "C:".into();
     }
-    PathBuf::from(project_key)
-        .file_name()
-        .map(|s| s.to_string_lossy().to_lowercase())
-        .unwrap_or_else(|| "other".into())
-}
-
-fn group_display_name(key: &str) -> String {
-    if key == "other" {
-        "other".into()
-    } else {
-        key.to_string()
+    let path = Path::new(project_key);
+    if let Some(name) = path.file_name() {
+        return name.to_string_lossy().into_owned();
+    }
+    match path.components().next() {
+        Some(std::path::Component::Prefix(p)) => p.as_os_str().to_string_lossy().into_owned(),
+        _ => "C:".into(),
     }
 }
 
@@ -1595,13 +1547,12 @@ mod tests {
     }
 
     #[test]
-    fn groups_are_project_folders_never_the_user_name() {
-        let home = Path::new(r"C:\Users\matias");
-        let key = |p: &str| project_group_key(p, Some(home));
-        assert_eq!(key(r"C:\dev\Ankar"), "ankar");
-        assert_eq!(key(r"C:\Users\matias\code\OLAP"), "olap");
-        assert_eq!(key(r"C:\Users\matias"), "other", "home is not a project");
-        assert_eq!(key("(no project)"), "other");
-        assert_eq!(key(""), "other");
+    fn groups_are_the_project_folder_name_never_other() {
+        assert_eq!(project_group_key(r"C:\dev\Ankar"), "Ankar");
+        assert_eq!(project_group_key(r"C:\Users\Matias\code\OLAP"), "OLAP");
+        assert_eq!(project_group_key(r"C:\Users\Matias"), "Matias");
+        assert_eq!(project_group_key(r"C:\"), "C:");
+        assert_eq!(project_group_key("(no project)"), "C:");
+        assert_eq!(project_group_key(""), "C:");
     }
 }
