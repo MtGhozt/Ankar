@@ -167,6 +167,8 @@ pub struct TerminalSession {
     clipboard: Arc<Mutex<Option<String>>>,
     /// Last cell/button reported for motion, so pixels inside one cell stay quiet.
     last_motion: Option<(u16, u16, u8)>,
+    /// Process id of the shell (ConPTY child), root of the tree `procs` walks.
+    shell_pid: Option<u32>,
     pub colors: TermColors,
 }
 
@@ -210,6 +212,10 @@ impl TerminalSession {
         let agent = Arc::new(Mutex::new(AgentInfo::default()));
         let cwd_state = Arc::new(Mutex::new(cwd.clone()));
         let cwd_flag = cwd_state.clone();
+        #[cfg(windows)]
+        let shell_pid = pty.child_watcher().pid().map(|p| p.get());
+        #[cfg(not(windows))]
+        let shell_pid = None;
         let pty = OscTap::new(pty, agent.clone(), cwd_state.clone());
 
         let (event_sender, event_receiver) = mpsc::channel();
@@ -341,8 +347,13 @@ impl TerminalSession {
             window_size,
             clipboard,
             last_motion: None,
+            shell_pid,
             colors,
         })
+    }
+
+    pub fn shell_pid(&self) -> Option<u32> {
+        self.shell_pid
     }
 
     /// Text an app copied via OSC 52 since the last call.

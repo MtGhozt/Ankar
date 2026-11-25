@@ -145,7 +145,7 @@ fn load_texture(ctx: &Context, name: &str, bytes: &[u8], px: u32) -> Option<Text
 
 /// Lucide fallback icon, its color, and the embedded logo key for a tab.
 pub fn agent_visual(tab: &Tab, config: &Config) -> (Icon, Color32, Option<&'static str>) {
-    let name = tab.session_name.to_lowercase();
+    let name = tab.shown_name().to_lowercase();
     let cmd = tab.command.as_deref().unwrap_or("").to_lowercase();
     let hay = format!("{name} {cmd} {}", tab.profile_id);
 
@@ -180,7 +180,7 @@ pub fn agent_visual(tab: &Tab, config: &Config) -> (Icon, Color32, Option<&'stat
     if hay.contains("copilot") {
         return (Icon::Bot, ui_theme::TEXT, Some("copilot"));
     }
-    if tab.command.is_some() {
+    if tab.command.is_some() || tab.detected.is_some() {
         return (Icon::Bot, ui_theme::TEXT_MUTED, None);
     }
     (Icon::Terminal, ui_theme::TEXT_MUTED, None)

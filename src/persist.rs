@@ -243,6 +243,7 @@ fn restore_tab(
         activity: None,
         exit_code: None,
         status_changed_at: std::time::Instant::now(),
+        detected: None,
     })
 }
 

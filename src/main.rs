@@ -9,6 +9,7 @@ mod logos;
 mod notify;
 mod palette;
 mod persist;
+mod procs;
 mod shell;
 mod sidebar;
 mod stats;

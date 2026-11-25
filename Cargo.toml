@@ -33,6 +33,10 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 rusqlite = { version = "0.37", features = ["bundled"] }
 jiff = "1"
 
+# Already in the tree (alacritty_terminal, eframe): used for the Toolhelp32 process snapshot.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Diagnostics_ToolHelp"] }
+
 [profile.release]
 lto = true
 codegen-units = 1

@@ -432,7 +432,7 @@ pub fn draw(
         if !q.is_empty() {
             let hay = format!(
                 "{} {} {} {}",
-                tab.session_name,
+                tab.shown_name(),
                 tab.title,
                 tab.command.as_deref().unwrap_or(""),
                 tab.project_key
@@ -1141,7 +1141,7 @@ fn draw_session_row(
         paint_status_badge(ui, badge_center, tab.status);
 
         if sidebar.rename_idx != Some(idx) {
-            let title = ellipsize(ui, &tab.session_name, title_font.clone(), text_w);
+            let title = ellipsize(ui, tab.shown_name(), title_font.clone(), text_w);
             painter.text(
                 egui::pos2(text_left, title_y),
                 Align2::LEFT_CENTER,

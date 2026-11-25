@@ -208,6 +208,7 @@ dependencies = [
  "serde_json",
  "syntect",
  "toml",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

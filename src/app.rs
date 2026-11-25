@@ -27,6 +27,8 @@ pub struct AnkarApp {
     /// Sidebar visibility last frame, to spot the discrete layout jump.
     last_sidebar_show: bool,
     status: StatusTracker,
+    /// Last foreground-process probe (at most one per second).
+    last_probe: std::time::Instant,
     palette: CommandPalette,
     files: FileViewer,
     logos: LogoAtlas,
@@ -63,6 +65,7 @@ impl AnkarApp {
             show_profile_menu: false,
             last_sidebar_show: true,
             status: StatusTracker::default(),
+            last_probe: std::time::Instant::now(),
             palette: CommandPalette::default(),
             files: FileViewer::default(),
             logos,
@@ -145,6 +148,10 @@ impl eframe::App for AnkarApp {
             .tick(&mut self.workspace, &self.config, focused);
         if let Ok(mut store) = self.ankar_stats.lock() {
             store.tick(&self.workspace);
+        }
+        if self.last_probe.elapsed() >= Duration::from_secs(1) {
+            self.last_probe = std::time::Instant::now();
+            crate::procs::detect_active(&mut self.workspace);
         }
         ui.ctx()
             .request_repaint_after(std::time::Duration::from_secs(1));
@@ -589,10 +596,10 @@ fn draw_tab_bar(
             );
             let title_right = close_rect.left() - 4.0;
 
-            let title = if tab.session_name.is_empty() {
+            let title = if tab.shown_name().is_empty() {
                 tab.title.clone()
             } else {
-                tab.session_name.clone()
+                tab.shown_name().to_owned()
             };
 
             if selected {

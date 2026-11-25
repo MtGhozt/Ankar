@@ -49,6 +49,15 @@ pub struct Tab {
     pub activity: Option<String>,
     pub exit_code: Option<i32>,
     pub status_changed_at: Instant,
+    /// Launcher name of the agent a plain terminal is running right now (see `procs`). Not saved.
+    pub detected: Option<String>,
+}
+
+impl Tab {
+    /// Name for the tab and the sidebar row: the running agent, else the session name.
+    pub fn shown_name(&self) -> &str {
+        self.detected.as_deref().unwrap_or(&self.session_name)
+    }
 }
 
 pub struct Workspace {
@@ -152,6 +161,7 @@ impl Workspace {
             activity: None,
             exit_code: None,
             status_changed_at: Instant::now(),
+            detected: None,
         });
         self.active_tab = self.tabs.len() - 1;
         self.mark_dirty();
@@ -208,6 +218,7 @@ impl Workspace {
             activity: None,
             exit_code: None,
             status_changed_at: Instant::now(),
+            detected: None,
         });
         self.active_tab = self.tabs.len() - 1;
         self.mark_dirty();
