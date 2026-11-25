@@ -704,7 +704,7 @@ impl eframe::App for AnkarApp {
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         if let Ok(mut store) = self.ankar_stats.lock() {
-            store.flush();
+            store.flush_sync();
         }
         if self.workspace.should_persist() {
             let _ = persist::save_workspace(&self.workspace, &self.sidebar.archived);

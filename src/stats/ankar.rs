@@ -7,7 +7,7 @@ use crate::terminal::AgentState;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 const VERSION: u32 = 1;
@@ -115,17 +115,37 @@ impl AnkarStatsStore {
         }
     }
 
+    /// Serialize now, write on a thread (the frame must not wait for the disk).
     pub fn flush(&mut self) {
+        if let Some(bytes) = self.take_bytes() {
+            let path = self.path.clone();
+            std::thread::spawn(move || write_logged(&path, &bytes));
+        }
+    }
+
+    /// Same, but written before returning (app exit).
+    pub fn flush_sync(&mut self) {
+        if let Some(bytes) = self.take_bytes() {
+            write_logged(&self.path, &bytes);
+        }
+    }
+
+    fn take_bytes(&mut self) -> Option<Vec<u8>> {
         if !self.dirty {
-            return;
+            return None;
         }
         prune_old(&mut self.data);
-        if let Err(e) = atomic_write(&self.path, &self.data) {
-            log::warn!("stats.json write failed: {e}");
-            return;
+        match serde_json::to_vec(&self.data) {
+            Ok(bytes) => {
+                self.dirty = false;
+                self.last_flush = Instant::now();
+                Some(bytes)
+            }
+            Err(e) => {
+                log::warn!("stats.json serialize failed: {e}");
+                None
+            }
         }
-        self.dirty = false;
-        self.last_flush = Instant::now();
     }
 
     /// Copy of the hour buckets, so the lock can be released before aggregating.
@@ -312,14 +332,18 @@ fn load_or_reset(path: &PathBuf) -> StatsFile {
     }
 }
 
-fn atomic_write(path: &PathBuf, data: &StatsFile) -> std::io::Result<()> {
+fn write_logged(path: &Path, bytes: &[u8]) {
+    if let Err(e) = atomic_write(path, bytes) {
+        log::warn!("stats.json write failed: {e}");
+    }
+}
+
+fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
     let tmp = path.with_extension("json.tmp");
-    let text = serde_json::to_string_pretty(data)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    fs::write(&tmp, text)?;
+    fs::write(&tmp, bytes)?;
     fs::rename(&tmp, path)?;
     Ok(())
 }
@@ -355,6 +379,27 @@ mod tests {
         assert_eq!(activity(None, Active), Activity::Busy);
         assert_eq!(activity(None, Waiting), Activity::Waiting);
         assert_eq!(activity(None, Finished), Activity::None);
+    }
+
+    #[test]
+    fn flush_sync_writes_compact_json_and_clears_dirty() {
+        let dir = std::env::temp_dir().join(format!("ankar_stats_flush_{}", std::process::id()));
+        let path = dir.join("stats.json");
+        let mut s = AnkarStatsStore {
+            data: StatsFile::default(),
+            dirty: true,
+            last_flush: Instant::now(),
+            last_tick: Instant::now(),
+            pending_secs: 0.0,
+            seen: HashSet::new(),
+            path: path.clone(),
+        };
+        s.flush_sync();
+        assert!(!s.dirty);
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(!text.contains('\n'));
+        assert_eq!(load_or_reset(&path).version, VERSION);
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
