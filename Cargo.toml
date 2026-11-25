@@ -18,6 +18,8 @@ eframe = { version = "0.37", default-features = false, features = [
 ] }
 egui = "0.37"
 alacritty_terminal = "0.26"
+# Same 3.x already pulled in by alacritty_terminal; needed to name the EventedReadWrite trait types.
+polling = "3"
 anyhow = "1"
 log = "0.4"
 env_logger = "0.11"

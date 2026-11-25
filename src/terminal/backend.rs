@@ -1,3 +1,4 @@
+use super::osc::{AgentInfo, OscTap};
 use super::theme::{indexed_256, TermColors};
 use alacritty_terminal::event::{Event, EventListener, Notify, OnResize, WindowSize};
 use alacritty_terminal::event_loop::{EventLoop, Msg, Notifier};
@@ -133,6 +134,8 @@ pub struct TerminalSession {
     cwd: Arc<Mutex<Option<PathBuf>>>,
     /// Latest non-cwd window title (agent activity).
     activity: Arc<Mutex<Option<String>>>,
+    /// Latest OSC 7501 agent report (state / session id / title).
+    agent: Arc<Mutex<AgentInfo>>,
     exit_code: Arc<Mutex<Option<i32>>>,
     /// Shared with the event thread so it can answer size queries (CSI 14/18 t).
     window_size: Arc<Mutex<WindowSize>>,
@@ -170,6 +173,9 @@ impl TerminalSession {
         let terminal_size = TerminalSize::default();
         let pty = tty::new(&pty_config, terminal_size.into(), id)
             .map_err(|e| anyhow::anyhow!("failed to open PTY for {program}: {e}"))?;
+
+        let agent = Arc::new(Mutex::new(AgentInfo::default()));
+        let pty = OscTap::new(pty, agent.clone());
 
         let (event_sender, event_receiver) = mpsc::channel();
         let event_proxy = EventProxy(event_sender);
@@ -295,6 +301,7 @@ impl TerminalSession {
             visible,
             cwd: cwd_state,
             activity: activity_state,
+            agent,
             exit_code: exit_code_state,
             window_size,
             clipboard,
@@ -332,6 +339,11 @@ impl TerminalSession {
 
     pub fn activity(&self) -> Option<String> {
         self.activity.lock().ok().and_then(|g| g.clone())
+    }
+
+    #[allow(dead_code)] // read by the status tracker in the next commit
+    pub fn agent(&self) -> AgentInfo {
+        self.agent.lock().map(|g| g.clone()).unwrap_or_default()
     }
 
     pub fn exit_code(&self) -> Option<i32> {

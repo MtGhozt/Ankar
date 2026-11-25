@@ -202,6 +202,7 @@ dependencies = [
  "jiff",
  "log",
  "notify-rust",
+ "polling",
  "rusqlite",
  "serde",
  "serde_json",

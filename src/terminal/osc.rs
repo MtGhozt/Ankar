@@ -1,0 +1,265 @@
+//! OpenCode reports its state with `ESC ] 7501 ; state=working:id=ses_..:app=opencode:title=<b64> ST`.
+//! alacritty_terminal only logs unknown OSCs, so a thin `Pty` wrapper scans the raw bytes first.
+
+use alacritty_terminal::event::{OnResize, WindowSize};
+use alacritty_terminal::tty::{ChildEvent, EventedPty, EventedReadWrite};
+use polling::{Event, PollMode, Poller};
+use std::io::{self, Read};
+use std::sync::{Arc, Mutex};
+
+/// Longer OSC payloads (OSC 52 clipboard, images) are skipped, not buffered.
+const MAX_OSC: usize = 4096;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AgentState {
+    Idle,
+    Working,
+    Clear,
+}
+
+/// Latest 7501 report. `state` stays `None` for PTYs that never send one.
+#[derive(Clone, Debug, Default)]
+pub struct AgentInfo {
+    pub state: Option<AgentState>,
+    pub session_id: Option<String>,
+    pub title: Option<String>,
+}
+
+#[derive(Clone, Copy)]
+enum Mode {
+    Ground,
+    Esc,
+    Osc,
+    OscEsc,
+}
+
+/// Byte-at-a-time OSC scanner; keeps its state between `feed` calls, so a sequence
+/// split across two reads still parses.
+pub struct OscScanner {
+    mode: Mode,
+    buf: Vec<u8>,
+    overflow: bool,
+    info: Arc<Mutex<AgentInfo>>,
+}
+
+impl OscScanner {
+    pub fn new(info: Arc<Mutex<AgentInfo>>) -> Self {
+        Self { mode: Mode::Ground, buf: Vec::new(), overflow: false, info }
+    }
+
+    pub fn feed(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.mode = match (self.mode, b) {
+                (Mode::Ground | Mode::Esc | Mode::OscEsc, 0x1b) => Mode::Esc,
+                (Mode::Esc, b']') | (Mode::OscEsc, b']') => {
+                    self.buf.clear();
+                    self.overflow = false;
+                    Mode::Osc
+                }
+                (Mode::OscEsc, b'\\') => self.finish(),
+                (Mode::Osc, 0x07) => self.finish(),
+                (Mode::Osc, 0x1b) => Mode::OscEsc,
+                (Mode::Osc, 0x18 | 0x1a) => Mode::Ground,
+                (Mode::Osc, _) => {
+                    if self.buf.len() < MAX_OSC {
+                        self.buf.push(b);
+                    } else {
+                        self.overflow = true;
+                    }
+                    Mode::Osc
+                }
+                _ => Mode::Ground,
+            };
+        }
+    }
+
+    fn finish(&mut self) -> Mode {
+        if !self.overflow {
+            if let Some(rest) = self.buf.strip_prefix(b"7501;") {
+                if let Ok(report) = std::str::from_utf8(rest) {
+                    if let Ok(mut info) = self.info.lock() {
+                        apply_report(&mut info, report);
+                    }
+                }
+            }
+        }
+        Mode::Ground
+    }
+}
+
+/// `key=value` pairs; OpenCode separates them with `:` (`;` is accepted too).
+/// Reports without a known `state` (the `7501;?` query) are ignored.
+fn apply_report(info: &mut AgentInfo, report: &str) {
+    let mut state = None;
+    let mut id = None;
+    let mut title = None;
+    for pair in report.split([':', ';']) {
+        match pair.split_once('=') {
+            Some(("state", "idle")) => state = Some(AgentState::Idle),
+            Some(("state", "working")) => state = Some(AgentState::Working),
+            Some(("state", "clear")) => state = Some(AgentState::Clear),
+            Some(("id", v)) => id = Some(v.to_owned()),
+            Some(("title", v)) => title = decode_base64(v),
+            _ => {}
+        }
+    }
+    match state {
+        Some(AgentState::Clear) => *info = AgentInfo { state, ..AgentInfo::default() },
+        Some(_) => {
+            info.state = state;
+            info.session_id = id.or(info.session_id.take());
+            info.title = title.or(info.title.take());
+        }
+        None => {}
+    }
+}
+
+/// Standard or URL-safe base64, padding optional; `None` if it is not UTF-8 text.
+fn decode_base64(s: &str) -> Option<String> {
+    let (mut out, mut acc, mut bits) = (Vec::new(), 0u32, 0u32);
+    for c in s.bytes().take_while(|&c| c != b'=') {
+        let v = match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'+' | b'-' => 62,
+            b'/' | b'_' => 63,
+            _ => return None,
+        };
+        acc = acc << 6 | v as u32;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+            acc &= (1 << bits) - 1;
+        }
+    }
+    String::from_utf8(out).ok().filter(|t| !t.trim().is_empty())
+}
+
+/// Wraps a `Pty` so every chunk the event loop reads also goes through the scanner.
+pub struct OscTap<P: EventedPty + OnResize> {
+    // Raw pointer so the reader wrapper and the pty can both be reached from `&mut self`.
+    // It comes from `Box::into_raw` and is freed in `Drop`; it is only used from the
+    // event-loop thread, through `&mut OscTap`, so accesses never overlap.
+    pty: *mut P,
+    reader: TapReader<P>,
+}
+
+// SAFETY: `OscTap` owns the pointee exclusively, so it is as `Send` as `P` itself.
+unsafe impl<P: EventedPty + OnResize + Send> Send for OscTap<P> {}
+
+impl<P: EventedPty + OnResize> OscTap<P> {
+    pub fn new(pty: P, info: Arc<Mutex<AgentInfo>>) -> Self {
+        let pty = Box::into_raw(Box::new(pty));
+        Self { pty, reader: TapReader { pty, scanner: OscScanner::new(info) } }
+    }
+
+    fn pty(&mut self) -> &mut P {
+        // SAFETY: see the field comment.
+        unsafe { &mut *self.pty }
+    }
+}
+
+impl<P: EventedPty + OnResize> Drop for OscTap<P> {
+    fn drop(&mut self) {
+        // SAFETY: allocated in `new`, never freed elsewhere.
+        drop(unsafe { Box::from_raw(self.pty) });
+    }
+}
+
+pub struct TapReader<P: EventedReadWrite> {
+    pty: *mut P,
+    scanner: OscScanner,
+}
+
+impl<P: EventedReadWrite> Read for TapReader<P> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        // SAFETY: only called through `OscTap::reader(&mut self)`; see `OscTap::pty`.
+        let n = unsafe { &mut *self.pty }.reader().read(buf)?;
+        self.scanner.feed(&buf[..n]);
+        Ok(n)
+    }
+}
+
+impl<P: EventedPty + OnResize> EventedReadWrite for OscTap<P> {
+    type Reader = TapReader<P>;
+    type Writer = P::Writer;
+
+    unsafe fn register(&mut self, poll: &Arc<Poller>, event: Event, mode: PollMode) -> io::Result<()> {
+        self.pty().register(poll, event, mode)
+    }
+
+    fn reregister(&mut self, poll: &Arc<Poller>, event: Event, mode: PollMode) -> io::Result<()> {
+        self.pty().reregister(poll, event, mode)
+    }
+
+    fn deregister(&mut self, poll: &Arc<Poller>) -> io::Result<()> {
+        self.pty().deregister(poll)
+    }
+
+    fn reader(&mut self) -> &mut Self::Reader {
+        &mut self.reader
+    }
+
+    fn writer(&mut self) -> &mut Self::Writer {
+        self.pty().writer()
+    }
+}
+
+impl<P: EventedPty + OnResize> EventedPty for OscTap<P> {
+    fn next_child_event(&mut self) -> Option<ChildEvent> {
+        self.pty().next_child_event()
+    }
+}
+
+impl<P: EventedPty + OnResize> OnResize for OscTap<P> {
+    fn on_resize(&mut self, window_size: WindowSize) {
+        self.pty().on_resize(window_size)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scan(chunks: &[&[u8]]) -> AgentInfo {
+        let info = Arc::new(Mutex::new(AgentInfo::default()));
+        let mut scanner = OscScanner::new(info.clone());
+        for c in chunks {
+            scanner.feed(c);
+        }
+        let out = info.lock().unwrap().clone();
+        out
+    }
+
+    #[test]
+    fn parses_bel_and_st_split_across_reads() {
+        let a = scan(&[b"junk\x1b]7501;state=working:id=ses_1:app=opencode:title=TmV3IHNlc3Npb24=\x07"]);
+        assert_eq!(a.state, Some(AgentState::Working));
+        assert_eq!(a.session_id.as_deref(), Some("ses_1"));
+        assert_eq!(a.title.as_deref(), Some("New session"));
+
+        let b = scan(&[b"\x1b]75", b"01;state=id", b"le:app=opencode\x1b", b"\\"]);
+        assert_eq!(b.state, Some(AgentState::Idle));
+    }
+
+    #[test]
+    fn clear_wipes_and_queries_are_ignored() {
+        let a = scan(&[
+            b"\x1b]7501;state=working:id=ses_1:title=SGk=\x07",
+            b"\x1b]7501;?\x07",
+            b"\x1b]99;i=x:p=?;\x07",
+            b"\x1b]52;c;aGVsbG8=\x07",
+        ]);
+        assert_eq!((a.state, a.title.as_deref()), (Some(AgentState::Working), Some("Hi")));
+        let b = scan(&[b"\x1b]7501;state=working:title=SGk=\x07\x1b]7501;state=clear:id=ses_1\x07"]);
+        assert_eq!(b.state, Some(AgentState::Clear));
+        assert!(b.title.is_none() && b.session_id.is_none());
+    }
+
+    #[test]
+    fn plain_ptys_stay_none() {
+        assert!(scan(&[b"hello\x1b[31mworld\x1b[0m\x1b]0;title\x07"]).state.is_none());
+    }
+}

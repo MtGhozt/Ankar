@@ -1,5 +1,6 @@
 mod backend;
 mod bindings;
+mod osc;
 mod theme;
 mod view;
 
