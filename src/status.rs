@@ -6,6 +6,8 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 const MIN_WORK_FOR_TOAST: Duration = Duration::from_secs(30);
+/// No OSC 7501 for this long while "working" means the agent is gone.
+const AGENT_STALE: Duration = Duration::from_secs(5 * 60);
 
 /// Track previous statuses so we only notify on transitions.
 pub struct StatusTracker {
@@ -53,8 +55,13 @@ impl StatusTracker {
                 let agent = session.agent();
                 match agent.state {
                     // An agent that reports its own state (OSC 7501) beats the guesswork.
-                    Some(AgentState::Working) => any_working = true,
-                    Some(AgentState::Idle | AgentState::Clear) => any_waiting = true,
+                    // ...but a Working that went silent for 5 min is stale (agent crashed or quit).
+                    Some(AgentState::Working)
+                        if agent.updated.is_some_and(|t| t.elapsed() < AGENT_STALE) =>
+                    {
+                        any_working = true
+                    }
+                    Some(_) => any_waiting = true,
                     None => {
                         if session.saw_bell() || session.idle_for() >= timeout {
                             any_waiting = true;

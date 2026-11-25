@@ -1,4 +1,5 @@
 use super::osc::{AgentInfo, OscTap};
+use super::resize::ResizeDebouncer;
 use super::theme::{indexed_256, TermColors};
 use alacritty_terminal::event::{Event, EventListener, Notify, OnResize, WindowSize};
 use alacritty_terminal::event_loop::{EventLoop, Msg, Notifier};
@@ -20,8 +21,25 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 const MAX_SCROLLBACK: usize = 50_000;
-/// The PTY (ConPTY / the TUI) only hears about a new size once it has been stable this long.
-pub const RESIZE_DEBOUNCE: Duration = Duration::from_millis(100);
+
+/// What `TerminalSession::resize` did this frame.
+pub enum ResizeState {
+    Idle,
+    /// A new size is waiting for the debounce: repaint after it elapses.
+    Pending,
+    /// Grid and PTY were just resized together: repaint so the TUI's redraw shows up.
+    Applied,
+}
+
+impl ResizeState {
+    fn from_pending(pending: bool) -> Self {
+        if pending {
+            Self::Pending
+        } else {
+            Self::Idle
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug)]
 pub struct CellMetrics {
@@ -120,10 +138,10 @@ impl Default for Snapshot {
 pub struct TerminalSession {
     term: Arc<FairMutex<Term<EventProxy>>>,
     size: TerminalSize,
-    /// Last size the PTY was told about (`None` until the first resize).
-    pty_size: Option<TerminalSize>,
-    /// Set while `size` is newer than `pty_size`; restarted on every change.
-    pending_resize: Option<Instant>,
+    /// Debounces layout size changes; `size` above is the one applied to grid AND PTY.
+    debounce: ResizeDebouncer,
+    /// Next `resize` applies immediately (drag released, panel toggled).
+    apply_now: bool,
     notifier: Notifier,
     snapshot: Snapshot,
     exited: Arc<AtomicBool>,
@@ -293,8 +311,8 @@ impl TerminalSession {
         Ok(Self {
             term,
             size: terminal_size,
-            pty_size: None,
-            pending_resize: None,
+            debounce: ResizeDebouncer::default(),
+            apply_now: false,
             notifier,
             snapshot: Snapshot::default(),
             exited,
@@ -370,52 +388,42 @@ impl TerminalSession {
         term.scroll_display(Scroll::Delta(lines));
     }
 
-    /// Updates the grid at once, but tells the PTY only after the size is stable
-    /// (see `RESIZE_DEBOUNCE`; the first size goes out immediately). Returns true while a
-    /// resize is still pending, so the caller must repaint after the debounce.
-    pub fn resize(&mut self, pixel_w: f32, pixel_h: f32, metrics: CellMetrics) -> bool {
+    /// Follows the layout size. While it is still changing the old grid keeps being painted
+    /// (clipped / background-padded by the view); `apply_size` runs once it is stable.
+    pub fn resize(&mut self, pixel_w: f32, pixel_h: f32, metrics: CellMetrics) -> ResizeState {
         let cell_w = metrics.width.max(1.0);
         let cell_h = metrics.height.max(1.0);
         let cols = (pixel_w / cell_w).floor() as u16;
         let lines = (pixel_h / cell_h).floor() as u16;
-        let changed = cols != self.size.num_cols
-            || lines != self.size.num_lines
-            || (self.size.cell_width - cell_w).abs() >= 0.01
-            || (self.size.cell_height - cell_h).abs() >= 0.01;
-        if cols != 0 && lines != 0 && changed {
-            self.size = TerminalSize {
-                cell_width: cell_w,
-                cell_height: cell_h,
-                num_cols: cols,
-                num_lines: lines,
-            };
-            if let Ok(mut g) = self.window_size.lock() {
-                *g = self.size.into();
-            }
-            self.term.lock().resize(TermSize::new(cols as usize, lines as usize));
-            self.pending_resize = Some(Instant::now());
-            if self.pty_size.is_none() {
-                self.flush_resize();
-            }
+        if cols == 0 || lines == 0 {
+            return ResizeState::from_pending(self.debounce.is_pending());
         }
-        if self.pending_resize.is_some_and(|t| t.elapsed() >= RESIZE_DEBOUNCE) {
-            self.flush_resize();
+        let immediate = std::mem::take(&mut self.apply_now);
+        if let Some((cols, lines)) = self.debounce.update((cols, lines), Instant::now(), immediate) {
+            self.apply_size(cols, lines, cell_w, cell_h);
+            return ResizeState::Applied;
         }
-        self.pending_resize.is_some()
+        ResizeState::from_pending(self.debounce.is_pending())
     }
 
-    /// Sends the pending size to the PTY now (no-op if it already has that size).
-    pub fn flush_resize(&mut self) {
-        if self.pending_resize.take().is_none() {
-            return;
+    /// Skip the debounce on the next `resize` (drag released, panel shown/hidden).
+    pub fn apply_next_resize_now(&mut self) {
+        self.apply_now = true;
+    }
+
+    /// The only place that changes the size: grid first, then the PTY, so they never differ.
+    fn apply_size(&mut self, cols: u16, lines: u16, cell_w: f32, cell_h: f32) {
+        self.size = TerminalSize {
+            cell_width: cell_w,
+            cell_height: cell_h,
+            num_cols: cols,
+            num_lines: lines,
+        };
+        if let Ok(mut g) = self.window_size.lock() {
+            *g = self.size.into();
         }
-        let same = self
-            .pty_size
-            .is_some_and(|s| s.num_cols == self.size.num_cols && s.num_lines == self.size.num_lines);
-        if !same {
-            self.notifier.on_resize(self.size.into());
-            self.pty_size = Some(self.size);
-        }
+        self.term.lock().resize(TermSize::new(cols as usize, lines as usize));
+        self.notifier.on_resize(self.size.into());
     }
 
     pub fn sync(&mut self) -> &Snapshot {

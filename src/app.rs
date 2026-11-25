@@ -23,6 +23,8 @@ pub struct AnkarApp {
     config_load_failed: bool,
     sidebar: SidebarState,
     show_profile_menu: bool,
+    /// (sidebar, files) visibility last frame, to spot discrete layout jumps.
+    last_panels: (bool, bool),
     status: StatusTracker,
     palette: CommandPalette,
     files: FileViewer,
@@ -58,6 +60,7 @@ impl AnkarApp {
                 s
             },
             show_profile_menu: false,
+            last_panels: (true, false),
             status: StatusTracker::default(),
             palette: CommandPalette::default(),
             files: FileViewer::default(),
@@ -279,7 +282,7 @@ impl eframe::App for AnkarApp {
                     Config::clamp_sidebar_width(width + dx, window_w).min(max_w);
             }
             if resize.drag_stopped() {
-                flush_pty_resizes(&mut self.workspace);
+                resize_now(&mut self.workspace);
                 if !self.config_load_failed {
                     let _ = self.config.save();
                 }
@@ -322,7 +325,7 @@ impl eframe::App for AnkarApp {
                     Config::clamp_files_width(width - dx, window_w).min(max_w);
             }
             if resize.drag_stopped() {
-                flush_pty_resizes(&mut self.workspace);
+                resize_now(&mut self.workspace);
                 if !self.config_load_failed {
                     let _ = self.config.save();
                 }
@@ -412,6 +415,13 @@ impl eframe::App for AnkarApp {
             }
         }
 
+        // Showing/hiding a panel is a discrete jump: no point debouncing it.
+        let panels = (self.sidebar.show, self.files.show);
+        if panels != self.last_panels {
+            self.last_panels = panels;
+            resize_now(&mut self.workspace);
+        }
+
         egui::CentralPanel::default()
             .frame(Frame::NONE.fill(ui_theme::BG))
             .show(ui, |ui| {
@@ -459,10 +469,10 @@ impl eframe::App for AnkarApp {
     }
 }
 
-/// Drag released: the PTYs get the final size now instead of waiting for the debounce.
-fn flush_pty_resizes(workspace: &mut Workspace) {
+/// Drag released / panel toggled: the next layout size is applied at once, not debounced.
+fn resize_now(workspace: &mut Workspace) {
     for session in workspace.tabs.iter_mut().flat_map(|t| t.sessions.values_mut()) {
-        session.flush_resize();
+        session.apply_next_resize_now();
     }
 }
 

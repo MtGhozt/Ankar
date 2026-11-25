@@ -6,6 +6,7 @@ use alacritty_terminal::tty::{ChildEvent, EventedPty, EventedReadWrite};
 use polling::{Event, PollMode, Poller};
 use std::io::{self, Read};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 /// Longer OSC payloads (OSC 52 clipboard, images) are skipped, not buffered.
 const MAX_OSC: usize = 4096;
@@ -23,6 +24,8 @@ pub struct AgentInfo {
     pub state: Option<AgentState>,
     pub session_id: Option<String>,
     pub title: Option<String>,
+    /// When the last report arrived; a `Working` that stays silent for too long is stale.
+    pub updated: Option<Instant>,
 }
 
 #[derive(Clone, Copy)]
@@ -104,8 +107,11 @@ fn apply_report(info: &mut AgentInfo, report: &str) {
         }
     }
     match state {
-        Some(AgentState::Clear) => *info = AgentInfo { state, ..AgentInfo::default() },
+        Some(AgentState::Clear) => {
+            *info = AgentInfo { state, updated: Some(Instant::now()), ..AgentInfo::default() }
+        }
         Some(_) => {
+            info.updated = Some(Instant::now());
             info.state = state;
             info.session_id = id.or(info.session_id.take());
             info.title = title.or(info.title.take());
