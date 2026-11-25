@@ -4,6 +4,7 @@ use crate::config::Config;
 use crate::files::{self, FileViewer};
 use crate::folder_pick::{self, PickFor};
 use crate::footer::{self, FooterAction, ShellFooter};
+use crate::inbox::Inbox;
 use crate::launchers;
 use crate::layout::{LayoutNode, SessionStatus, SplitDir, Workspace};
 use crate::logos::LogoAtlas;
@@ -42,6 +43,7 @@ pub struct AnkarApp {
     /// Git facts for the active tab's repo (footer chips, "± +N -N" button, changes pane).
     git: GitWatch,
     changes: ChangesPane,
+    inbox: Inbox,
     /// Font size and when it was set, for the "12 px" toast.
     zoom_toast: Option<(f32, std::time::Instant)>,
     /// Tab the file viewer pane was opened in; it shows only there.
@@ -99,6 +101,7 @@ impl AnkarApp {
             footer: ShellFooter::default(),
             git: GitWatch::default(),
             changes: ChangesPane::default(),
+            inbox: Inbox::default(),
             zoom_toast: None,
             pane_tab: None,
             last_pane_layout: (false, false),
@@ -260,7 +263,7 @@ impl eframe::App for AnkarApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let focused = ui.input(|i| i.focused);
         self.status
-            .tick(&mut self.workspace, &self.config, focused);
+            .tick(&mut self.workspace, &self.config, focused, &mut self.inbox);
         if let Ok(mut store) = self.ankar_stats.lock() {
             store.tick(&self.workspace);
         }
@@ -354,13 +357,21 @@ impl eframe::App for AnkarApp {
                     &mut self.show_profile_menu,
                     &self.config,
                     &mut self.logos,
-                    changes.map(|c| (c, changes_shown)),
+                    BarRight { changes: changes.map(|c| (c, changes_shown)), inbox_open: self.inbox.is_open() },
                 );
                 if clicks.stats {
                     self.stats.toggle();
                 }
                 if clicks.changes {
                     self.toggle_changes(changes_shown);
+                }
+                if clicks.inbox {
+                    self.inbox.toggle();
+                }
+                if let Some(id) = self.inbox.show(ui.ctx(), clicks.inbox_rect, active_id) {
+                    if let Some(i) = self.workspace.tabs.iter().position(|t| t.id == id) {
+                        self.workspace.active_tab = i;
+                    }
                 }
             });
 
@@ -686,6 +697,8 @@ const MIN_TAB_WIDTH: f32 = 96.0;
 const WIN_BTN_W: f32 = 46.0;
 /// Fixed slot at the right edge: stats icon (22 px), gap, 3 caption buttons.
 const RIGHT_ICONS_W: f32 = 22.0 + 6.0 + 3.0 * WIN_BTN_W;
+/// Notifications icon and its gap, left of the stats icon.
+const INBOX_W: f32 = 22.0 + 6.0;
 const TAB_BAR_H: f32 = ui_theme::BAR_H;
 /// Caption-button hover for close, as in Windows.
 const CLOSE_RED: Color32 = Color32::from_rgb(0xE8, 0x11, 0x23);
@@ -700,8 +713,9 @@ fn draw_tab_bar(
     show_menu: &mut bool,
     config: &Config,
     logos: &mut LogoAtlas,
-    changes: Option<((u32, u32), bool)>,
+    right: BarRight,
 ) -> BarClicks {
+    let BarRight { changes, inbox_open } = right;
     let bar_rect = ui.max_rect();
     // Registered first, so every control added later wins the pointer; what is left of the
     // bar is the window's drag handle (double click toggles maximize).
@@ -730,7 +744,7 @@ fn draw_tab_bar(
     // The right icons get their own slot; tabs shrink and are clipped to what is left, so
     // they can never slide under the icons and steal their hover.
     let right_rect = egui::Rect::from_min_max(
-        egui::pos2(content.right() - RIGHT_ICONS_W - changes_w, content.top()),
+        egui::pos2(content.right() - RIGHT_ICONS_W - INBOX_W - changes_w, content.top()),
         content.max,
     );
     let left_rect = egui::Rect::from_min_max(
@@ -940,6 +954,14 @@ fn draw_tab_bar(
             {
                 clicks.stats = true;
             }
+            ui.add_space(6.0);
+            let (rect, resp) = ui.allocate_exact_size(Vec2::splat(22.0), Sense::click());
+            if resp.hovered() || inbox_open {
+                ui.painter().rect_filled(rect, CornerRadius::same(ui_theme::RADIUS_KBD), ui_theme::HOVER);
+            }
+            crate::inbox::paint_inbox_icon(ui.painter(), rect.center(), ui_theme::TEXT_MUTED);
+            clicks.inbox = resp.on_hover_text("Notifications").clicked();
+            clicks.inbox_rect = rect;
             if let Some((galley, open)) = changes_label {
                 ui.add_space(6.0);
                 clicks.changes = changes::bar_button(ui, galley, open).clicked();
@@ -964,11 +986,26 @@ fn draw_tab_bar(
     clicks
 }
 
+/// State of the right-hand tab-bar buttons: the repo's (+N, -N) and whether the changes pane
+/// shows here (`None` outside a git repo), and whether the inbox is open.
+struct BarRight {
+    changes: Option<((u32, u32), bool)>,
+    inbox_open: bool,
+}
+
 /// Right-hand tab-bar buttons clicked this frame.
-#[derive(Default)]
 struct BarClicks {
     stats: bool,
     changes: bool,
+    inbox: bool,
+    /// Where the inbox icon sits, to hang its panel under it.
+    inbox_rect: egui::Rect,
+}
+
+impl Default for BarClicks {
+    fn default() -> Self {
+        Self { stats: false, changes: false, inbox: false, inbox_rect: egui::Rect::NOTHING }
+    }
 }
 
 /// Where the tab bar's left controls go.

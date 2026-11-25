@@ -11,6 +11,7 @@ mod dir_picker;
 mod folder_pick;
 mod footer;
 mod gitinfo;
+mod inbox;
 mod logging;
 mod logos;
 mod notify;

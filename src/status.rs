@@ -1,4 +1,5 @@
 use crate::config::Config;
+use crate::inbox::{Inbox, Kind};
 use crate::layout::{SessionStatus, Workspace};
 use crate::notify;
 use crate::terminal::AgentState;
@@ -63,7 +64,7 @@ impl Default for StatusTracker {
 }
 
 impl StatusTracker {
-    pub fn tick(&mut self, workspace: &mut Workspace, config: &Config, window_focused: bool) {
+    pub fn tick(&mut self, workspace: &mut Workspace, config: &Config, window_focused: bool, inbox: &mut Inbox) {
         let timeout = Duration::from_secs(config.waiting_timeout_secs.max(1));
         let notify_ok = self.started.elapsed() >= Duration::from_secs(3);
         for tab in &mut workspace.tabs {
@@ -117,12 +118,16 @@ impl StatusTracker {
             if s.reported == Some(true) {
                 self.working_since.entry(tab.id).or_insert_with(Instant::now);
             } else if let Some(since) = self.working_since.remove(&tab.id) {
-                if config.notifications
-                    && notify_ok
-                    && new_status == SessionStatus::Waiting
-                    && since.elapsed() >= MIN_WORK_FOR_TOAST
-                {
-                    notify::session_status_changed(&tab.session_name, new_status, window_focused);
+                if notify_ok && new_status == SessionStatus::Waiting && since.elapsed() >= MIN_WORK_FOR_TOAST {
+                    inbox.push(Kind::Done, tab.id, &tab.session_name, format!("{} finished working", tab.session_name));
+                    if config.notifications {
+                        notify::session_status_changed(&tab.session_name, new_status, window_focused);
+                    }
+                }
+            }
+            if notify_ok && new_status == SessionStatus::Finished && tab.status != SessionStatus::Finished {
+                if let Some(code) = tab.exit_code.filter(|&c| c != 0) {
+                    inbox.push(Kind::Error, tab.id, &tab.session_name, format!("{} exited with code {code}", tab.session_name));
                 }
             }
             tab.status = new_status;
