@@ -1,5 +1,5 @@
 use super::osc::{AgentInfo, OscTap};
-use super::resize::{grid_size, ResizeDebouncer};
+use super::resize::{grid_size, hold_frame, ResizeDebouncer};
 use super::theme::{indexed_256, TermColors};
 use alacritty_terminal::event::{Event, EventListener, Notify, OnResize, WindowSize};
 use alacritty_terminal::event_loop::{EventLoop, Msg, Notifier};
@@ -148,6 +148,9 @@ pub struct TerminalSession {
     debounce: ResizeDebouncer,
     /// Next `resize` applies immediately (drag released, panel toggled).
     apply_now: bool,
+    /// When `apply_size` last ran while a frame was on screen; `sync` keeps that frame until
+    /// the app has redrawn (`resize::hold_frame`).
+    applied_at: Option<Instant>,
     notifier: Notifier,
     snapshot: Snapshot,
     exited: Arc<AtomicBool>,
@@ -352,6 +355,7 @@ impl TerminalSession {
             size: terminal_size,
             debounce: ResizeDebouncer::default(),
             apply_now: false,
+            applied_at: None,
             notifier,
             snapshot: Snapshot::default(),
             exited,
@@ -472,12 +476,28 @@ impl TerminalSession {
         }
         self.term.lock().resize(TermSize::new(cols as usize, lines as usize));
         self.notifier.on_resize(self.size.into());
+        if !self.snapshot.cells.is_empty() {
+            self.applied_at = Some(Instant::now());
+        }
+    }
+
+    /// True while `sync` is still returning the pre-resize frame; repaint soon.
+    pub fn holding_frame(&self) -> bool {
+        self.applied_at.is_some()
     }
 
     pub fn sync(&mut self) -> &Snapshot {
         if !self.visible.load(Ordering::Relaxed) {
+            self.applied_at = None;
             self.release_snapshot();
             return &self.snapshot;
+        }
+        if let Some(applied_at) = self.applied_at {
+            let last_output = self.last_output.lock().map(|t| *t).unwrap_or(applied_at);
+            if hold_frame(Instant::now(), applied_at, last_output) {
+                return &self.snapshot;
+            }
+            self.applied_at = None;
         }
 
         let term = self.term.lock();

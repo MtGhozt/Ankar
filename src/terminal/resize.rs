@@ -19,6 +19,20 @@ pub fn grid_size(pixel_w: f32, pixel_h: f32, cell_w: f32, cell_h: f32) -> Option
     Some((cols, lines))
 }
 
+/// Longest a TUI's redraw is waited for after a resize.
+const HOLD_MAX: Duration = Duration::from_millis(200);
+/// Output silence that means the redraw is done.
+const SETTLE: Duration = Duration::from_millis(30);
+
+/// After `apply_size` the grid is blank or half-redrawn until the app repaints it; keep painting
+/// the last frame until its output goes quiet, never longer than `HOLD_MAX`.
+pub fn hold_frame(now: Instant, applied_at: Instant, last_output: Instant) -> bool {
+    if now.saturating_duration_since(applied_at) >= HOLD_MAX {
+        return false;
+    }
+    last_output <= applied_at || now.saturating_duration_since(last_output) < SETTLE
+}
+
 #[derive(Default)]
 pub struct ResizeDebouncer {
     applied: Option<(u16, u16)>,
@@ -78,6 +92,18 @@ mod tests {
             }
             assert_eq!(self.grid, self.pty);
         }
+    }
+
+    #[test]
+    fn the_old_frame_is_held_until_the_redraw_settles_or_200_ms() {
+        let t0 = Instant::now();
+        let ms = |n| t0 + Duration::from_millis(n);
+        let before = t0 - Duration::from_millis(500);
+        assert!(hold_frame(ms(5), t0, before), "the app has not redrawn yet");
+        assert!(hold_frame(ms(40), t0, ms(20)), "output 20 ms ago: still drawing");
+        assert!(!hold_frame(ms(60), t0, ms(20)), "quiet for 40 ms: show the new frame");
+        assert!(!hold_frame(ms(200), t0, ms(199)), "never longer than 200 ms");
+        assert!(!hold_frame(ms(250), t0, before), "an app that never redraws is not waited on");
     }
 
     #[test]

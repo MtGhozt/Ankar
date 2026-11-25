@@ -229,14 +229,9 @@ impl Launcher {
 }
 
 impl Config {
-    /// Sidebar width in logical px: min 200, max 40% of the window.
-    pub fn clamp_sidebar_width(width: f32, window_width: f32) -> f32 {
-        let max_w = (window_width * 0.4).max(200.0);
-        width.clamp(200.0, max_w)
-    }
-
-    pub fn max_sidebar_width(window_width: f32) -> f32 {
-        Self::clamp_sidebar_width(f32::MAX, window_width)
+    /// Sidebar width in logical px.
+    pub fn clamp_sidebar_width(width: f32) -> f32 {
+        width.clamp(180.0, 420.0)
     }
 
     pub fn config_dir() -> anyhow::Result<PathBuf> {
@@ -268,7 +263,7 @@ impl Config {
             let text = fs::read_to_string(&path)?;
             match toml::from_str::<Config>(&text) {
                 Ok(mut cfg) => {
-                    cfg.sidebar_width = Self::clamp_sidebar_width(cfg.sidebar_width, 1837.33);
+                    cfg.sidebar_width = Self::clamp_sidebar_width(cfg.sidebar_width);
                     cfg.merge_default_launchers();
                     Ok((cfg, false))
                 }
@@ -342,7 +337,7 @@ font_size = {font_size}
 # Scrollback lines per terminal (default 2000; hard cap 50000)
 scrollback_lines = {scrollback_lines}
 
-# Sidebar width in logical px (min 200, max 40% of window) — drag the edge to resize (shared by Sessions and Files)
+# Sidebar width in logical px (180–420) — drag the edge to resize (shared by Sessions and Files)
 sidebar_width = {sidebar_width}
 
 # Dim unfocused split panes
@@ -392,6 +387,13 @@ color = "#8A8A8A"
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sidebar_width_is_clamped_to_180_420() {
+        assert_eq!(Config::clamp_sidebar_width(50.0), 180.0);
+        assert_eq!(Config::clamp_sidebar_width(300.0), 300.0);
+        assert_eq!(Config::clamp_sidebar_width(900.0), 420.0);
+    }
 
     #[test]
     fn junie_is_added_to_an_existing_config_and_has_a_logo() {

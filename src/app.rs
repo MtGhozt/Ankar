@@ -236,13 +236,8 @@ impl eframe::App for AnkarApp {
 
         // Manual panel widths — egui's built-in SidePanel resize fought PanelState
         // and bounced on release. We own the width via exact_size + drag handles.
-        let window_w = ui
-            .ctx()
-            .input(|i| i.viewport().inner_rect.map(|r| r.width()))
-            .unwrap_or(1100.0);
         if self.sidebar.show {
-            let max_w = Config::max_sidebar_width(window_w);
-            let width = Config::clamp_sidebar_width(self.config.sidebar_width, window_w);
+            let width = Config::clamp_sidebar_width(self.config.sidebar_width);
             let panel = egui::Panel::left("sidebar_v6")
                 .exact_size(width)
                 .resizable(false)
@@ -270,8 +265,7 @@ impl eframe::App for AnkarApp {
             );
             if resize.dragged() {
                 let dx = ui.input(|i| i.pointer.delta().x);
-                self.config.sidebar_width =
-                    Config::clamp_sidebar_width(width + dx, window_w).min(max_w);
+                self.config.sidebar_width = Config::clamp_sidebar_width(width + dx);
             }
             if resize.drag_stopped() {
                 resize_now(&mut self.workspace);

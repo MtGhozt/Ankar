@@ -37,6 +37,41 @@ pub enum SidebarView {
 const VIEW_BAR_H: f32 = ui_theme::BAR_H;
 /// Sessions | Files icon row under the header.
 const SWITCH_ROW_H: f32 = 34.0;
+const ROW_H: f32 = 40.0;
+/// Session row: the relative time ends this far from the row's right edge (296 at the default width).
+const TIME_INSET: f32 = 13.33;
+/// Natural width of the search field and the filter pills (mockup); they never stretch.
+const CONTROL_W: f32 = 297.33;
+
+/// 6 px left inset, 5 px right.
+fn control_width(row_w: f32) -> f32 {
+    (row_w - 11.0).min(CONTROL_W)
+}
+
+/// Vertical centres and x anchors inside a session row.
+struct RowLayout {
+    icon_y: f32,
+    title_y: f32,
+    sub_y: f32,
+    time_right: f32,
+    archive_x: f32,
+    pin_x: f32,
+}
+
+/// The time hugs the right edge at any width; on hover archive and pin sit just left of it.
+fn row_layout(row: Rect, time_w: f32) -> RowLayout {
+    let mid = row.center().y;
+    let time_right = row.right() - TIME_INSET;
+    let archive_x = time_right - time_w - 6.0 - 9.0;
+    RowLayout {
+        icon_y: mid,
+        title_y: mid - 8.33,
+        sub_y: mid + 8.33,
+        time_right,
+        archive_x,
+        pin_x: archive_x - 20.0,
+    }
+}
 const TOGGLE_SIZE: f32 = 28.0;
 /// Left inset of the toggle, a bit further right than the edge like Warp.
 const TOGGLE_LEFT: f32 = 14.0;
@@ -355,7 +390,7 @@ pub fn draw(
     let search_id = search_field_id();
     let row = ui.available_rect_before_wrap();
     let (search_row, _) = ui.allocate_exact_size(Vec2::new(row.width(), 29.33), Sense::click());
-    let search_w = (search_row.width() - side_l - 5.0).max(180.0);
+    let search_w = control_width(search_row.width());
     let search_rect = Rect::from_min_size(
         egui::pos2(search_row.left() + side_l, search_row.top()),
         Vec2::new(search_w, 29.33),
@@ -910,8 +945,7 @@ fn draw_filter_bar(
     let row = ui.available_rect_before_wrap();
     let (row_rect, _) = ui.allocate_exact_size(Vec2::new(row.width(), 28.0), Sense::hover());
     let side_l = 6.0;
-    let side_r = 5.0;
-    let bar_w = (row_rect.width() - side_l - side_r).max(180.0);
+    let bar_w = control_width(row_rect.width());
     let bar = Rect::from_min_size(
         egui::pos2(row_rect.left() + side_l, row_rect.top()),
         Vec2::new(bar_w, 28.0),
@@ -1108,7 +1142,6 @@ fn draw_session_row(
     let Some(tab) = workspace.tabs.get(idx) else {
         return;
     };
-    const ROW_H: f32 = 40.0;
     let selected = idx == workspace.active_tab;
     let (agent_icon, agent_color, logo_key) = crate::logos::agent_visual(tab, config);
     let logo_tex = logo_key.and_then(|k| logos.get(ui.ctx(), k, 18.0));
@@ -1121,20 +1154,23 @@ fn draw_session_row(
     // Not `resp.hovered()`: that turns false while the pointer is on the pin/archive buttons.
     let row_hovered = ui.rect_contains_pointer(resp.rect);
 
-    // Icon 26.7 box at x 10.67; glyph ≈18 centered. Title baseline ≈ icon_top + 20.
-    let icon_rect = Rect::from_min_size(
-        egui::pos2(row_rect.left() + 10.67, row_rect.top() + 4.0),
-        Vec2::splat(26.7),
-    );
     let title_font = FontId::new(ui_theme::SIZE_UI, FontFamily::Proportional);
     let sub_font = FontId::new(ui_theme::SIZE_UI_SMALL, FontFamily::Proportional);
-    let title_y = icon_rect.top() + 13.5;
-    let sub_y = title_y + 16.67;
+    let time_galley = ui
+        .painter()
+        .layout_no_wrap(rel, sub_font.clone(), ui_theme::TEXT_MUTED);
+    let l = row_layout(row_rect, time_galley.size().x);
+    // Icon 26.7 box at x 10.67; glyph ≈18 centered.
+    let icon_rect = Rect::from_center_size(
+        egui::pos2(row_rect.left() + 10.67 + 13.35, l.icon_y),
+        Vec2::splat(26.7),
+    );
+    let (title_y, sub_y, time_right) = (l.title_y, l.sub_y, l.time_right);
     let text_left = row_rect.left() + 42.67;
-    let time_right = row_rect.left() + (296.0_f32).min(row_rect.width() - 8.0);
-    // On hover the pin/archive buttons take the time's place: keep the title clear of them.
-    let hover_pad = if row_hovered { 32.0 } else { 0.0 };
-    let text_w = (time_right - text_left - 8.0 - hover_pad).max(40.0);
+    // The title stops short of the time, and of the pin/archive buttons while hovered.
+    let title_end = if row_hovered { l.pin_x - 13.0 } else { time_right - time_galley.size().x - 8.0 };
+    let text_w = (title_end - text_left).max(40.0);
+    let sub_w = (time_right - text_left).max(40.0);
 
     if sidebar.rename_idx == Some(idx) {
         let edit_rect = Rect::from_min_size(
@@ -1212,7 +1248,7 @@ fn draw_session_row(
                 ui_theme::TEXT,
             );
         }
-        let sub_text = ellipsize(ui, &sub, sub_font.clone(), text_w);
+        let sub_text = ellipsize(ui, &sub, sub_font.clone(), sub_w);
         painter.text(
             egui::pos2(text_left, sub_y),
             Align2::LEFT_CENTER,
@@ -1221,16 +1257,15 @@ fn draw_session_row(
             sub_color,
         );
 
-        // Time on the title baseline; hover reveals archive/pin.
+        // Time on the title line; hover reveals archive/pin just left of it.
+        painter.galley(
+            egui::pos2(time_right - time_galley.size().x, title_y - time_galley.size().y * 0.5),
+            time_galley,
+            ui_theme::TEXT_MUTED,
+        );
         if row_hovered {
-            let archive_r = Rect::from_center_size(
-                egui::pos2(time_right - 10.0, title_y),
-                Vec2::splat(18.0),
-            );
-            let pin_r = Rect::from_center_size(
-                egui::pos2(time_right - 30.0, title_y),
-                Vec2::splat(18.0),
-            );
+            let archive_r = Rect::from_center_size(egui::pos2(l.archive_x, title_y), Vec2::splat(18.0));
+            let pin_r = Rect::from_center_size(egui::pos2(l.pin_x, title_y), Vec2::splat(18.0));
             let pin_ic = if tab.pinned {
                 Icon::PinOff
             } else {
@@ -1250,26 +1285,12 @@ fn draw_session_row(
                 FontId::new(14.0, FontFamily::Name(ui_theme::FONT_ICONS.into())),
                 ui_theme::TEXT_MUTED,
             );
-        } else {
-            painter.text(
-                egui::pos2(time_right, title_y),
-                Align2::RIGHT_CENTER,
-                rel,
-                sub_font,
-                ui_theme::TEXT_MUTED,
-            );
         }
     }
 
     if row_hovered {
-        let archive_r = Rect::from_center_size(
-            egui::pos2(time_right - 10.0, title_y),
-            Vec2::splat(18.0),
-        );
-        let pin_r = Rect::from_center_size(
-            egui::pos2(time_right - 30.0, title_y),
-            Vec2::splat(18.0),
-        );
+        let archive_r = Rect::from_center_size(egui::pos2(l.archive_x, title_y), Vec2::splat(18.0));
+        let pin_r = Rect::from_center_size(egui::pos2(l.pin_x, title_y), Vec2::splat(18.0));
         let a = ui.interact(archive_r, ui.scope_id().with(("arch", idx)), Sense::click());
         let p = ui.interact(pin_r, ui.scope_id().with(("pin", idx)), Sense::click());
         if a.clicked() {
@@ -1535,6 +1556,27 @@ mod tests {
         frame(ctx, sidebar, vec![egui::Event::PointerMoved(pos)]);
         frame(ctx, sidebar, vec![button(true)]);
         frame(ctx, sidebar, vec![button(false)]);
+    }
+
+    #[test]
+    fn wide_rows_keep_the_time_at_the_right_edge_and_icons_beside_it() {
+        for width in [180.0, 309.33, 420.0] {
+            let row = Rect::from_min_size(egui::pos2(0.0, 100.0), Vec2::new(width, ROW_H));
+            let l = row_layout(row, 14.0);
+            assert!((l.time_right - (row.right() - TIME_INSET)).abs() < 1e-3, "width {width}");
+            assert!(l.archive_x + 9.0 <= l.time_right - 14.0, "archive left of the time");
+            assert!(l.pin_x + 9.0 <= l.archive_x - 9.0, "pin left of archive");
+            let (top_pad, bottom_pad) = (l.title_y - row.top(), row.bottom() - l.sub_y);
+            assert!((top_pad - bottom_pad).abs() < 0.5, "two lines centred: {top_pad} vs {bottom_pad}");
+            assert!((l.icon_y - row.center().y).abs() < 0.5);
+        }
+    }
+
+    #[test]
+    fn search_and_filters_keep_their_natural_width() {
+        assert_eq!(control_width(420.0), CONTROL_W);
+        assert_eq!(control_width(309.33), CONTROL_W.min(309.33 - 11.0));
+        assert_eq!(control_width(180.0), 169.0);
     }
 
     #[test]

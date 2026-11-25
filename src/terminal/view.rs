@@ -13,6 +13,7 @@ use egui::{
     Color32, CornerRadius, FontId, Pos2, Rect, Sense, Shape, Stroke, Ui, Vec2,
 };
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 const FONT_FAMILY: egui::FontFamily = egui::FontFamily::Monospace;
 
@@ -82,6 +83,9 @@ impl TerminalView {
             content,
         );
         paint_grid(ui, &response, &painter, session, &font_id, metrics, content, focused);
+        if session.holding_frame() {
+            ui.ctx().request_repaint_after(Duration::from_millis(16));
+        }
         response
     }
 }
