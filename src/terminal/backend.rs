@@ -195,7 +195,9 @@ impl TerminalSession {
             .map_err(|e| anyhow::anyhow!("failed to open PTY for {program}: {e}"))?;
 
         let agent = Arc::new(Mutex::new(AgentInfo::default()));
-        let pty = OscTap::new(pty, agent.clone());
+        let cwd_state = Arc::new(Mutex::new(cwd.clone()));
+        let cwd_flag = cwd_state.clone();
+        let pty = OscTap::new(pty, agent.clone(), cwd_state.clone());
 
         let (event_sender, event_receiver) = mpsc::channel();
         let event_proxy = EventProxy(event_sender);
@@ -216,8 +218,6 @@ impl TerminalSession {
         let last_output_flag = last_output.clone();
         let visible = Arc::new(AtomicBool::new(true));
         let visible_flag = visible.clone();
-        let cwd_state = Arc::new(Mutex::new(cwd));
-        let cwd_flag = cwd_state.clone();
         let activity_state = Arc::new(Mutex::new(None::<String>));
         let activity_flag = activity_state.clone();
         let exit_code_state = Arc::new(Mutex::new(None::<i32>));

@@ -330,6 +330,11 @@ impl eframe::App for AnkarApp {
                 }
             });
 
+        let recent_dirs = if self.show_profile_menu {
+            recent_dirs(&self.workspace, self.files.root.as_ref())
+        } else {
+            Vec::new()
+        };
         if self.show_profile_menu {
             egui::Area::new(egui::Id::unique("profile_menu"))
                 .order(egui::Order::Foreground)
@@ -380,6 +385,29 @@ impl eframe::App for AnkarApp {
                                         &mut self.workspace,
                                         launcher,
                                         cwd.clone(),
+                                    );
+                                    self.show_profile_menu = false;
+                                }
+                            }
+                            ui.separator();
+                            ui.label(ui_theme::text_sub("New tab in"));
+                            for dir in &recent_dirs {
+                                let name = dir
+                                    .file_name()
+                                    .map(|n| n.to_string_lossy().into_owned())
+                                    .unwrap_or_else(|| dir.display().to_string());
+                                let resp = ui
+                                    .add(
+                                        egui::Button::new(ui_theme::text_title(name))
+                                            .frame(false),
+                                    )
+                                    .on_hover_text(dir.display().to_string());
+                                if resp.clicked() {
+                                    let profile = crate::shell::default_profile();
+                                    let _ = self.workspace.open_tab(
+                                        ui.ctx(),
+                                        &profile,
+                                        Some(dir.clone()),
                                     );
                                     self.show_profile_menu = false;
                                 }
@@ -443,6 +471,29 @@ impl eframe::App for AnkarApp {
             let _ = self.config.save();
         }
     }
+}
+
+/// Directories for the "+" menu: the Files root, open tab cwds, then home.
+fn recent_dirs(workspace: &Workspace, files_root: Option<&PathBuf>) -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    let mut push = |dir: PathBuf| {
+        if !dirs.contains(&dir) {
+            dirs.push(dir);
+        }
+    };
+    if let Some(root) = files_root {
+        push(root.clone());
+    }
+    for tab in &workspace.tabs {
+        if let Some(cwd) = &tab.cwd {
+            push(cwd.clone());
+        }
+    }
+    if let Some(home) = dirs::home_dir() {
+        push(home);
+    }
+    dirs.truncate(6);
+    dirs
 }
 
 /// Drag released / panel toggled: the next layout size is applied at once, not debounced.

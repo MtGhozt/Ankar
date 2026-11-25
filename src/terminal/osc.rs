@@ -5,6 +5,7 @@ use alacritty_terminal::event::{OnResize, WindowSize};
 use alacritty_terminal::tty::{ChildEvent, EventedPty, EventedReadWrite};
 use polling::{Event, PollMode, Poller};
 use std::io::{self, Read};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -43,11 +44,13 @@ pub struct OscScanner {
     buf: Vec<u8>,
     overflow: bool,
     info: Arc<Mutex<AgentInfo>>,
+    /// Same slot the OSC title parser writes: OSC 7 updates it mid-command.
+    cwd: Arc<Mutex<Option<PathBuf>>>,
 }
 
 impl OscScanner {
-    pub fn new(info: Arc<Mutex<AgentInfo>>) -> Self {
-        Self { mode: Mode::Ground, buf: Vec::new(), overflow: false, info }
+    pub fn new(info: Arc<Mutex<AgentInfo>>, cwd: Arc<Mutex<Option<PathBuf>>>) -> Self {
+        Self { mode: Mode::Ground, buf: Vec::new(), overflow: false, info, cwd }
     }
 
     pub fn feed(&mut self, bytes: &[u8]) {
@@ -84,9 +87,76 @@ impl OscScanner {
                         apply_report(&mut info, report);
                     }
                 }
+            } else if let Some(rest) = self.buf.strip_prefix(b"7;") {
+                // Keep everything after `7;`: a path may itself contain `;`.
+                if let Ok(payload) = std::str::from_utf8(rest) {
+                    if let Some(path) = parse_osc7(payload) {
+                        if let Ok(mut guard) = self.cwd.lock() {
+                            *guard = Some(path);
+                        }
+                    }
+                }
             }
         }
         Mode::Ground
+    }
+}
+
+/// `file://<host>/<percent-encoded-path>` → local path. Remote hosts are ignored.
+fn parse_osc7(payload: &str) -> Option<PathBuf> {
+    let rest = payload.strip_prefix("file://")?;
+    let slash = rest.find('/')?;
+    let (host, path) = (&rest[..slash], &rest[slash..]);
+    if !is_local_host(host) || path.is_empty() || path == "/" {
+        return None;
+    }
+    let decoded = percent_decode(path);
+    // `file:///C:/foo` → `C:/foo` on Windows.
+    let path = if decoded.len() >= 3 && decoded.as_bytes()[0] == b'/' && decoded.as_bytes()[2] == b':'
+    {
+        decoded[1..].to_string()
+    } else {
+        decoded
+    };
+    Some(PathBuf::from(path))
+}
+
+fn is_local_host(host: &str) -> bool {
+    let matches = |var: &str| {
+        std::env::var(var)
+            .map(|name| name.eq_ignore_ascii_case(host))
+            .unwrap_or(false)
+    };
+    host.is_empty()
+        || host.eq_ignore_ascii_case("localhost")
+        || matches("COMPUTERNAME")
+        || matches("HOSTNAME")
+}
+
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(hi), Some(lo)) = (hex(bytes[i + 1]), hex(bytes[i + 2])) {
+                out.push(hi << 4 | lo);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn hex(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
     }
 }
 
@@ -156,9 +226,13 @@ pub struct OscTap<P: EventedPty + OnResize> {
 unsafe impl<P: EventedPty + OnResize + Send> Send for OscTap<P> {}
 
 impl<P: EventedPty + OnResize> OscTap<P> {
-    pub fn new(pty: P, info: Arc<Mutex<AgentInfo>>) -> Self {
+    pub fn new(
+        pty: P,
+        info: Arc<Mutex<AgentInfo>>,
+        cwd: Arc<Mutex<Option<PathBuf>>>,
+    ) -> Self {
         let pty = Box::into_raw(Box::new(pty));
-        Self { pty, reader: TapReader { pty, scanner: OscScanner::new(info) } }
+        Self { pty, reader: TapReader { pty, scanner: OscScanner::new(info, cwd) } }
     }
 
     fn pty(&mut self) -> &mut P {
@@ -231,12 +305,41 @@ mod tests {
 
     fn scan(chunks: &[&[u8]]) -> AgentInfo {
         let info = Arc::new(Mutex::new(AgentInfo::default()));
-        let mut scanner = OscScanner::new(info.clone());
+        let mut scanner = OscScanner::new(info.clone(), Arc::new(Mutex::new(None)));
         for c in chunks {
             scanner.feed(c);
         }
         let out = info.lock().unwrap().clone();
         out
+    }
+
+    fn scan_cwd(chunks: &[&[u8]]) -> Option<PathBuf> {
+        let cwd = Arc::new(Mutex::new(None));
+        let mut scanner = OscScanner::new(Arc::new(Mutex::new(AgentInfo::default())), cwd.clone());
+        for c in chunks {
+            scanner.feed(c);
+        }
+        let out = cwd.lock().unwrap().clone();
+        out
+    }
+
+    #[test]
+    fn osc7_sets_the_same_cwd_slot_across_reads() {
+        assert_eq!(
+            scan_cwd(&[b"\x1b]7;file://localhost/C:/foo/bar\x07"]),
+            Some(PathBuf::from("C:/foo/bar"))
+        );
+        assert_eq!(
+            scan_cwd(&[b"\x1b]7;file://localhost/tmp/fo", b"o%20bar\x1b\\"]),
+            Some(PathBuf::from("/tmp/foo bar"))
+        );
+        assert_eq!(scan_cwd(&[b"\x1b]7;file://remote/C:/foo\x07"]), None);
+        // Empty host is local, and the leading slash before the drive is dropped.
+        assert_eq!(
+            scan_cwd(&[b"\x1b]7;file:///C:/trunc\x07"]),
+            Some(PathBuf::from("C:/trunc"))
+        );
+        assert_eq!(scan_cwd(&[b"\x1b]2;C:\\not-osc7\x07"]), None);
     }
 
     #[test]
