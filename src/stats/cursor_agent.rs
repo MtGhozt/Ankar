@@ -1,6 +1,6 @@
 //! cursor-agent local chats: meta.json timestamps only (no store.db, no auth).
 
-use super::{AgentRow, DayBucket, Source, StatsSnapshot};
+use super::{window_idx, AgentRow, DayBucket, Source, StatsSnapshot};
 use std::fs;
 use std::path::PathBuf;
 
@@ -17,26 +17,37 @@ pub fn chats_root() -> Option<PathBuf> {
     }
 }
 
+/// Per-window totals for one chats walk.
+#[derive(Default)]
+struct Acc {
+    chats: u64,
+    busy_secs: u64,
+    days: std::collections::HashMap<String, DayBucket>,
+}
+
+/// One walk of the chats folder; chats created in `[since_ms, until_ms)` go to `snaps[0]`
+/// (>= `split_ms`) or `snaps[1]` (before it).
 pub fn load_into(
-    snap: &mut StatsSnapshot,
+    snaps: &mut [StatsSnapshot],
     tz: &jiff::tz::TimeZone,
+    split_ms: i64,
     since_ms: i64,
     until_ms: i64,
 ) {
     let Some(root) = chats_root() else {
-        snap.warnings
+        snaps[0]
+            .warnings
             .push("cursor-agent: no local chats folder (~/.cursor/chats)".into());
         return;
     };
 
     let mut files = 0usize;
-    let mut chats = 0u64;
-    let mut busy_secs = 0u64;
-    let mut days: std::collections::HashMap<String, DayBucket> = std::collections::HashMap::new();
+    let mut accs: Vec<Acc> = snaps.iter().map(|_| Acc::default()).collect();
 
     // Two levels: chats/<hash>/<uuid>/meta.json
     let Ok(level1) = fs::read_dir(&root) else {
-        snap.warnings
+        snaps[0]
+            .warnings
             .push("cursor-agent: cannot read chats folder".into());
         return;
     };
@@ -85,16 +96,18 @@ pub fn load_into(
             if created < since_ms || created >= until_ms {
                 continue;
             }
-            chats = chats.saturating_add(1);
-            bump_activity(&mut snap.activity, tz, created);
+            let i = window_idx(split_ms, created, snaps.len());
+            let acc = &mut accs[i];
+            acc.chats = acc.chats.saturating_add(1);
+            bump_activity(&mut snaps[i].activity, tz, created);
 
             let updated = updated.unwrap_or(created).max(created);
             let dur_ms = (updated - created).clamp(0, 6 * 60 * 60 * 1000) as u64;
             let secs = dur_ms / 1000;
-            busy_secs = busy_secs.saturating_add(secs);
+            acc.busy_secs = acc.busy_secs.saturating_add(secs);
 
             let day = local_day(tz, created);
-            let d = days.entry(day.clone()).or_insert_with(|| DayBucket {
+            let d = acc.days.entry(day.clone()).or_insert_with(|| DayBucket {
                 day,
                 ..DayBucket::default()
             });
@@ -103,6 +116,17 @@ pub fn load_into(
         }
     }
 
+    for (snap, acc) in snaps.iter_mut().zip(accs) {
+        finish(snap, acc);
+    }
+}
+
+fn finish(snap: &mut StatsSnapshot, acc: Acc) {
+    let Acc {
+        chats,
+        busy_secs,
+        days,
+    } = acc;
     snap.sessions = snap.sessions.saturating_add(chats);
     snap.cursor_hours = busy_secs as f64 / 3600.0;
 

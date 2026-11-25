@@ -1,6 +1,6 @@
 //! Read-only OpenCode SQLite (`opencode.db`) — tokens, models, agents, activity.
 
-use super::{DayBucket, ModelRow, Source, AgentRow, StatsSnapshot, Tokens};
+use super::{window_idx, DayBucket, ModelRow, Source, AgentRow, StatsSnapshot, Tokens};
 use rusqlite::{Connection, OpenFlags};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -73,14 +73,17 @@ pub fn mtime_pair(path: &Path) -> (Option<u64>, Option<u64>) {
     (db, wal.or(wal2))
 }
 
+/// One scan of `[since_ms, until_ms)`; rows go to `snaps[0]` (>= `split_ms`) or `snaps[1]` (before it).
 pub fn load_into(
-    snap: &mut StatsSnapshot,
+    snaps: &mut [StatsSnapshot],
     tz: &jiff::tz::TimeZone,
+    split_ms: i64,
     since_ms: i64,
     until_ms: i64,
 ) {
     let Some(path) = db_path() else {
-        snap.warnings
+        snaps[0]
+            .warnings
             .push("OpenCode: database not found (~/.local/share/opencode/opencode.db)".into());
         return;
     };
@@ -93,7 +96,7 @@ pub fn load_into(
             match open_readonly(&path) {
                 Ok(c) => c,
                 Err(_) => {
-                    snap.warnings.push(format!(
+                    snaps[0].warnings.push(format!(
                         "OpenCode is writing or locked ({e}); retry in a moment"
                     ));
                     return;
@@ -109,21 +112,24 @@ pub fn load_into(
         tables.iter().any(|t| t == "session") && tables.iter().any(|t| t == "message");
 
     if !has_v2 && !has_v1 {
-        snap.warnings
+        snaps[0]
+            .warnings
             .push("OpenCode: no session_v2/session_message tables found".into());
         return;
     }
 
     let mut v2_ids: HashMap<String, ()> = HashMap::new();
     if has_v2 {
-        if let Err(e) = aggregate_v2(&conn, snap, tz, since_ms, until_ms, &mut v2_ids) {
-            snap.warnings
+        if let Err(e) = aggregate_v2(&conn, snaps, tz, split_ms, since_ms, until_ms, &mut v2_ids) {
+            snaps[0]
+                .warnings
                 .push(format!("OpenCode v2 query failed: {e}"));
         }
     }
     if has_v1 {
-        if let Err(e) = aggregate_v1(&conn, snap, tz, since_ms, until_ms, &v2_ids) {
-            snap.warnings
+        if let Err(e) = aggregate_v1(&conn, snaps, tz, split_ms, since_ms, until_ms, &v2_ids) {
+            snaps[0]
+                .warnings
                 .push(format!("OpenCode v1 query failed: {e}"));
         }
     }
@@ -170,10 +176,20 @@ fn table_names(conn: &Connection) -> Vec<String> {
     out
 }
 
+/// Per-window accumulators for the v2 message loop.
+#[derive(Default)]
+struct V2Acc {
+    models: HashMap<(String, String), ModelRow>,
+    agents: HashMap<String, AgentRow>,
+    days: HashMap<String, DayBucket>,
+    hours_ms: u64,
+}
+
 fn aggregate_v2(
     conn: &Connection,
-    snap: &mut StatsSnapshot,
+    snaps: &mut [StatsSnapshot],
     tz: &jiff::tz::TimeZone,
+    split_ms: i64,
     since_ms: i64,
     until_ms: i64,
     v2_ids: &mut HashMap<String, ()>,
@@ -181,17 +197,19 @@ fn aggregate_v2(
     // Session counts.
     {
         let mut stmt = conn.prepare(
-            "SELECT id, parent_id FROM session_v2
+            "SELECT id, parent_id, time_created FROM session_v2
              WHERE time_created >= ?1 AND time_created < ?2",
         )?;
         let rows = stmt.query_map(rusqlite::params![since_ms, until_ms], |r| {
             Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, Option<String>>(1)?,
+                r.get::<_, Option<i64>>(2)?.unwrap_or(0),
             ))
         })?;
         for row in rows.flatten() {
-            let (id, parent) = row;
+            let (id, parent, created) = row;
+            let snap = &mut snaps[window_idx(split_ms, created, snaps.len())];
             v2_ids.insert(id, ());
             if parent.is_none() {
                 snap.sessions = snap.sessions.saturating_add(1);
@@ -225,10 +243,7 @@ fn aggregate_v2(
     ";
 
     let mut stmt = conn.prepare(sql)?;
-    let mut models: HashMap<(String, String), ModelRow> = HashMap::new();
-    let mut agents: HashMap<String, AgentRow> = HashMap::new();
-    let mut days: HashMap<String, DayBucket> = HashMap::new();
-    let mut hours_ms: u64 = 0;
+    let mut accs: Vec<V2Acc> = snaps.iter().map(|_| V2Acc::default()).collect();
 
     let rows = stmt.query_map(rusqlite::params![since_ms, until_ms], |r| {
         Ok(MsgRow {
@@ -251,6 +266,14 @@ fn aggregate_v2(
     })?;
 
     for row in rows.flatten() {
+        let i = window_idx(split_ms, row.time_created, snaps.len());
+        let snap = &mut snaps[i];
+        let V2Acc {
+            models,
+            agents,
+            days,
+            hours_ms,
+        } = &mut accs[i];
         bump_activity(&mut snap.activity, tz, row.time_created);
         let day = local_day(tz, row.time_created);
         let day_e = days.entry(day.clone()).or_insert_with(|| DayBucket {
@@ -327,7 +350,7 @@ fn aggregate_v2(
             // Cap at 6h per message.
             if dur > 0 && dur <= 6 * 60 * 60 * 1000 {
                 let secs = (dur as u64) / 1000;
-                hours_ms = hours_ms.saturating_add(dur as u64);
+                *hours_ms = hours_ms.saturating_add(dur as u64);
                 a.busy_secs = a.busy_secs.saturating_add(secs);
                 day_e.busy_secs = day_e.busy_secs.saturating_add(secs);
             }
@@ -336,6 +359,19 @@ fn aggregate_v2(
         let _ = row.session_id;
     }
 
+    for (snap, acc) in snaps.iter_mut().zip(accs) {
+        finish_v2(snap, acc);
+    }
+    Ok(())
+}
+
+fn finish_v2(snap: &mut StatsSnapshot, acc: V2Acc) {
+    let V2Acc {
+        models,
+        agents,
+        days,
+        hours_ms,
+    } = acc;
     snap.opencode_hours = hours_ms as f64 / 3_600_000.0;
 
     let mut model_vec: Vec<ModelRow> = models.into_values().collect();
@@ -365,13 +401,13 @@ fn aggregate_v2(
     }
 
     merge_days(&mut snap.days, days);
-    Ok(())
 }
 
 fn aggregate_v1(
     conn: &Connection,
-    snap: &mut StatsSnapshot,
+    snaps: &mut [StatsSnapshot],
     tz: &jiff::tz::TimeZone,
+    split_ms: i64,
     since_ms: i64,
     until_ms: i64,
     v2_ids: &HashMap<String, ()>,
@@ -435,6 +471,7 @@ fn aggregate_v1(
             continue;
         }
         let t = t_created.unwrap_or(0);
+        let snap = &mut snaps[window_idx(split_ms, t, snaps.len())];
         bump_activity(&mut snap.activity, tz, t);
         if role == "user" {
             snap.prompts = snap.prompts.saturating_add(1);
@@ -606,15 +643,28 @@ mod tests {
     #[test]
     fn v2_sums() {
         let conn = mem_v2();
-        let mut snap = StatsSnapshot::default();
+        let mut snaps = [StatsSnapshot::default()];
         let mut ids = HashMap::new();
-        aggregate_v2(&conn, &mut snap, &jiff::tz::TimeZone::UTC, 0, 10_000, &mut ids).unwrap();
+        aggregate_v2(&conn, &mut snaps, &jiff::tz::TimeZone::UTC, 0, 0, 10_000, &mut ids).unwrap();
+        let snap = &snaps[0];
         assert_eq!(snap.sessions, 1);
         assert_eq!(snap.steps, 2);
         assert_eq!(snap.tokens.input, 30);
         assert_eq!(snap.tokens.output, 13);
         assert!(snap.cost > 0.0);
         assert!(!snap.models.is_empty());
+    }
+
+    #[test]
+    fn v2_splits_current_and_previous_window() {
+        let conn = mem_v2();
+        let mut snaps = [StatsSnapshot::default(), StatsSnapshot::default()];
+        let mut ids = HashMap::new();
+        aggregate_v2(&conn, &mut snaps, &jiff::tz::TimeZone::UTC, 1200, 0, 10_000, &mut ids)
+            .unwrap();
+        assert_eq!((snaps[0].steps, snaps[0].tokens.input), (1, 20));
+        assert_eq!((snaps[1].steps, snaps[1].tokens.input), (1, 10));
+        assert_eq!((snaps[0].sessions, snaps[1].sessions), (0, 1));
     }
 
     #[test]

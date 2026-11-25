@@ -15,6 +15,28 @@ pub use panel::StatsPanel;
 use serde::{Deserialize, Serialize};
 use std::time::SystemTime;
 
+/// Which snapshot a row at `time_ms` belongs to when one scan fills both windows:
+/// 0 = current (`>= split_ms`), 1 = previous. A single window is always 0.
+fn window_idx(split_ms: i64, time_ms: i64, windows: usize) -> usize {
+    if windows > 1 && time_ms < split_ms {
+        1
+    } else {
+        0
+    }
+}
+
+#[cfg(test)]
+mod window_tests {
+    use super::window_idx;
+
+    #[test]
+    fn rows_split_at_boundary() {
+        assert_eq!(window_idx(100, 100, 2), 0);
+        assert_eq!(window_idx(100, 99, 2), 1);
+        assert_eq!(window_idx(100, 0, 1), 0);
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Tokens {
     pub input: u64,

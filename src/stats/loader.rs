@@ -246,9 +246,15 @@ fn compute(range: StatsRange, ankar: &Arc<Mutex<AnkarStatsStore>>) -> StatsSnaps
 
     snap.range_label = range_label(range, since_ms, until_ms);
 
+    // One scan from prev_since to until fills both windows; rows before `since_ms` go to `prev`.
+    let with_prev = range.days().is_some() && prev_until > prev_since;
+    let scan_since = if with_prev { prev_since } else { since_ms };
+    let mut windows = [snap, StatsSnapshot::default()];
+    let n = if with_prev { 2 } else { 1 };
     let tz = jiff::tz::TimeZone::system();
-    opencode::load_into(&mut snap, &tz, since_ms, until_ms);
-    cursor_agent::load_into(&mut snap, &tz, since_ms, until_ms);
+    opencode::load_into(&mut windows[..n], &tz, since_ms, scan_since, until_ms);
+    cursor_agent::load_into(&mut windows[..n], &tz, since_ms, scan_since, until_ms);
+    let [mut snap, mut prev] = windows;
 
     // Hold the Ankar lock only to copy the hour buckets; the UI waits on it every frame.
     let hours = ankar.lock().ok().map(|store| store.hours_clone());
@@ -300,10 +306,7 @@ fn compute(range: StatsRange, ankar: &Arc<Mutex<AnkarStatsStore>>) -> StatsSnaps
     });
 
     // Previous window deltas (skip for All).
-    if range.days().is_some() && prev_until > prev_since {
-        let mut prev = StatsSnapshot::default();
-        opencode::load_into(&mut prev, &tz, prev_since, prev_until);
-        cursor_agent::load_into(&mut prev, &tz, prev_since, prev_until);
+    if with_prev {
         if let Some(hours) = &hours {
             let (busy, _, starts, _, _, _) =
                 AnkarStatsStore::snapshot_hours(hours, &tz, prev_since, prev_until);
