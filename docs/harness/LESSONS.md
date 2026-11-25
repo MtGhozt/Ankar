@@ -98,3 +98,11 @@ Root cause: headless egui tests dropped `FullOutput` with pending texture deltas
 asserts on that in debug only.
 Fix: tests clear `textures_delta` before dropping the output (40aa4a7).
 Guard: TESTING.md headless pattern; the gate runs `cargo test` in debug.
+
+## 2026-11-25 — One long chat ate the token budget
+Symptom: prompt 16 burned ~6% of Matias's monthly Cursor usage in a single conversation.
+Root cause: 11 steps in one chat (every tool call re-sends the growing context), full
+cargo/clippy/test output pasted in, re-reading large files, and extra tests or "double-check"
+passes nobody asked for.
+Fix: `AGENTS.md` § Token budget; `ankar-step` subagent; lesson recorded here (prompt 17).
+Guard: coordinator + subagents; quiet gate; narrow reads; report ≤10 lines per step.

@@ -59,6 +59,31 @@ Ankar is a Windows desktop terminal written in Rust: eframe/egui 0.37 (glow), al
 - Never claim something visual works unless you saw it; report it as "not verified by eye".
 - Work stays on the local branch; push only when Matias asks. One commit per step.
 
+## Token budget
+
+1. **Orchestrate, don't do.** For any prompt with more than 2 steps, the main chat is a
+   coordinator: it delegates each step to a subagent (one subagent per step, sequential, never
+   parallel on the same files) and keeps only the subagent's short report. Mechanical steps
+   (docs, logs, renames, small UI tweaks, config) go to the `ankar-step` subagent (Composer
+   2.5, no Fast); only hard steps (new modules, threading, parsing, tricky bugs) use Grok 4.7
+   Medium. The coordinator never reads source files itself beyond what it needs to brief the
+   subagent.
+2. **Subagent brief** = the step text + file hints + the gate. **Subagent report back** = max
+   ~10 lines: what changed, files, commit hash, gate result, anything blocked. No diffs, no logs
+   pasted back.
+3. **Read narrow.** Find code with `rg -n` and read only the line range needed. Never read a
+   whole file over ~300 lines. Don't re-read a file you just edited.
+4. **Quiet commands.** Iterate with `cargo check -q`. Gate once per step, at the end, quiet:
+   `cargo build --release -q`, `cargo clippy --all-targets -q -- -D warnings`, `cargo test -q`.
+   On failure, look only at the first error, not the full output.
+5. **No extra work.** No tests beyond what the prompt asks for (no smoke tests, no headless
+   render tests unless requested). No "let me verify the binary / double-check the commit"
+   passes: if `git commit` exits 0 and the gate passed, move on.
+6. **Short status.** No narration between tool calls. Final report: one line per step (commit
+   hash + one sentence) plus open issues.
+7. **One chat per 2–3 steps** if subagents aren't available: Matias opens a new chat with "do
+   steps X–Y of NN-*.md, read AGENTS.md first".
+
 ## Gate (every code commit)
 
 ```powershell
