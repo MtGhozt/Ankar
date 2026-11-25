@@ -1,5 +1,5 @@
 use super::osc::{AgentInfo, OscTap};
-use super::resize::ResizeDebouncer;
+use super::resize::{grid_size, ResizeDebouncer};
 use super::theme::{indexed_256, TermColors};
 use alacritty_terminal::event::{Event, EventListener, Notify, OnResize, WindowSize};
 use alacritty_terminal::event_loop::{EventLoop, Msg, Notifier};
@@ -390,14 +390,17 @@ impl TerminalSession {
 
     /// Follows the layout size. While it is still changing the old grid keeps being painted
     /// (clipped / background-padded by the view); `apply_size` runs once it is stable.
+    /// alacritty_terminal only reflows the primary grid (`grid.resize(!ALT_SCREEN, ..)`), so on
+    /// the alternate screen a resize just changes the dimensions — no rewrapped rows, no old
+    /// frames pushed into scrollback.
     pub fn resize(&mut self, pixel_w: f32, pixel_h: f32, metrics: CellMetrics) -> ResizeState {
+        let Some((cols, lines)) =
+            grid_size(pixel_w, pixel_h, metrics.width, metrics.height)
+        else {
+            return ResizeState::from_pending(self.debounce.is_pending());
+        };
         let cell_w = metrics.width.max(1.0);
         let cell_h = metrics.height.max(1.0);
-        let cols = (pixel_w / cell_w).floor() as u16;
-        let lines = (pixel_h / cell_h).floor() as u16;
-        if cols == 0 || lines == 0 {
-            return ResizeState::from_pending(self.debounce.is_pending());
-        }
         let immediate = std::mem::take(&mut self.apply_now);
         if let Some((cols, lines)) = self.debounce.update((cols, lines), Instant::now(), immediate) {
             self.apply_size(cols, lines, cell_w, cell_h);

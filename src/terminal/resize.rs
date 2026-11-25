@@ -6,6 +6,19 @@ use std::time::{Duration, Instant};
 
 pub const DEBOUNCE: Duration = Duration::from_millis(80);
 
+/// Grid size for a content rect: floor from the exact content area, `None` for a collapsed
+/// pane (0 rows/cols). Minimum 2 columns so a fullwidth character still fits.
+pub fn grid_size(pixel_w: f32, pixel_h: f32, cell_w: f32, cell_h: f32) -> Option<(u16, u16)> {
+    let cols = (pixel_w / cell_w.max(1.0)).floor();
+    let lines = (pixel_h / cell_h.max(1.0)).floor();
+    if !cols.is_finite() || !lines.is_finite() || cols < 1.0 || lines < 1.0 {
+        return None;
+    }
+    let cols = (cols as u32).clamp(2, u16::MAX as u32) as u16;
+    let lines = (lines as u32).min(u16::MAX as u32) as u16;
+    Some((cols, lines))
+}
+
 #[derive(Default)]
 pub struct ResizeDebouncer {
     applied: Option<(u16, u16)>,
@@ -65,6 +78,15 @@ mod tests {
             }
             assert_eq!(self.grid, self.pty);
         }
+    }
+
+    #[test]
+    fn zero_size_is_ignored_and_one_column_clamps() {
+        assert_eq!(grid_size(0.0, 200.0, 8.0, 16.0), None);
+        assert_eq!(grid_size(200.0, 0.0, 8.0, 16.0), None);
+        assert_eq!(grid_size(8.0, 16.0, 8.0, 16.0), Some((2, 1)));
+        // Floor, never round up into a partial cell.
+        assert_eq!(grid_size(23.9, 33.9, 8.0, 16.0), Some((2, 2)));
     }
 
     #[test]
