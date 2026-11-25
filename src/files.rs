@@ -21,6 +21,8 @@ struct DirEntryInfo {
     path: PathBuf,
     name: String,
     is_dir: bool,
+    /// Gitignored or conventionally ignored: still listed, painted italic and muted.
+    ignored: bool,
 }
 
 struct Syntect {
@@ -185,7 +187,8 @@ impl FileViewer {
         self.set_root(dirs::home_dir());
     }
 
-    pub fn draw(&mut self, ui: &mut Ui) {
+    /// Draw the pane. Returns a folder that asked for a new tab ("New tab here").
+    pub fn draw(&mut self, ui: &mut Ui) -> Option<PathBuf> {
         self.poll_load();
         if matches!(self.content, FileContent::Empty) && self.load_rx.is_none() {
             if let Some(path) = self.open_file.clone() {
@@ -196,7 +199,7 @@ impl FileViewer {
         // The X keeps its own slot; the (possibly long) path is truncated into what is left.
         let (header, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 28.0), Sense::hover());
         let close_rect = egui::Rect::from_center_size(
-            egui::pos2(header.right() - 10.0, header.center().y),
+            egui::pos2(header.right() - 14.0, header.center().y),
             Vec2::splat(20.0),
         );
         if let Some(root) = &self.root {
@@ -243,7 +246,7 @@ impl FileViewer {
         }
         let Some(root) = self.root.clone() else {
             ui.label(ui_theme::text_sub("No home folder."));
-            return;
+            return None;
         };
 
         ui.horizontal(|ui| {
@@ -287,18 +290,34 @@ impl FileViewer {
 
         let root = self.root.clone().unwrap_or(root);
         let mut clicked: Option<PathBuf> = None;
+        let mut new_tab: Option<PathBuf> = None;
+        // The viewer keeps room under the tree; with no file open the tree takes the pane.
+        let tree_h = if self.open_file.is_some() {
+            ui.available_height() * 0.35
+        } else {
+            ui.available_height()
+        };
         egui::ScrollArea::vertical()
             .id_salt("file_tree")
-            .max_height(ui.available_height() * 0.35)
+            .max_height(tree_h)
             .show(ui, |ui| {
-                draw_tree(
-                    ui,
-                    &root,
-                    self.open_file.as_ref(),
-                    &mut clicked,
-                    &mut self.dir_cache,
-                    &mut self.expanded,
-                );
+                // Highlighted root row reads as the tree header.
+                let root_name = root
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| root.display().to_string());
+                tree_row(ui, None, Icon::Folder, &root_name, true, false);
+                ui.indent(("tree_root", &root), |ui| {
+                    draw_tree(
+                        ui,
+                        &root,
+                        self.open_file.as_ref(),
+                        &mut clicked,
+                        &mut new_tab,
+                        &mut self.dir_cache,
+                        &mut self.expanded,
+                    );
+                });
             });
 
         if let Some(path) = clicked {
@@ -336,6 +355,7 @@ impl FileViewer {
                 }
             }
         }
+        new_tab
     }
 }
 
@@ -351,20 +371,26 @@ fn read_file_capped(path: &Path) -> std::io::Result<(String, bool)> {
     Ok((String::from_utf8_lossy(&buf).into_owned(), truncated))
 }
 
+/// Names that are ignored even without a `.gitignore` (kept visible, painted dim).
+const COMMON_IGNORED: &[&str] = &["node_modules", "dist", "target", "build", "__pycache__"];
+
 fn list_dir_cached(dir: &Path, cache: &mut HashMap<PathBuf, Vec<DirEntryInfo>>) -> Vec<DirEntryInfo> {
     if let Some(items) = cache.get(dir) {
         return items.clone();
     }
+    let rules = read_gitignore(dir);
     let mut items = Vec::new();
     if let Ok(entries) = fs::read_dir(dir) {
         for entry in entries.filter_map(|e| e.ok()) {
             let path = entry.path();
             let name = entry.file_name().to_string_lossy().into_owned();
-            if name.starts_with('.') || name == "target" || name == "node_modules" {
+            // `.git` is noisy; hidden files and gitignored entries stay visible but dimmed.
+            if name == ".git" {
                 continue;
             }
             let is_dir = path.is_dir();
-            items.push(DirEntryInfo { path, name, is_dir });
+            let ignored = name.starts_with('.') || is_dir_ignored(&rules, &name);
+            items.push(DirEntryInfo { path, name, is_dir, ignored });
         }
         items.sort_by_key(|e| (!e.is_dir, e.name.to_lowercase()));
     }
@@ -372,9 +398,78 @@ fn list_dir_cached(dir: &Path, cache: &mut HashMap<PathBuf, Vec<DirEntryInfo>>) 
     items
 }
 
+fn read_gitignore(dir: &Path) -> Vec<String> {
+    fs::read_to_string(dir.join(".gitignore"))
+        .map(|text| {
+            text.lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty() && !l.starts_with('#'))
+                .map(|l| l.trim_start_matches('/').trim_end_matches('/').to_lowercase())
+                .filter(|l| !l.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// shortcut: only the listed directory's own `.gitignore`; patterns containing `/`
+/// (sub-paths) and negations are not applied. Enough to dim common build output.
+fn is_dir_ignored(rules: &[String], name: &str) -> bool {
+    let lower = name.to_lowercase();
+    COMMON_IGNORED.contains(&lower.as_str()) || rules.iter().any(|rule| rule_matches(rule, &lower))
+}
+
+fn rule_matches(rule: &str, name: &str) -> bool {
+    let mut pat = rule;
+    for prefix in ["**/", "*/"] {
+        if let Some(rest) = pat.strip_prefix(prefix) {
+            pat = rest;
+        }
+    }
+    // Negations re-include; sub-path patterns cannot be applied to a single name.
+    if pat.starts_with('!') || pat.contains('/') {
+        return false;
+    }
+    glob_match(pat, name)
+}
+
+/// `*` and `?` on a single name (already lowercased).
+fn glob_match(pattern: &str, name: &str) -> bool {
+    let (p, n): (Vec<char>, Vec<char>) = (pattern.chars().collect(), name.chars().collect());
+    let (mut pi, mut ni) = (0, 0);
+    let mut star: Option<usize> = None;
+    let mut mark = 0;
+    while ni < n.len() {
+        if pi < p.len() && (p[pi] == '?' || p[pi] == n[ni]) {
+            pi += 1;
+            ni += 1;
+        } else if pi < p.len() && p[pi] == '*' {
+            star = Some(pi);
+            pi += 1;
+            mark = ni;
+        } else if let Some(s) = star {
+            pi = s + 1;
+            mark += 1;
+            ni = mark;
+        } else {
+            return false;
+        }
+    }
+    while pi < p.len() && p[pi] == '*' {
+        pi += 1;
+    }
+    pi == p.len()
+}
+
 /// A full-width row that is one click target. Its text is painted, not added as labels:
 /// selectable labels sense clicks themselves and would swallow the row's click.
-fn tree_row(ui: &mut Ui, chevron: Option<Icon>, icon: Icon, name: &str, selected: bool) -> egui::Response {
+fn tree_row(
+    ui: &mut Ui,
+    chevron: Option<Icon>,
+    icon: Icon,
+    name: &str,
+    selected: bool,
+    dim: bool,
+) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 24.0), Sense::click());
     let fill = if selected {
         ui_theme::SURFACE_SEL
@@ -387,6 +482,7 @@ fn tree_row(ui: &mut Ui, chevron: Option<Icon>, icon: Icon, name: &str, selected
     painter.rect_filled(rect, egui::CornerRadius::same(ui_theme::RADIUS_ROW), fill);
     let icons = |size| FontId::new(size, egui::FontFamily::Name(ui_theme::FONT_ICONS.into()));
     let y = rect.center().y;
+    let color = if dim { ui_theme::TEXT_FAINT } else { ui_theme::TEXT_MUTED };
     let mut x = rect.left() + 6.0;
     if let Some(chevron) = chevron {
         painter.text(
@@ -394,7 +490,7 @@ fn tree_row(ui: &mut Ui, chevron: Option<Icon>, icon: Icon, name: &str, selected
             egui::Align2::CENTER_CENTER,
             chevron.codepoint().to_string(),
             icons(12.0),
-            ui_theme::TEXT_MUTED,
+            color,
         );
         x += 20.0;
     }
@@ -403,14 +499,23 @@ fn tree_row(ui: &mut Ui, chevron: Option<Icon>, icon: Icon, name: &str, selected
         egui::Align2::CENTER_CENTER,
         icon.codepoint().to_string(),
         icons(14.0),
-        ui_theme::TEXT_MUTED,
+        color,
     );
-    painter.text(
-        egui::pos2(x + 22.0, y),
-        egui::Align2::LEFT_CENTER,
-        name,
-        FontId::proportional(ui_theme::SIZE_TITLE),
-        ui_theme::TEXT,
+    let text_color = if dim { ui_theme::TEXT_FAINT } else { ui_theme::TEXT };
+    let job = LayoutJob::single_section(
+        name.to_owned(),
+        TextFormat {
+            font_id: FontId::proportional(ui_theme::SIZE_TITLE),
+            color: text_color,
+            italics: dim,
+            ..Default::default()
+        },
+    );
+    let galley = ui.fonts_mut(|f| f.layout_job(job));
+    painter.galley(
+        egui::pos2(x + 22.0, y - galley.size().y * 0.5),
+        galley,
+        text_color,
     );
     resp
 }
@@ -420,6 +525,7 @@ fn draw_tree(
     dir: &Path,
     selected: Option<&PathBuf>,
     clicked: &mut Option<PathBuf>,
+    new_tab: &mut Option<PathBuf>,
     cache: &mut HashMap<PathBuf, Vec<DirEntryInfo>>,
     expanded: &mut HashSet<PathBuf>,
 ) {
@@ -429,7 +535,13 @@ fn draw_tree(
         if entry.is_dir {
             let open = expanded.contains(&entry.path);
             let chevron = if open { Icon::ChevronDown } else { Icon::ChevronRight };
-            let resp = tree_row(ui, Some(chevron), Icon::Folder, &entry.name, false);
+            let resp = tree_row(ui, Some(chevron), Icon::Folder, &entry.name, false, entry.ignored);
+            resp.context_menu(|ui| {
+                if ui.button("New tab here").clicked() {
+                    *new_tab = Some(entry.path.clone());
+                    ui.close();
+                }
+            });
             if resp.clicked() {
                 if open {
                     expanded.remove(&entry.path);
@@ -439,12 +551,12 @@ fn draw_tree(
             }
             if open {
                 ui.indent(entry.path.as_os_str(), |ui| {
-                    draw_tree(ui, &entry.path, selected, clicked, cache, expanded);
+                    draw_tree(ui, &entry.path, selected, clicked, new_tab, cache, expanded);
                 });
             }
         } else {
             let is_sel = selected == Some(&entry.path);
-            let resp = tree_row(ui, None, Icon::File, &entry.name, is_sel);
+            let resp = tree_row(ui, None, Icon::File, &entry.name, is_sel, entry.ignored);
             if resp.clicked() {
                 *clicked = Some(entry.path);
             }
@@ -505,4 +617,27 @@ fn highlight_lines(syntect: &Syntect, path: &Path, text: &str, truncated: bool) 
 fn syn_color(style: SynStyle) -> Color32 {
     // Dynamic colors from syntect theme — routed through ui_theme.
     ui_theme::rgb(style.foreground.r, style.foreground.g, style.foreground.b)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gitignore_rules_dim_names_without_hiding_them() {
+        let rules = vec![
+            "node_modules/".to_string(),
+            "*.log".to_string(),
+            "**/dist".to_string(),
+            "# comment".to_string(),
+            "src/gen".to_string(),
+        ];
+        assert!(is_dir_ignored(&rules, "node_modules"));
+        assert!(is_dir_ignored(&rules, "debug.log"));
+        assert!(is_dir_ignored(&rules, "dist"));
+        assert!(is_dir_ignored(&rules, "target")); // common fallback
+        assert!(!is_dir_ignored(&rules, "src")); // sub-path pattern is not a name match
+        assert!(!is_dir_ignored(&rules, "main.rs"));
+        assert!(glob_match("*.ts", "main.ts") && !glob_match("*.ts", "main.rs"));
+    }
 }

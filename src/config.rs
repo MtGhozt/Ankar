@@ -46,7 +46,7 @@ fn default_sidebar_width() -> f32 {
 }
 
 fn default_files_width() -> f32 {
-    280.0
+    240.0
 }
 
 fn default_true() -> bool {

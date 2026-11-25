@@ -13,6 +13,7 @@ use crate::ui_theme::{self, Icon};
 use egui::{
     Color32, Context, CornerRadius, Frame, Key, Modifiers, Sense, Stroke, Vec2,
 };
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -259,19 +260,20 @@ impl eframe::App for AnkarApp {
             }
         }
 
+        let mut new_tab_cwd: Option<PathBuf> = None;
         if self.files.show {
             let max_w = Config::max_files_width(window_w);
             let width = Config::clamp_files_width(self.config.files_width, window_w);
-            let panel = egui::Panel::right("files_v4")
+            let panel = egui::Panel::left("files_v4")
                 .exact_size(width)
                 .resizable(false)
                 .frame(
                     Frame::NONE
                         .fill(ui_theme::SURFACE_1)
-                        // Extra right/bottom air: the window edge eats a few px on Windows.
+                        // Air on the window edge; the drag handle sits on the right edge.
                         .inner_margin(egui::Margin {
-                            left: 8,
-                            right: 16,
+                            left: 16,
+                            right: 8,
                             top: 8,
                             bottom: 16,
                         }),
@@ -279,20 +281,20 @@ impl eframe::App for AnkarApp {
                 .show_separator_line(false)
                 .show(ui, |ui| {
                     ui.set_width(ui.available_width());
-                    self.files.draw(ui);
+                    new_tab_cwd = self.files.draw(ui);
                 });
 
             let resize = drag_resize_edge(
                 ui,
                 ui.scope_id().with("files_resize_v4"),
-                panel.response.rect.left(),
+                panel.response.rect.right(),
                 panel.response.rect.y_range(),
             );
             if resize.dragged() {
-                // Dragging the left edge rightward shrinks the right panel.
+                // Dragging the right edge rightward grows the pane.
                 let dx = ui.input(|i| i.pointer.delta().x);
                 self.config.files_width =
-                    Config::clamp_files_width(width - dx, window_w).min(max_w);
+                    Config::clamp_files_width(width + dx, window_w).min(max_w);
             }
             if resize.drag_stopped() {
                 resize_now(&mut self.workspace);
@@ -302,6 +304,10 @@ impl eframe::App for AnkarApp {
             }
         } else {
             self.files.release();
+        }
+        if let Some(cwd) = new_tab_cwd {
+            let profile = crate::shell::default_profile();
+            let _ = self.workspace.open_tab(ui.ctx(), &profile, Some(cwd));
         }
 
         // Tab bar over content only (midterm: 38 px, no sub-row under it).
