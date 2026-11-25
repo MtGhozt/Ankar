@@ -107,7 +107,11 @@ passes nobody asked for.
 Fix: `AGENTS.md` § Token budget; `ankar-step` subagent; lesson recorded here (prompt 17).
 Guard: coordinator + subagents; quiet gate; narrow reads; report ≤10 lines per step.
 
-## 2026-11-25 — an "inherit" subagent in 19 ran on Grok 4.7 High Fast, so unpinned subagents are banned.
+## 2026-11-25 — Unpinned subagent used the wrong model
+Symptom: prompt 19's "inherit" subagent ran on Grok 4.7 High Fast.
+Root cause: subagent type was not pinned to `ankar-step` / `ankar-hard`.
+Fix: coordinator rule — unpinned subagents and High/Fast variants are banned.
+Guard: AGENTS.md § Token budget.
 
 ## 2026-11-25 — Footer cwd stuck on spawn directory
 Symptom: the footer cwd never moved after cd from the picker.
@@ -122,3 +126,27 @@ Symptom: footer chip menus were hard to click near the screen edge.
 Root cause: egui popup areas opened downward and could sit under the taskbar.
 Fix: footer cd and branch popups pivot upward (`clamp_footer_popup_anchor`, `LEFT_BOTTOM`).
 Guard: FEATURES.md footer chips; eye-check on a taskbar-autohide setup.
+
+## 2026-11-25 — Stale `target\release\ankar.exe` after the gate
+Symptom: a manual run of `target\release\ankar.exe` looked like an old build.
+Root cause: in the Cursor sandbox `CARGO_TARGET_DIR` points at a temp `cargo-target` tree.
+Fix: run `$env:CARGO_TARGET_DIR\release\ankar.exe` when verifying after the gate.
+Guard: § Token budget quiet gate; this entry.
+
+## 2026-11-25 — `ctx.fonts()` in `AnkarApp::new` panics in release
+Symptom: release `ankar.exe` exited on startup (58d0f5b).
+Root cause: egui 0.37 — no fonts until the first `Context::run()`; `ui_theme::sync_cell_metrics` called too early.
+Fix: measure fonts on the first frame (`terminal/view.rs`); not in `new`.
+Guard: never `fonts()` / `fonts_mut()` from `AnkarApp::new`.
+
+## 2026-11-25 — Subagents ran `cargo fmt` on the whole repo
+Symptom: unrelated files reformatted in a docs-only step.
+Root cause: `cargo fmt` without a path touches every Rust file.
+Fix: subagents do not run `cargo fmt` on the repo.
+Guard: step briefs; mechanical edits only touch listed files.
+
+## 2026-11-25 — `git add -A` staged untracked harness trees
+Symptom: docs/prompts, docs/design, or examples would have landed in a commit.
+Root cause: those folders are untracked but present in the working tree.
+Fix: `git add` only the files edited in the step.
+Guard: AGENTS.md after every task; this entry.

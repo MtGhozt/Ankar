@@ -95,12 +95,12 @@ What exists today, by theme. Update when behaviour changes; keep it short.
 - Right of the tabs: "± +N -N" (in a git repo), inbox, stats, caption buttons.
 - Command palette (Ctrl+Shift+K): tabs, profiles, launchers, actions, archived sessions,
   "Open log folder", "Debug: check colors (log)".
-- Stats panel (Ctrl+Shift+I, tab-bar icon, palette): local usage from read-only metadata. Opens as
-  the right split pane (shares the slot with viewer/changes); one page scroll; closes with Esc
-  (first clears the agent filter), the `esc` chip, Ctrl+Shift+I or the icon. Tokens by day and the
-  7x24 heatmap are painter-only charts (`stats/charts.rs`); MODELS (top 6 + "N more") and AGENTS
-  are `stats/tables.rs`. Clicking an AGENTS row filters the whole page (tokens, days, heatmap,
-  models) by that agent; the loader keys requests and cache by (range, filter).
+- Stats panel (Ctrl+Shift+I, tab-bar icon, palette): read-only local usage. Opens in the right
+  split pane (same slot as file viewer / changes); ranges 7 / 30 / 90 / All; one scrollable page.
+  Esc clears an agent filter first, then closes; clickable `esc` chip; Ctrl+Shift+I or the icon
+  toggles. Charts (`stats/charts.rs`): tokens by day, 7×24 heatmap; tables (`stats/tables.rs`):
+  MODELS (top 6 + "N more"), AGENTS. Agent row click filters the whole page. Ankar "agent time"
+  counts launcher tabs only, keyed by launcher name, using OSC 7501 state when the shell reports it.
 
 ## Diagnostics
 

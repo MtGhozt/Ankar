@@ -89,3 +89,19 @@ Notes:
 - A was read 15 s after launch; 15 s later it was 105.1 Private / 116.7 WS. Idle CPU over 10 s was 0.01 s (the 10 fps filter-bar repaint is gone).
 - B–E need tabs opened and commands typed inside Ankar; they were not measured in the stabilization session.
 - Goal: B < 100 MB Private (ideally C too). A alone is already ≈4.4 MB over it, so B will not meet the goal without further work. The stats panel is not the cause: its loader only runs when the panel is opened.
+
+## Stats page (08)
+
+Metric: same `Get-Process ankar` Private MB line as above. Gate release build; measured 2026-11-25.
+
+| Scenario | ankar Private |
+|---|---:|
+| Stats closed (5 tabs: junie, copilot, opencode launchers + 2 PowerShell; Matias's restored session) | 116.0 |
+| Stats open, range 30 days | not measured |
+| Stats closed again | not measured |
+
+Notes:
+
+- Not comparable to the <100 MB goal or section 07's 3-tab method (here: 5 tabs, not 3 PowerShell).
+- Open and closed-again were not measured in the stabilization session (GUI driving was blocked in the Cursor sandbox).
+- Matias should run the 3-tab method: closed → open 30 days → closed again (~10 s idle before each read). Target: closed-again within 3–5 MB of the first closed reading; closed < 100 MB Private.
