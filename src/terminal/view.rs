@@ -452,6 +452,16 @@ fn paint_grid(
         );
     }
 
+    paint_edge_backgrounds(
+        &mut shapes,
+        response.rect,
+        origin,
+        (grid.size.num_cols, grid.size.num_lines),
+        &by_line,
+        &colors,
+        ppp,
+    );
+
     // Above backgrounds, below glyphs: a block cursor shows the text in the cell's bg.
     if let Some(cursor) = cursor {
         let row = cursor.point.line.0 + display_offset;
@@ -1041,6 +1051,65 @@ fn paint_row_backgrounds(
     }
 }
 
+/// Extends the edge cells' background over the pane padding and the leftover pixels
+/// past the last cell, so a TUI with its own background has no frame (Alacritty/Warp do this).
+fn paint_edge_backgrounds(
+    shapes: &mut Vec<Shape>,
+    pane: Rect,
+    origin: Pos2,
+    (cols, lines): (u16, u16),
+    by_line: &BTreeMap<i32, Vec<&VisibleCell>>,
+    colors: &super::theme::TermColors,
+    ppp: f32,
+) {
+    if cols == 0 || lines == 0 {
+        return;
+    }
+    let (last_col, last_row) = (cols - 1, lines as i32 - 1);
+    // A wide glyph's spacer cell is not in the snapshot: the glyph's own bg covers it.
+    let edge = |row: i32, col: u16| {
+        by_line
+            .get(&row)
+            .and_then(|cells| {
+                cells.iter().find(|c| {
+                    c.col == col || (c.col + 1 == col && c.flags.contains(Flags::WIDE_CHAR))
+                })
+            })
+            .map_or(colors.background, |c| cell_colors(c, None, colors, None).1)
+    };
+    let fill = |shapes: &mut Vec<Shape>, x0: f32, x1: f32, y0: f32, y1: f32, bg: Color32| {
+        if bg == colors.background || x1 <= x0 || y1 <= y0 {
+            return;
+        }
+        let (x0, x1) = px_span(x0, x1, ppp);
+        let (y0, y1) = px_span(y0, y1, ppp);
+        push_solid_rect(
+            shapes,
+            Rect::from_min_max(Pos2::new(x0, y0), Pos2::new(x1, y1)).intersect(pane),
+            bg,
+        );
+    };
+    let grid_right = ui_theme::term_col_x(origin.x, cols, ppp);
+    let grid_bottom = ui_theme::term_row_top(origin.y, lines as i32, ppp);
+
+    for row in 0..lines as i32 {
+        let y0 = ui_theme::term_row_top(origin.y, row, ppp);
+        let y1 = ui_theme::term_row_top(origin.y, row + 1, ppp);
+        fill(shapes, pane.min.x, origin.x, y0, y1, edge(row, 0));
+        fill(shapes, grid_right, pane.max.x, y0, y1, edge(row, last_col));
+    }
+    // Top and bottom bands follow the first/last row cell by cell (status bars stay intact).
+    for (row, y0, y1) in [(0, pane.min.y, origin.y), (last_row, grid_bottom, pane.max.y)] {
+        if y1 > y0 {
+            if let Some(cells) = by_line.get(&row) {
+                paint_row_backgrounds(shapes, origin.x, y0, y1 - y0, cells, None, colors, ppp);
+            }
+            fill(shapes, pane.min.x, origin.x, y0, y1, edge(row, 0));
+            fill(shapes, grid_right, pane.max.x, y0, y1, edge(row, last_col));
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn paint_row_text(
     ui: &Ui,
@@ -1259,6 +1328,28 @@ mod tests {
         let at = Point::new(Line(0), Column(0));
         let (fg, bg, _) = cell_colors(&glyph, None, &TermColors::default(), Some(at));
         assert_eq!(fg, bg, "glyph under a block cursor uses the cell background");
+    }
+
+    #[test]
+    fn edge_cell_background_covers_padding_and_remainder() {
+        let ppp = 1.0;
+        let colors = TermColors::default();
+        let mut a = cell(' ');
+        a.bg = TermColor::Spec(Rgb { r: 10, g: 10, b: 10 });
+        let mut b = a.clone();
+        b.col = 1;
+        let by_line = BTreeMap::from([(0, vec![&a, &b])]);
+        // 2x1 grid at (14, 15) inside a 60x50 pane: padding left/top, remainder right/bottom.
+        let pane = Rect::from_min_size(Pos2::ZERO, Vec2::new(60.0, 50.0));
+        let mut shapes = Vec::new();
+        paint_edge_backgrounds(&mut shapes, pane, Pos2::new(14.0, 15.0), (2, 1), &by_line, &colors, ppp);
+        let hit = |p: Pos2| shapes.iter().any(|s| s.visual_bounding_rect().contains(p));
+        assert!(hit(Pos2::new(5.0, 20.0)), "left padding");
+        assert!(hit(Pos2::new(20.0, 5.0)), "top padding over the grid columns");
+        assert!(hit(Pos2::new(5.0, 5.0)), "corner");
+        assert!(hit(Pos2::new(59.0, 20.0)), "right remainder takes the last column's bg");
+        assert!(hit(Pos2::new(20.0, 45.0)), "bottom remainder");
+        assert!(!hit(Pos2::new(20.0, 20.0)), "grid cells are painted elsewhere");
     }
 
     #[test]
