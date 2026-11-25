@@ -1,5 +1,6 @@
 //! Agent usage panel — layout matched to midudev's stats mockup (egui Painter only).
 
+use super::charts;
 use super::format::{format_hours_short, format_pct_delta, format_tokens, format_with_commas};
 use super::loader::{StatsLoader, StatsRange};
 use super::{Source, StatsSnapshot};
@@ -11,8 +12,8 @@ use std::sync::{Arc, Mutex};
 
 const BG: Color32 = Color32::from_rgb(0x00, 0x00, 0x00);
 const CARD_BG: Color32 = Color32::from_rgb(0x0C, 0x0C, 0x0C);
-const CARD_BORDER: Color32 = Color32::from_rgb(0x11, 0x11, 0x11);
-const MUTED: Color32 = Color32::from_rgb(0x83, 0x83, 0x83);
+pub(super) const CARD_BORDER: Color32 = Color32::from_rgb(0x11, 0x11, 0x11);
+pub(super) const MUTED: Color32 = Color32::from_rgb(0x83, 0x83, 0x83);
 const TEXT: Color32 = Color32::from_rgb(0xE7, 0xE7, 0xE7);
 const SEG_BG: Color32 = Color32::from_rgb(0x10, 0x10, 0x10);
 const SEG_ACTIVE: Color32 = Color32::from_rgb(0x24, 0x24, 0x24);
@@ -23,8 +24,8 @@ const BADGE_POS_BG: Color32 = Color32::from_rgb(0x0D, 0x2D, 0x15);
 const BADGE_NEG_FG: Color32 = Color32::from_rgb(0xE5, 0x69, 0x5B);
 const BADGE_NEG_BG: Color32 = Color32::from_rgb(0x2A, 0x0F, 0x0F);
 const SPARK_BAR: Color32 = Color32::from_rgb(0x3A, 0x3A, 0x3A);
-const BAR_IN: Color32 = Color32::from_rgb(0x3E, 0x3E, 0x3E);
-const BAR_OUT: Color32 = Color32::from_rgb(0x4A, 0x9F, 0xFF);
+pub(super) const BAR_IN: Color32 = Color32::from_rgb(0x3E, 0x3E, 0x3E);
+pub(super) const BAR_OUT: Color32 = Color32::from_rgb(0x4A, 0x9F, 0xFF);
 const PROVIDER_ANTHROPIC: Color32 = Color32::from_rgb(0xBB, 0x5E, 0x4C);
 const PROVIDER_GOOGLE: Color32 = Color32::from_rgb(0x41, 0x78, 0xD3);
 const PROVIDER_OPENAI: Color32 = Color32::from_rgb(0x30, 0x98, 0x7F);
@@ -223,7 +224,13 @@ impl StatsPanel {
         };
 
         // Middle: tokens by day + heatmap
-        boxes(ui, narrow, 200.0, |ui| draw_tokens_by_day(ui, snap), |ui| draw_heatmap(ui, snap));
+        boxes(
+            ui,
+            narrow,
+            200.0,
+            |ui| charts::draw_tokens_by_day(ui, snap),
+            |ui| charts::draw_heatmap(ui, snap),
+        );
 
         ui.add_space(14.0);
 
@@ -636,7 +643,7 @@ fn spark_slot_count(range: StatsRange) -> usize {
     range.days().map(|d| d as usize).unwrap_or(30).min(30)
 }
 
-fn ordered_range_days(n: usize) -> Vec<String> {
+pub(super) fn ordered_range_days(n: usize) -> Vec<String> {
     let now = jiff::ZonedDateTime::now();
     let mut out = Vec::with_capacity(n);
     for i in (0..n).rev() {
@@ -703,246 +710,6 @@ fn cache_subtext(snap: &StatsSnapshot) -> String {
     }
     let pct = (snap.tokens.cache_read as f64 / total as f64) * 100.0;
     format!("{:.0}% from cache", pct)
-}
-
-fn draw_tokens_by_day(ui: &mut Ui, snap: &StatsSnapshot) {
-    let days_with = snap.days.iter().filter(|d| d.input + d.output > 0).count();
-    let n_days = match snap.range.days() {
-        Some(d) => d as usize,
-        None => snap.days.len().max(1),
-    };
-    let avg = if days_with > 0 {
-        (snap.tokens.input + snap.tokens.output) / days_with as u64
-    } else {
-        0
-    };
-    ui.horizontal(|ui| {
-        ui.label(
-            RichText::new("TOKENS BY DAY")
-                .size(11.0)
-                .color(MUTED)
-                .strong(),
-        );
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.label(
-                RichText::new(format!(
-                    "{days_with} of {n_days} days with agents · {}/day",
-                    format_tokens(avg)
-                ))
-                .size(11.0)
-                .color(MUTED),
-            );
-        });
-    });
-    ui.add_space(8.0);
-
-    let chart_h = 140.0;
-    let (rect, _) = ui.allocate_exact_size(
-        Vec2::new(ui.available_width(), chart_h),
-        Sense::hover(),
-    );
-    let mid_y = rect.center().y;
-    ui.painter()
-        .hline(rect.x_range(), mid_y, Stroke::new(1.0, CARD_BORDER));
-
-    let days = &snap.days;
-    if days.is_empty() {
-        ui.painter().text(
-            rect.center(),
-            Align2::CENTER_CENTER,
-            "No daily data",
-            FontId::proportional(12.0),
-            MUTED,
-        );
-        return;
-    }
-    let max_in = days.iter().map(|d| d.input).max().unwrap_or(1).max(1) as f32;
-    let max_out = days.iter().map(|d| d.output).max().unwrap_or(1).max(1) as f32;
-    let n = days.len();
-    let gap = 2.0;
-    let bar_w = ((rect.width() - gap * (n as f32 - 1.0)) / n as f32).clamp(2.0, 18.0);
-    let half_h = chart_h * 0.42;
-
-    for (i, d) in days.iter().enumerate() {
-        let x = rect.left() + i as f32 * (bar_w + gap);
-        let in_h = (d.input as f32 / max_in) * half_h;
-        let out_h = (d.output as f32 / max_out) * half_h;
-        let up = Rect::from_min_max(
-            egui::pos2(x, mid_y - in_h),
-            egui::pos2(x + bar_w, mid_y),
-        );
-        let down = Rect::from_min_max(
-            egui::pos2(x, mid_y),
-            egui::pos2(x + bar_w, mid_y + out_h),
-        );
-        ui.painter().rect_filled(up, CornerRadius::same(1), BAR_IN);
-        ui.painter()
-            .rect_filled(down, CornerRadius::same(1), BAR_OUT);
-    }
-
-    // Axis labels: first, mid, last
-    ui.add_space(4.0);
-    ui.horizontal(|ui| {
-        if let Some(d) = days.first() {
-            ui.label(RichText::new(short_day(&d.day)).size(10.0).color(MUTED));
-        }
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if let Some(d) = days.last() {
-                let label = if d.day == today_str() {
-                    "today".into()
-                } else {
-                    short_day(&d.day)
-                };
-                ui.label(RichText::new(label).size(10.0).color(MUTED));
-            }
-        });
-        if days.len() > 2 {
-            let mid = &days[days.len() / 2];
-            ui.centered_and_justified(|ui| {
-                ui.label(RichText::new(short_day(&mid.day)).size(10.0).color(MUTED));
-            });
-        }
-    });
-
-    // Legend values for last day
-    if let Some(last) = days.last() {
-        ui.horizontal(|ui| {
-            ui.label(
-                RichText::new(format!("↑ {} input", format_tokens(last.input)))
-                    .size(11.0)
-                    .color(MUTED),
-            );
-            ui.add_space(12.0);
-            ui.label(
-                RichText::new(format!("↓ {} output", format_tokens(last.output)))
-                    .size(11.0)
-                    .color(BAR_OUT),
-            );
-        });
-    }
-}
-
-fn draw_heatmap(ui: &mut Ui, snap: &StatsSnapshot) {
-    let (best_wd, best_h, best_n) = peak_activity(&snap.activity);
-    let day_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
-    ui.horizontal(|ui| {
-        ui.label(
-            RichText::new("WHEN THEY WORK")
-                .size(11.0)
-                .color(MUTED)
-                .strong(),
-        );
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if best_n > 0 {
-                ui.label(
-                    RichText::new(format!(
-                        "most active {} {:02} h",
-                        day_names.get(best_wd).unwrap_or(&"?"),
-                        best_h
-                    ))
-                    .size(11.0)
-                    .color(MUTED),
-                );
-            }
-        });
-    });
-    ui.add_space(8.0);
-
-    let labels = ["M", "T", "W", "T", "F", "S", "S"];
-    let max = snap
-        .activity
-        .iter()
-        .flat_map(|r| r.iter())
-        .copied()
-        .max()
-        .unwrap_or(1)
-        .max(1);
-
-    let cell = 12.0;
-    let gap = 2.0;
-    let label_w = 14.0;
-    let grid_w: f32 = label_w + 24.0 * (cell + gap);
-    let grid_h: f32 = 7.0 * (cell + gap) + 20.0;
-    let (rect, _) = ui.allocate_exact_size(
-        Vec2::new(grid_w.min(ui.available_width()), grid_h),
-        Sense::hover(),
-    );
-
-    // Hour labels
-    for (i, h) in [0usize, 6, 12, 18].iter().enumerate() {
-        let x = rect.left() + label_w + (*h as f32) * (cell + gap);
-        ui.painter().text(
-            egui::pos2(x, rect.top()),
-            Align2::LEFT_TOP,
-            format!("{h}"),
-            FontId::proportional(9.0),
-            MUTED,
-        );
-        let _ = i;
-    }
-
-    let top = rect.top() + 14.0;
-    for (wd, row) in snap.activity.iter().enumerate() {
-        let y = top + wd as f32 * (cell + gap);
-        ui.painter().text(
-            egui::pos2(rect.left(), y + cell * 0.5),
-            Align2::LEFT_CENTER,
-            labels[wd],
-            FontId::proportional(10.0),
-            MUTED,
-        );
-        for (h, &n) in row.iter().enumerate() {
-            let x = rect.left() + label_w + h as f32 * (cell + gap);
-            let level = ((n as f32 / max as f32) * 4.0).round() as i32;
-            let c = heat_color(level);
-            let r = Rect::from_min_size(egui::pos2(x, y), Vec2::splat(cell));
-            ui.painter().rect_filled(r, CornerRadius::same(2), c);
-            let id = ui.scope_id().with(("heat", wd, h));
-            let resp = ui.interact(r, id, Sense::hover());
-            if resp.hovered() {
-                resp.on_hover_text(format!(
-                    "{} {:02}:00 — {n} events",
-                    day_names[wd], h
-                ));
-            }
-        }
-    }
-
-    ui.add_space(4.0);
-    ui.horizontal(|ui| {
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.label(RichText::new("more").size(10.0).color(MUTED));
-            for lvl in (0..=3).rev() {
-                let (r, _) = ui.allocate_exact_size(Vec2::splat(10.0), Sense::hover());
-                ui.painter()
-                    .rect_filled(r, CornerRadius::same(2), heat_color(lvl));
-                ui.add_space(2.0);
-            }
-            ui.label(RichText::new("less").size(10.0).color(MUTED));
-        });
-    });
-}
-
-fn heat_color(level: i32) -> Color32 {
-    match level.clamp(0, 4) {
-        0 => Color32::from_rgb(0x21, 0x21, 0x21),
-        1 => Color32::from_rgb(0x5A, 0x5A, 0x5A),
-        2 => Color32::from_rgb(0x8E, 0x8E, 0x8E),
-        3 => Color32::from_rgb(0xAB, 0xAB, 0xAB),
-        _ => Color32::from_rgb(0xC2, 0xC2, 0xC2),
-    }
-}
-
-fn peak_activity(a: &[[u32; 24]; 7]) -> (usize, usize, u32) {
-    let mut best = (0usize, 0usize, 0u32);
-    for (wd, row) in a.iter().enumerate() {
-        for (h, &n) in row.iter().enumerate() {
-            if n > best.2 {
-                best = (wd, h, n);
-            }
-        }
-    }
-    best
 }
 
 fn draw_models(ui: &mut Ui, snap: &StatsSnapshot) {
@@ -1085,7 +852,7 @@ fn truncate(s: &str, max: usize) -> String {
     out
 }
 
-fn short_day(ymd: &str) -> String {
+pub(super) fn short_day(ymd: &str) -> String {
     // YYYY-MM-DD → "Oct 23"
     let Ok(ts) = jiff::civil::Date::strptime("%Y-%m-%d", ymd) else {
         return ymd.to_string();
@@ -1100,7 +867,7 @@ fn short_day(ymd: &str) -> String {
     ymd.to_string()
 }
 
-fn today_str() -> String {
+pub(super) fn today_str() -> String {
     jiff::ZonedDateTime::now()
         .strftime("%Y-%m-%d")
         .to_string()

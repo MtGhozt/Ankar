@@ -2,6 +2,7 @@
 //! No network, no telemetry. Heavy IO runs on a background thread when the panel opens.
 
 mod ankar;
+mod charts;
 mod cursor_agent;
 mod format;
 mod loader;
