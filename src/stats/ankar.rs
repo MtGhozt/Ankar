@@ -3,8 +3,9 @@
 use super::{AnkarHourCell, DayBucket, Source, AgentRow};
 use crate::config::Config;
 use crate::layout::{SessionStatus, Workspace};
+use crate::terminal::AgentState;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -47,8 +48,8 @@ pub struct AnkarStatsStore {
     last_tick: Instant,
     /// Sub-second time carried between ticks.
     pending_secs: f64,
-    /// Previous status per tab id — detect starts (transitions into Active).
-    prev_status: HashMap<u64, SessionStatus>,
+    /// Launcher tab ids already counted as a start.
+    seen: HashSet<u64>,
     path: PathBuf,
 }
 
@@ -64,7 +65,7 @@ impl Default for AnkarStatsStore {
             last_flush: Instant::now(),
             last_tick: Instant::now(),
             pending_secs: 0.0,
-            prev_status: HashMap::new(),
+            seen: HashSet::new(),
             path,
         }
     }
@@ -82,12 +83,14 @@ impl AnkarStatsStore {
 
         let hour_key = local_hour_key();
         for tab in &workspace.tabs {
-            let key = agent_key(tab);
-            let prev = self
-                .prev_status
-                .get(&tab.id)
-                .copied()
-                .unwrap_or(SessionStatus::Finished);
+            let Some(key) = launcher_key(&tab.profile_id, &tab.session_name) else {
+                continue;
+            };
+            let started = self.seen.insert(tab.id);
+            let act = activity(reported_working(tab), tab.status);
+            if !started && act == Activity::None {
+                continue;
+            }
 
             let cell = self
                 .data
@@ -96,23 +99,15 @@ impl AnkarStatsStore {
                 .or_default()
                 .entry(key)
                 .or_default();
-
-            match tab.status {
-                SessionStatus::Active => {
-                    cell.busy = cell.busy.saturating_add(dt_secs);
-                    if prev != SessionStatus::Active {
-                        cell.starts = cell.starts.saturating_add(1);
-                    }
-                }
-                SessionStatus::Waiting => {
-                    cell.waiting = cell.waiting.saturating_add(dt_secs);
-                }
-                SessionStatus::Idle | SessionStatus::Finished => {}
+            if started {
+                cell.starts = cell.starts.saturating_add(1);
             }
-            self.prev_status.insert(tab.id, tab.status);
-            if matches!(tab.status, SessionStatus::Active | SessionStatus::Waiting) {
-                self.dirty = true;
+            match act {
+                Activity::Busy => cell.busy = cell.busy.saturating_add(dt_secs),
+                Activity::Waiting => cell.waiting = cell.waiting.saturating_add(dt_secs),
+                Activity::None => {}
             }
+            self.dirty = true;
         }
 
         if self.dirty && self.last_flush.elapsed() >= FLUSH_EVERY {
@@ -219,22 +214,43 @@ fn take_whole_secs(pending: &mut f64, dt: f64) -> u64 {
     whole as u64
 }
 
-fn agent_key(tab: &crate::layout::Tab) -> String {
-    if let Some(cmd) = tab.command.as_deref() {
-        let base = cmd
-            .rsplit(['\\', '/'])
-            .next()
-            .unwrap_or(cmd)
-            .trim()
-            .to_lowercase();
-        if !base.is_empty() {
-            return base;
+/// Only launcher tabs (`profile_id == "command"`) count; the key is the launcher name, lowercased.
+fn launcher_key(profile_id: &str, name: &str) -> Option<String> {
+    let name = name.trim();
+    (profile_id == "command" && !name.is_empty()).then(|| name.to_lowercase())
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Activity {
+    Busy,
+    Waiting,
+    None,
+}
+
+/// `reported`: the tab's OSC 7501 verdict (`Some(true)` = working, `Some(false)` = idle), if any
+/// session sends one; otherwise the `tab.status` heuristic decides.
+fn activity(reported: Option<bool>, status: SessionStatus) -> Activity {
+    match (reported, status) {
+        (Some(true), _) => Activity::Busy,
+        (Some(false), _) => Activity::Waiting,
+        (None, SessionStatus::Active) => Activity::Busy,
+        (None, SessionStatus::Waiting) => Activity::Waiting,
+        (None, _) => Activity::None,
+    }
+}
+
+/// Same rule as `status::tick`: a `Working` silent for 5 minutes is stale.
+fn reported_working(tab: &crate::layout::Tab) -> Option<bool> {
+    let mut reported = None;
+    for session in tab.sessions.values().filter(|s| !s.is_exited()) {
+        let agent = session.agent();
+        if let Some(state) = agent.state {
+            let working = state == AgentState::Working
+                && agent.updated.is_some_and(|t| t.elapsed() < crate::status::AGENT_STALE);
+            reported = Some(reported.unwrap_or(false) || working);
         }
     }
-    if !tab.session_name.is_empty() {
-        return tab.session_name.to_lowercase();
-    }
-    tab.profile_id.to_lowercase()
+    reported
 }
 
 fn local_hour_key() -> String {
@@ -322,6 +338,23 @@ mod tests {
         assert_eq!(take_whole_secs(&mut p, -1.0), 0);
         assert_eq!(take_whole_secs(&mut p, 2.5), 2);
         assert!((p - 0.6).abs() < 0.2);
+    }
+
+    #[test]
+    fn only_launcher_tabs_count_keyed_by_lowercase_name() {
+        assert_eq!(launcher_key("command", "OpenCode"), Some("opencode".into()));
+        assert_eq!(launcher_key("powershell", "Terminal"), None);
+        assert_eq!(launcher_key("command", " "), None);
+    }
+
+    #[test]
+    fn osc_state_beats_the_status_heuristic() {
+        use SessionStatus::*;
+        assert_eq!(activity(Some(true), Waiting), Activity::Busy);
+        assert_eq!(activity(Some(false), Active), Activity::Waiting);
+        assert_eq!(activity(None, Active), Activity::Busy);
+        assert_eq!(activity(None, Waiting), Activity::Waiting);
+        assert_eq!(activity(None, Finished), Activity::None);
     }
 
     #[test]

@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 const MIN_WORK_FOR_TOAST: Duration = Duration::from_secs(30);
 /// No OSC 7501 for this long while "working" means the agent is gone.
-const AGENT_STALE: Duration = Duration::from_secs(5 * 60);
+pub(crate) const AGENT_STALE: Duration = Duration::from_secs(5 * 60);
 
 /// A session without OSC 7501 reports looks busy only while its shell runs a child that is still
 /// printing; a shell at its prompt is idle however recently it redrew.
