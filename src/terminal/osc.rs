@@ -33,8 +33,18 @@ pub struct AgentInfo {
 enum Mode {
     Ground,
     Esc,
+    Csi,
     Osc,
     OscEsc,
+}
+
+/// Sends bytes back to the program on the PTY.
+pub type Reply = Box<dyn Fn(String) + Send>;
+
+/// `CSI > q` (XTVERSION). TUIs ask who the terminal is and fall back to a bare-bones mode
+/// when nothing answers; alacritty_terminal does not handle it.
+fn xtversion_reply() -> String {
+    format!("\x1bP>|Ankar {}\x1b\\", env!("CARGO_PKG_VERSION"))
 }
 
 /// Byte-at-a-time OSC scanner; keeps its state between `feed` calls, so a sequence
@@ -46,17 +56,51 @@ pub struct OscScanner {
     info: Arc<Mutex<AgentInfo>>,
     /// Same slot the OSC title parser writes: OSC 7 updates it mid-command.
     cwd: Arc<Mutex<Option<PathBuf>>>,
+    /// Parameter and intermediate bytes of the CSI being read.
+    csi: Vec<u8>,
+    reply: Option<Reply>,
 }
 
 impl OscScanner {
     pub fn new(info: Arc<Mutex<AgentInfo>>, cwd: Arc<Mutex<Option<PathBuf>>>) -> Self {
-        Self { mode: Mode::Ground, buf: Vec::new(), overflow: false, info, cwd }
+        Self {
+            mode: Mode::Ground,
+            buf: Vec::new(),
+            overflow: false,
+            info,
+            cwd,
+            csi: Vec::new(),
+            reply: None,
+        }
+    }
+
+    pub fn with_reply(mut self, reply: Reply) -> Self {
+        self.reply = Some(reply);
+        self
     }
 
     pub fn feed(&mut self, bytes: &[u8]) {
         for &b in bytes {
             self.mode = match (self.mode, b) {
-                (Mode::Ground | Mode::Esc | Mode::OscEsc, 0x1b) => Mode::Esc,
+                (Mode::Ground | Mode::Esc | Mode::Csi | Mode::OscEsc, 0x1b) => Mode::Esc,
+                (Mode::Esc, b'[') => {
+                    self.csi.clear();
+                    Mode::Csi
+                }
+                (Mode::Csi, 0x20..=0x3f) => {
+                    if self.csi.len() < 16 {
+                        self.csi.push(b);
+                    }
+                    Mode::Csi
+                }
+                (Mode::Csi, 0x40..=0x7e) => {
+                    if b == b'q' && (self.csi == b">" || self.csi == b">0") {
+                        if let Some(reply) = &self.reply {
+                            reply(xtversion_reply());
+                        }
+                    }
+                    Mode::Ground
+                }
                 (Mode::Esc, b']') | (Mode::OscEsc, b']') => {
                     self.buf.clear();
                     self.overflow = false;
@@ -235,9 +279,11 @@ impl<P: EventedPty + OnResize> OscTap<P> {
         pty: P,
         info: Arc<Mutex<AgentInfo>>,
         cwd: Arc<Mutex<Option<PathBuf>>>,
+        reply: Reply,
     ) -> Self {
         let pty = Box::into_raw(Box::new(pty));
-        Self { pty, reader: TapReader { pty, scanner: OscScanner::new(info, cwd) } }
+        let scanner = OscScanner::new(info, cwd).with_reply(reply);
+        Self { pty, reader: TapReader { pty, scanner } }
     }
 
     fn pty(&mut self) -> &mut P {
@@ -370,6 +416,27 @@ mod tests {
         let b = scan(&[b"\x1b]7501;state=working:title=SGk=\x07\x1b]7501;state=clear:id=ses_1\x07"]);
         assert_eq!(b.state, Some(AgentState::Clear));
         assert!(b.title.is_none() && b.session_id.is_none());
+    }
+
+    fn replies(chunks: &[&[u8]]) -> Vec<String> {
+        let out = Arc::new(Mutex::new(Vec::new()));
+        let sink = out.clone();
+        let mut scanner = OscScanner::new(Arc::new(Mutex::new(AgentInfo::default())), Arc::new(Mutex::new(None)))
+            .with_reply(Box::new(move |s| sink.lock().unwrap().push(s)));
+        for c in chunks {
+            scanner.feed(c);
+        }
+        let out = out.lock().unwrap().clone();
+        out
+    }
+
+    #[test]
+    fn xtversion_is_answered_with_a_dcs_naming_ankar() {
+        let want = format!("\x1bP>|Ankar {}\x1b\\", env!("CARGO_PKG_VERSION"));
+        assert_eq!(replies(&[b"\x1b[>q"]), [want.clone()]);
+        assert_eq!(replies(&[b"abc\x1b[>0", b"q"]), [want], "split across reads, explicit 0");
+        // DECSCUSR, DA2 and other CSI finals are not XTVERSION.
+        assert!(replies(&[b"\x1b[2 q\x1b[>c\x1b[?25h\x1b[31;1m"]).is_empty());
     }
 
     #[test]

@@ -186,7 +186,8 @@ impl TerminalSession {
         let env = HashMap::from([
             ("TERM".to_owned(), "xterm-256color".to_owned()),
             ("COLORTERM".to_owned(), "truecolor".to_owned()),
-            ("TERM_PROGRAM".to_owned(), "ankar".to_owned()),
+            ("TERM_PROGRAM".to_owned(), "Ankar".to_owned()),
+            ("TERM_PROGRAM_VERSION".to_owned(), env!("CARGO_PKG_VERSION").to_owned()),
         ]);
         let pty_config = tty::Options {
             shell: Some(tty::Shell::new(program.to_string(), args.to_vec())),
@@ -216,9 +217,18 @@ impl TerminalSession {
         let shell_pid = pty.child_watcher().pid().map(|p| p.get());
         #[cfg(not(windows))]
         let shell_pid = None;
-        let pty = OscTap::new(pty, agent.clone(), cwd_state.clone());
-
         let (event_sender, event_receiver) = mpsc::channel();
+        // Queries alacritty_terminal ignores are answered from the raw-byte scanner, through
+        // the same PtyWrite path as its own replies.
+        let reply_sender = event_sender.clone();
+        let pty = OscTap::new(
+            pty,
+            agent.clone(),
+            cwd_state.clone(),
+            Box::new(move |text| {
+                let _ = reply_sender.send(Event::PtyWrite(text));
+            }),
+        );
         let event_proxy = EventProxy(event_sender);
         let term = Term::new(config, &terminal_size, event_proxy.clone());
 
@@ -804,6 +814,22 @@ mod tests {
             ],
             "bytes doubled, same terminator as the query"
         );
+    }
+
+    #[test]
+    fn device_attribute_queries_are_answered() {
+        use alacritty_terminal::vte::ansi::Processor;
+        let (tx, rx) = mpsc::channel();
+        let mut term = Term::new(term::Config::default(), &TermSize::new(80, 24), EventProxy(tx));
+        let mut parser: Processor = Processor::new();
+        parser.advance(&mut term, b"\x1b[c\x1b[>c");
+        let writes: Vec<String> = rx
+            .try_iter()
+            .filter_map(|e| if let Event::PtyWrite(s) = e { Some(s) } else { None })
+            .collect();
+        assert_eq!(writes.len(), 2);
+        assert!(writes[0].starts_with("\x1b[?") && writes[0].ends_with('c'), "DA1");
+        assert!(writes[1].starts_with("\x1b[>") && writes[1].ends_with('c'), "DA2");
     }
 
     #[test]

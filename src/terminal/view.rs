@@ -1353,6 +1353,29 @@ mod tests {
     }
 
     #[test]
+    fn reverse_video_cells_paint_as_solid_filled_runs() {
+        let colors = TermColors::default();
+        let mut shapes = Vec::new();
+        // "Current" tab pill: SGR 7 on default colours, three cells.
+        let cells: Vec<VisibleCell> = (0..3)
+            .map(|col| {
+                let mut c = cell('x');
+                c.col = col;
+                c.fg = TermColor::Named(NamedColor::Foreground);
+                c.flags.insert(Flags::INVERSE);
+                c
+            })
+            .collect();
+        let refs: Vec<&VisibleCell> = cells.iter().collect();
+        let (fg, bg, _) = cell_colors(&cells[0], None, &colors, None);
+        assert_eq!((fg, bg), (colors.background, colors.foreground), "fg and bg swap");
+        paint_row_backgrounds(&mut shapes, 0.0, 0.0, 18.0, &refs, None, &colors, 1.0);
+        assert_eq!(shapes.len(), 1, "one solid run, no per-cell seams");
+        let w = ui_theme::term_col_x(0.0, 3, 1.0);
+        assert!((shapes[0].visual_bounding_rect().width() - w).abs() < 1.0);
+    }
+
+    #[test]
     fn heavy_vertical_fills_the_snapped_row_without_seams() {
         let cell = cell('┃');
         let ppp = 1.5;
