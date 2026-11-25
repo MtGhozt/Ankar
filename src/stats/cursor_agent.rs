@@ -1,4 +1,4 @@
-//! cursor-agent local chats: meta.json + prompt_history.json only (no store.db, no auth).
+//! cursor-agent local chats: meta.json timestamps only (no store.db, no auth).
 
 use super::{AgentRow, DayBucket, Source, StatsSnapshot};
 use std::fs;
@@ -26,7 +26,6 @@ pub fn load_into(snap: &mut StatsSnapshot, since_ms: i64, until_ms: i64) {
 
     let mut files = 0usize;
     let mut chats = 0u64;
-    let mut prompts = 0u64;
     let mut busy_secs = 0u64;
     let mut days: std::collections::HashMap<String, DayBucket> = std::collections::HashMap::new();
 
@@ -96,26 +95,10 @@ pub fn load_into(snap: &mut StatsSnapshot, since_ms: i64, until_ms: i64) {
             });
             d.tasks = d.tasks.saturating_add(1);
             d.busy_secs = d.busy_secs.saturating_add(secs);
-
-            let hist = chat_dir.join("prompt_history.json");
-            if hist.is_file() {
-                if let Ok(md) = hist.metadata() {
-                    if md.len() <= MAX_BYTES {
-                        if let Ok(ht) = fs::read_to_string(&hist) {
-                            if let Ok(arr) = serde_json::from_str::<serde_json::Value>(&ht) {
-                                if let Some(a) = arr.as_array() {
-                                    prompts = prompts.saturating_add(a.len() as u64);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
         }
     }
 
     snap.sessions = snap.sessions.saturating_add(chats);
-    snap.prompts = snap.prompts.saturating_add(prompts);
     snap.cursor_hours = busy_secs as f64 / 3600.0;
 
     snap.agents.push(AgentRow {

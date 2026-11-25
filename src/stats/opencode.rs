@@ -376,7 +376,6 @@ fn aggregate_v1(
     // Only sessions not already in v2.
     let sql = "
         SELECT message.session_id,
-               message.data,
                json_extract(message.data,'$.role'),
                json_extract(message.data,'$.providerID'),
                json_extract(message.data,'$.modelID'),
@@ -398,18 +397,18 @@ fn aggregate_v1(
     let rows = stmt.query_map(rusqlite::params![since_ms, until_ms], |r| {
         Ok((
             r.get::<_, Option<String>>(0)?.unwrap_or_default(),
+            r.get::<_, Option<String>>(1)?.unwrap_or_default(),
             r.get::<_, Option<String>>(2)?.unwrap_or_default(),
             r.get::<_, Option<String>>(3)?.unwrap_or_default(),
-            r.get::<_, Option<String>>(4)?.unwrap_or_default(),
+            r.get::<_, Option<i64>>(4)?.unwrap_or(0).max(0) as u64,
             r.get::<_, Option<i64>>(5)?.unwrap_or(0).max(0) as u64,
             r.get::<_, Option<i64>>(6)?.unwrap_or(0).max(0) as u64,
             r.get::<_, Option<i64>>(7)?.unwrap_or(0).max(0) as u64,
             r.get::<_, Option<i64>>(8)?.unwrap_or(0).max(0) as u64,
-            r.get::<_, Option<i64>>(9)?.unwrap_or(0).max(0) as u64,
-            r.get::<_, Option<f64>>(10)?.unwrap_or(0.0),
-            r.get::<_, Option<String>>(11)?.unwrap_or_default(),
+            r.get::<_, Option<f64>>(9)?.unwrap_or(0.0),
+            r.get::<_, Option<String>>(10)?.unwrap_or_default(),
+            r.get::<_, Option<i64>>(11)?,
             r.get::<_, Option<i64>>(12)?,
-            r.get::<_, Option<i64>>(13)?,
         ))
     })?;
 
