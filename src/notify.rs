@@ -14,7 +14,7 @@ pub fn session_status_changed(session_name: &str, status: SessionStatus, window_
             "Ankar — finished",
             format!("{session_name} has exited"),
         ),
-        SessionStatus::Active => return,
+        SessionStatus::Idle | SessionStatus::Active => return,
     };
     // TODO(ankar): app_id propio requiere registrar un AUMID (HKCU\Software\Classes\AppUserModelId\MtGhozt.Ankar o un acceso directo con AppUserModelID). Sin eso Windows muestra "Windows PowerShell".
     // WinRT toasts can block for a while; never show them from the UI thread.

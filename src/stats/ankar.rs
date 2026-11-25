@@ -106,7 +106,7 @@ impl AnkarStatsStore {
                 SessionStatus::Waiting => {
                     cell.waiting = cell.waiting.saturating_add(dt_secs);
                 }
-                SessionStatus::Finished => {}
+                SessionStatus::Idle | SessionStatus::Finished => {}
             }
             self.prev_status.insert(tab.id, tab.status);
             self.dirty = true;

@@ -976,6 +976,7 @@ fn paint_tab_icon(
     // Small status badge on the icon (Done green / Waiting amber / Working spinner).
     let badge = egui::pos2(center.x + size * 0.35, center.y - size * 0.35);
     match status {
+        SessionStatus::Idle => {}
         SessionStatus::Finished => {
             ui.painter()
                 .circle_filled(badge, 3.0, ui_theme::STATUS_DOT_OK);

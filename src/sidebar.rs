@@ -1322,6 +1322,7 @@ fn subtitle_for(tab: &crate::layout::Tab) -> (String, Color32) {
                 ("Working".into(), ui_theme::TEXT_MUTED)
             }
         }
+        SessionStatus::Idle => ("Idle".into(), ui_theme::TEXT_FAINT),
         SessionStatus::Waiting => ("Waiting".into(), ui_theme::TEXT_MUTED),
         SessionStatus::Finished => {
             if let Some(code) = tab.exit_code {
@@ -1343,6 +1344,7 @@ fn paint_status_badge(ui: &Ui, center: egui::Pos2, status: SessionStatus) {
     let time = ui.input(|i| i.time) as f32;
     let painter = ui.painter();
     match status {
+        SessionStatus::Idle => {}
         SessionStatus::Active => {
             painter.circle_filled(center, 4.5 + 1.5, ring_bg);
             paint_working_spinner(painter, center, 4.5, ui_theme::WORKING_RING_DIM, time);

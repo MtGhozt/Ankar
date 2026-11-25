@@ -172,6 +172,8 @@ pub struct TerminalSession {
     last_motion: Option<(u16, u16, u8)>,
     /// Process id of the shell (ConPTY child), root of the tree `procs` walks.
     shell_pid: Option<u32>,
+    /// When the user last sent Enter: work starts with a submitted command or prompt.
+    last_submit: Option<Instant>,
     pub colors: TermColors,
 }
 
@@ -373,8 +375,13 @@ impl TerminalSession {
             clipboard,
             last_motion: None,
             shell_pid,
+            last_submit: None,
             colors,
         })
+    }
+
+    pub fn last_submit(&self) -> Option<Instant> {
+        self.last_submit
     }
 
     pub fn shell_pid(&self) -> Option<u32> {
@@ -425,6 +432,9 @@ impl TerminalSession {
         let bytes = bytes.into();
         if bytes.is_empty() {
             return;
+        }
+        if bytes.contains(&b'\r') {
+            self.last_submit = Some(Instant::now());
         }
         self.notifier.notify(bytes);
         let mut term = self.term.lock();

@@ -239,7 +239,7 @@ fn restore_tab(
         session_name: saved.session_name.clone(),
         pinned: saved.pinned,
         project_key: project_key_for(cwd.as_ref()),
-        status: crate::layout::SessionStatus::Active,
+        status: crate::layout::SessionStatus::Idle,
         activity: None,
         exit_code: None,
         status_changed_at: std::time::Instant::now(),

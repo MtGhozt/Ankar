@@ -24,7 +24,11 @@ pub enum LayoutNode {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SessionStatus {
+    /// Started, has not worked yet.
+    Idle,
+    /// Working.
     Active,
+    /// Worked and finished: waiting on Matias.
     Waiting,
     Finished,
 }
@@ -166,7 +170,7 @@ impl Workspace {
             session_name,
             pinned: false,
             project_key,
-            status: SessionStatus::Active,
+            status: SessionStatus::Idle,
             activity: None,
             exit_code: None,
             status_changed_at: Instant::now(),
@@ -230,7 +234,7 @@ impl Workspace {
             session_name: name.to_string(),
             pinned: false,
             project_key,
-            status: SessionStatus::Active,
+            status: SessionStatus::Idle,
             activity: None,
             exit_code: None,
             status_changed_at: Instant::now(),
