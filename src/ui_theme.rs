@@ -313,6 +313,14 @@ fn install_fonts(ctx: &Context) {
         ))),
     );
 
+    // Symbols Hack/Inter lack (braille spinner, arrows, geometric shapes); last in every chain.
+    fonts.font_data.insert(
+        "AnkarSymbols".to_owned(),
+        Arc::new(FontData::from_static(include_bytes!(
+            "../assets/fonts/ankar-symbols.ttf"
+        ))),
+    );
+
     // Start with Inter Medium for all UI text (egui strokes lighter than SF on macOS).
     // Keep Inter Regular + egui fallbacks after it; drop Ubuntu-Light from the chain.
     let proportional = fonts
@@ -322,17 +330,23 @@ fn install_fonts(ctx: &Context) {
     proportional.retain(|name| name != "Ubuntu-Light");
     proportional.insert(0, "Inter".to_owned());
     proportional.insert(0, "InterMedium".to_owned());
+    proportional.push("AnkarSymbols".to_owned());
 
     // Named Medium family for call sites that opt in explicitly (same face for now).
     fonts.families.insert(
         FontFamily::Name(FONT_MEDIUM.into()),
-        vec!["InterMedium".into(), "Inter".into()],
+        vec!["InterMedium".into(), "Inter".into(), "AnkarSymbols".into()],
     );
     fonts
         .families
         .insert(FontFamily::Name(FONT_ICONS.into()), vec!["AnkarIcons".into()]);
 
-    // Monospace stays egui's embedded Hack (default_fonts feature).
+    // Monospace stays egui's embedded Hack (default_fonts feature); symbols only as fallback.
+    fonts
+        .families
+        .entry(FontFamily::Monospace)
+        .or_default()
+        .push("AnkarSymbols".to_owned());
     ctx.set_fonts(fonts);
 }
 
