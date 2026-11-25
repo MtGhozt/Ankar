@@ -1,0 +1,8 @@
+---
+description: Ankar repo rules (pointer to AGENTS.md)
+alwaysApply: true
+---
+
+All rules for this repo live in `AGENTS.md` at the repository root. Read it before any change,
+then `docs/harness/LESSONS.md`. The gate (release build, clippy with -D warnings, tests) must
+pass before every commit.

@@ -18,6 +18,10 @@ Built for running and organizing terminal agents (OpenCode, cursor-agent, gemini
 - Zero network calls from the app itself
 - Fonts: Inter (UI) + Lucide subset (icons) — see `assets/fonts/LICENSES.md`
 
+## Agents
+
+Coding agents working on this repo start at [`AGENTS.md`](AGENTS.md).
+
 ## Install / build
 
 Requirements:
