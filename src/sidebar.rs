@@ -27,7 +27,7 @@ pub enum SessionFilter {
 }
 
 /// What the sidebar column shows under its icon switch.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SidebarView {
     Sessions,
     Files,
@@ -35,6 +35,8 @@ pub enum SidebarView {
 
 /// Header row height: the same as the tab bar next to it.
 const VIEW_BAR_H: f32 = ui_theme::BAR_H;
+/// Sessions | Files icon row under the header.
+const SWITCH_ROW_H: f32 = 34.0;
 const TOGGLE_SIZE: f32 = 28.0;
 /// Left inset of the toggle, a bit further right than the edge like Warp.
 const TOGGLE_LEFT: f32 = 14.0;
@@ -127,7 +129,7 @@ pub fn draw(
     // midterm footer: launchers y 951–974, archived baseline 1016 in 1033 window → ~92 / ~46 from bottom.
     let divider_launcher_y = sidebar_rect.bottom() - 92.0;
     let divider_archived_y = sidebar_rect.bottom() - 46.0;
-    let filter_bottom_y = sidebar_rect.top() + VIEW_BAR_H + 113.33;
+    let filter_bottom_y = sidebar_rect.top() + VIEW_BAR_H + SWITCH_ROW_H + 113.33;
     let archived_list_h = if sidebar.show_archived {
         (sidebar.archived.len() as f32 * 28.0).min(160.0) + 8.0
     } else {
@@ -145,7 +147,7 @@ pub fn draw(
     let mut toggle_group: Option<String> = None;
     let mut start_rename: Option<usize> = None;
 
-    // --- Header: its own column top (Warp layout), black like the tab bar, no divider below ---
+    // --- Header: its own column top (Warp layout), black like the tab bar; only the toggle ---
     let (bar, _) = ui.allocate_exact_size(Vec2::new(sidebar_rect.width(), VIEW_BAR_H), Sense::hover());
     painter.rect_filled(bar, CornerRadius::ZERO, ui_theme::BG);
     // Registered before the controls, so they win the pointer; the rest drags the window.
@@ -157,13 +159,18 @@ pub fn draw(
     if sidebar_toggle(ui, toggle, true).clicked() {
         sidebar.show = false;
     }
+    // Same y as the tab bar's divider: one line across the window.
+    painter.hline(bar.x_range(), bar.bottom() - 0.5, Stroke::new(1.0, ui_theme::CHROME_DIVIDER));
+
+    // --- Sessions | Files icon switch, under the header ---
+    let (row, _) = ui.allocate_exact_size(Vec2::new(sidebar_rect.width(), SWITCH_ROW_H), Sense::hover());
     let views = [
         (SidebarView::Sessions, Icon::Terminal, "Sessions"),
         (SidebarView::Files, Icon::File, "Files (Ctrl+Shift+F)"),
     ];
     for (i, (view, icon, tip)) in views.into_iter().enumerate() {
         let rect = Rect::from_min_size(
-            egui::pos2(toggle.right() + 8.0 + i as f32 * 30.0, bar.center().y - 12.0),
+            egui::pos2(row.left() + 8.0 + i as f32 * 30.0, row.center().y - 12.0),
             Vec2::new(28.0, 24.0),
         );
         let resp = ui
@@ -185,15 +192,15 @@ pub fn draw(
             sidebar.view = view;
         }
     }
-    // Files view: the close X sits in this row, at the right edge.
+    // Files view: the close X sits in this row, at the right edge, and hides the sidebar.
     if sidebar.view == SidebarView::Files {
         let close_rect = Rect::from_center_size(
-            egui::pos2(bar.right() - 18.0, bar.center().y),
+            egui::pos2(row.right() - 18.0, row.center().y),
             Vec2::splat(22.0),
         );
         let close = ui
             .interact(close_rect, ui.scope_id().with("files_close"), Sense::click())
-            .on_hover_text("Close files");
+            .on_hover_text("Hide sidebar");
         if close.hovered() {
             painter.rect_filled(close_rect, CornerRadius::same(ui_theme::RADIUS_KBD), ui_theme::HOVER);
         }
@@ -205,13 +212,14 @@ pub fn draw(
             ui_theme::TEXT_MUTED,
         );
         if close.clicked() {
-            sidebar.view = SidebarView::Sessions;
+            sidebar.show = false;
         }
     }
+    painter.hline(row.x_range(), row.bottom() - 0.5, Stroke::new(1.0, ui_theme::SIDEBAR_DIVIDER));
 
     if sidebar.view == SidebarView::Files {
         let area = Rect::from_min_max(
-            egui::pos2(bar.left() + 10.0, bar.bottom() + 4.0),
+            egui::pos2(row.left() + 10.0, row.bottom() + 4.0),
             egui::pos2(sidebar_rect.right() - 8.0, sidebar_rect.bottom() - 8.0),
         );
         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(area));
@@ -1488,6 +1496,61 @@ fn paint_working_spinner(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn empty_workspace() -> Workspace {
+        Workspace {
+            tabs: Vec::new(),
+            active_tab: 0,
+            next_id: 1,
+            profiles: Vec::new(),
+            scrollback_lines: 100,
+            dirty: false,
+            skip_save_until_dirty: true,
+            last_autosave: Instant::now(),
+        }
+    }
+
+    /// Runs `draw` for one frame of a 360x700 sidebar with the given pointer events.
+    fn frame(ctx: &egui::Context, sidebar: &mut SidebarState, events: Vec<egui::Event>) {
+        let (mut ws, mut config, mut files) = (empty_workspace(), Config::default(), FileViewer::default());
+        let mut logos = LogoAtlas::new(ctx, Vec::new());
+        let raw = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(360.0, 700.0))),
+            events,
+            ..Default::default()
+        };
+        let mut out = ctx.run_ui(raw, |ui| {
+            draw(ui, &mut ws, &mut config, sidebar, &mut files, &mut logos, false);
+        });
+        out.textures_delta.clear();
+    }
+
+    fn click(ctx: &egui::Context, sidebar: &mut SidebarState, pos: egui::Pos2) {
+        let button = |pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        frame(ctx, sidebar, vec![egui::Event::PointerMoved(pos)]);
+        frame(ctx, sidebar, vec![button(true)]);
+        frame(ctx, sidebar, vec![button(false)]);
+    }
+
+    #[test]
+    fn files_close_hides_the_whole_sidebar_and_the_switch_sits_under_the_header() {
+        let ctx = egui::Context::default();
+        let mut sidebar = SidebarState::default();
+        frame(&ctx, &mut sidebar, Vec::new());
+        assert_eq!(sidebar.view, SidebarView::Sessions);
+        // Files icon: second slot of the switch row under the toggle-only header.
+        let row_mid = VIEW_BAR_H + SWITCH_ROW_H / 2.0;
+        click(&ctx, &mut sidebar, egui::pos2(8.0 + 30.0 + 14.0, row_mid));
+        assert!(sidebar.show && sidebar.view == SidebarView::Files);
+        click(&ctx, &mut sidebar, egui::pos2(360.0 - 18.0, row_mid));
+        assert!(!sidebar.show, "X hides the sidebar like the toggle");
+        assert_eq!(sidebar.view, SidebarView::Files, "the view is kept for next time");
+    }
 
     #[test]
     fn groups_are_project_folders_never_the_user_name() {
