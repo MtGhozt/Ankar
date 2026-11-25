@@ -20,6 +20,8 @@ const ESC_BG: Color32 = Color32::from_rgb(0x0E, 0x0E, 0x0E);
 const ESC_BORDER: Color32 = Color32::from_rgb(0x1E, 0x1E, 0x1E);
 const BADGE_POS_FG: Color32 = Color32::from_rgb(0x5B, 0xAF, 0x78);
 const BADGE_POS_BG: Color32 = Color32::from_rgb(0x0D, 0x2D, 0x15);
+const BADGE_NEG_FG: Color32 = Color32::from_rgb(0xE5, 0x69, 0x5B);
+const BADGE_NEG_BG: Color32 = Color32::from_rgb(0x2A, 0x0F, 0x0F);
 const SPARK_BAR: Color32 = Color32::from_rgb(0x3A, 0x3A, 0x3A);
 const BAR_IN: Color32 = Color32::from_rgb(0x3E, 0x3E, 0x3E);
 const BAR_OUT: Color32 = Color32::from_rgb(0x4A, 0x9F, 0xFF);
@@ -211,40 +213,14 @@ impl StatsPanel {
 
         ui.add_space(12.0);
 
-        if self.loader.is_loading() && snap.is_none() {
-            ui.horizontal(|ui| {
-                ui.spinner();
-                ui.label(RichText::new("Loading local stats…").color(MUTED));
-            });
-            return close;
-        }
-
-        let Some(snap) = snap else {
-            ui.label(RichText::new("No data yet.").color(MUTED));
-            return close;
-        };
-
-        // Metric cards: 4 across, 2x2 when the pane is narrow.
         let avail = ui.available_width();
         let narrow = avail < NARROW_W;
-        let cols = if narrow { 2 } else { 4 };
-        let card_w = ((avail - GAP * (cols - 1) as f32) / cols as f32 - BOX_PAD).max(100.0);
-        for row in 0..4 / cols {
-            if row > 0 {
-                ui.add_space(GAP);
-            }
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 0.0;
-                for i in row * cols..(row + 1) * cols {
-                    if i % cols > 0 {
-                        ui.add_space(GAP);
-                    }
-                    draw_metric(ui, snap, i, card_w);
-                }
-            });
-        }
-
+        draw_kpi_row(ui, snap, self.range, avail, narrow);
         ui.add_space(14.0);
+
+        let Some(snap) = snap else {
+            return close;
+        };
 
         // Middle: tokens by day + heatmap
         boxes(ui, narrow, 200.0, |ui| draw_tokens_by_day(ui, snap), |ui| draw_heatmap(ui, snap));
@@ -285,73 +261,118 @@ impl StatsPanel {
 /// Below this pane width the cards go 2x2 and the paired boxes stack.
 const NARROW_W: f32 = 640.0;
 const GAP: f32 = 12.0;
+const KPI_GAP: f32 = 11.0;
+const KPI_H: f32 = 105.0;
 /// Inner margin (2 x 12) plus the 1 px stroke on both sides of a box.
 const BOX_PAD: f32 = 26.0;
 
+fn draw_kpi_row(
+    ui: &mut Ui,
+    snap: Option<&StatsSnapshot>,
+    range: StatsRange,
+    avail: f32,
+    narrow: bool,
+) {
+    let cols = if narrow { 2 } else { 4 };
+    let card_w = ((avail - KPI_GAP * (cols - 1) as f32) / cols as f32).max(80.0);
+    for row in 0..4 / cols {
+        if row > 0 {
+            ui.add_space(KPI_GAP);
+        }
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 0.0;
+            for i in row * cols..(row + 1) * cols {
+                if i % cols > 0 {
+                    ui.add_space(KPI_GAP);
+                }
+                draw_metric(ui, snap, range, i, card_w);
+            }
+        });
+    }
+}
+
+enum SparkKind {
+    Input,
+    Output,
+    Tasks,
+    Hours,
+}
+
 /// Card `i` of the top row.
-fn draw_metric(ui: &mut Ui, snap: &StatsSnapshot, i: usize, w: f32) {
-    match i {
-        0 => metric_card(
-            ui,
-            w,
-            &format_tokens(snap.tokens.input),
+fn draw_metric(ui: &mut Ui, snap: Option<&StatsSnapshot>, range: StatsRange, i: usize, w: f32) {
+    let kind = match i {
+        0 => SparkKind::Input,
+        1 => SparkKind::Output,
+        2 => SparkKind::Tasks,
+        _ => SparkKind::Hours,
+    };
+    let spark = spark_series(snap, range, kind);
+    let (title, value, delta, sub, tip) = match (i, snap) {
+        (0, Some(snap)) => (
+            "INPUT TOKENS",
+            format_tokens(snap.tokens.input),
             snap.delta_input_pct,
-            &cache_subtext(snap),
-            &spark_from_days(snap, true),
-            "Input tokens",
-            &format!(
+            cache_subtext(snap),
+            format!(
                 "reasoning {} · cache read {} · write {}",
                 format_tokens(snap.tokens.reasoning),
                 format_tokens(snap.tokens.cache_read),
                 format_tokens(snap.tokens.cache_write)
             ),
         ),
-        1 => metric_card(
-            ui,
-            w,
-            &format_tokens(snap.tokens.output),
+        (1, Some(snap)) => (
+            "OUTPUT TOKENS",
+            format_tokens(snap.tokens.output),
             snap.delta_output_pct,
-            &format!(
+            format!(
                 "{} per turn",
                 format_tokens(snap.tokens.output.checked_div(snap.steps).unwrap_or(0))
             ),
-            &spark_from_days(snap, false),
-            "Output tokens",
-            "Assistant output tokens (OpenCode)",
+            "Assistant output tokens (OpenCode)".into(),
         ),
-        2 => metric_card(
-            ui,
-            w,
-            &format_with_commas(snap.sessions.saturating_add(snap.ankar_starts)),
+        (2, Some(snap)) => (
+            "TASKS",
+            format_with_commas(snap.sessions.saturating_add(snap.ankar_starts)),
             snap.delta_tasks_pct,
-            &format!("{} turns", format_with_commas(snap.steps)),
-            &spark_tasks(snap),
-            "Tasks",
-            &format!(
+            format!("{} turns", format_with_commas(snap.steps)),
+            format!(
                 "OpenCode+cursor sessions {} · Ankar starts {}",
                 snap.sessions, snap.ankar_starts
             ),
         ),
-        _ => metric_card(
-            ui,
-            w,
-            &if snap.agent_hours >= 10.0 {
+        (_, Some(snap)) => (
+            "AGENT TIME",
+            if snap.agent_hours >= 10.0 {
                 format!("{:.0} h", snap.agent_hours)
             } else {
                 format!("{:.1} h", snap.agent_hours)
             },
             snap.delta_hours_pct,
-            "agent time",
-            &spark_hours(snap),
-            "Agent time",
-            &format!(
+            format!(
+                "up to {} at once",
+                snap.agents.len().max(1)
+            ),
+            format!(
                 "Ankar busy {} · OpenCode {:.1} h · cursor-agent {:.1} h",
                 format_hours_short(snap.ankar_busy_secs),
                 snap.opencode_hours,
                 snap.cursor_hours
             ),
         ),
-    }
+        _ => (
+            match i {
+                0 => "INPUT TOKENS",
+                1 => "OUTPUT TOKENS",
+                2 => "TASKS",
+                _ => "AGENT TIME",
+            },
+            "—".into(),
+            None,
+            "…".into(),
+            String::new(),
+        ),
+    };
+    metric_card(ui, w, &value, delta, &sub, &spark, title, &tip);
 }
 
 /// Two bordered boxes: side by side (58/42) or stacked when `narrow`.
@@ -525,41 +546,66 @@ fn metric_card(
     delta: Option<f64>,
     sub: &str,
     spark: &[f32],
-    _title: &str,
+    title: &str,
     tip: &str,
 ) {
-    Frame::NONE
-        .stroke(Stroke::new(1.0, CARD_BORDER))
-        .corner_radius(CornerRadius::same(8))
-        .inner_margin(12.0)
-        .show(ui, |ui| {
-            ui.set_min_width(width);
-            ui.set_max_width(width);
-            ui.set_min_height(108.0);
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(value).size(28.0).color(TEXT).strong());
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
-                    if let Some(p) = format_pct_delta(delta) {
-                        Frame::NONE
-                            .fill(BADGE_POS_BG)
-                            .corner_radius(CornerRadius::same(8))
-                            .inner_margin(Margin::symmetric(6, 2))
-                            .show(ui, |ui| {
-                                ui.label(RichText::new(p).size(11.0).color(BADGE_POS_FG));
-                            });
-                    }
-                });
-            });
-            ui.label(RichText::new(sub).size(12.0).color(MUTED));
-            ui.add_space(8.0);
-            let (rect, _) = ui.allocate_exact_size(
-                Vec2::new(ui.available_width(), 28.0),
-                Sense::hover(),
-            );
-            paint_sparkline(ui, rect, spark);
-        })
-        .response
-        .on_hover_text(tip);
+    let (card, response) = ui.allocate_exact_size(Vec2::new(width, KPI_H), Sense::hover());
+    let painter = ui.painter();
+    painter.rect_filled(card, CornerRadius::same(8), CARD_BG);
+    painter.rect_stroke(
+        card,
+        CornerRadius::same(8),
+        Stroke::new(1.0, CARD_BORDER),
+        egui::StrokeKind::Inside,
+    );
+    painter.text(
+        egui::pos2(card.left() + 12.0, card.top() + 16.0),
+        Align2::LEFT_TOP,
+        title,
+        FontId::proportional(11.0),
+        MUTED,
+    );
+    if let (Some(label), Some((bg, fg))) = (format_pct_delta(delta), delta_badge_colors(delta)) {
+        let font = FontId::proportional(11.0);
+        let pad_x = 6.0;
+        let pad_y = 2.0;
+        let bw = label.chars().count() as f32 * 6.5 + pad_x * 2.0;
+        let bh = 15.0 + pad_y * 2.0;
+        let badge = Rect::from_min_max(
+            egui::pos2(card.right() - 12.0 - bw, card.top() + 12.0),
+            egui::pos2(card.right() - 12.0, card.top() + 12.0 + bh),
+        );
+        painter.rect_filled(badge, CornerRadius::same(4), bg);
+        painter.text(
+            badge.center(),
+            Align2::CENTER_CENTER,
+            label,
+            font,
+            fg,
+        );
+    }
+    painter.text(
+        egui::pos2(card.left() + 12.0, card.top() + 32.0),
+        Align2::LEFT_TOP,
+        value,
+        FontId::proportional(26.0),
+        TEXT,
+    );
+    painter.text(
+        egui::pos2(card.left() + 12.0, card.top() + 60.0),
+        Align2::LEFT_TOP,
+        sub,
+        FontId::proportional(11.0),
+        MUTED,
+    );
+    let spark_rect = Rect::from_min_max(
+        egui::pos2(card.left() + 12.0, card.top() + 73.0),
+        egui::pos2(card.right() - 12.0, card.top() + 94.0),
+    );
+    paint_sparkline(ui, spark_rect, spark);
+    if !tip.is_empty() {
+        response.on_hover_text(tip);
+    }
 }
 
 fn paint_sparkline(ui: &Ui, rect: Rect, values: &[f32]) {
@@ -569,10 +615,14 @@ fn paint_sparkline(ui: &Ui, rect: Rect, values: &[f32]) {
     let max = values.iter().cloned().fold(0.0_f32, f32::max).max(1.0);
     let n = values.len();
     let gap = 2.0;
-    let bar_w = ((rect.width() - gap * (n as f32 - 1.0)) / n as f32).max(1.5);
+    let bar_w = ((rect.width() - gap * (n as f32 - 1.0)) / n as f32).max(1.0);
     let painter = ui.painter();
     for (i, v) in values.iter().enumerate() {
-        let h = (v / max) * rect.height();
+        let h = if *v > 0.0 {
+            (v / max) * rect.height()
+        } else {
+            0.0
+        };
         let x = rect.left() + i as f32 * (bar_w + gap);
         let r = Rect::from_min_max(
             egui::pos2(x, rect.bottom() - h),
@@ -582,19 +632,68 @@ fn paint_sparkline(ui: &Ui, rect: Rect, values: &[f32]) {
     }
 }
 
-fn spark_from_days(snap: &StatsSnapshot, input: bool) -> Vec<f32> {
-    snap.days
+fn spark_slot_count(range: StatsRange) -> usize {
+    range.days().map(|d| d as usize).unwrap_or(30).min(30)
+}
+
+fn ordered_range_days(n: usize) -> Vec<String> {
+    let now = jiff::ZonedDateTime::now();
+    let mut out = Vec::with_capacity(n);
+    for i in (0..n).rev() {
+        let days_back = i as i64;
+        if let Ok(d) = now.checked_sub(jiff::Span::new().days(days_back)) {
+            let dt = d.datetime();
+            out.push(format!("{:04}-{:02}-{:02}", dt.year(), dt.month(), dt.day()));
+        } else {
+            out.push(String::new());
+        }
+    }
+    out
+}
+
+fn spark_series(snap: Option<&StatsSnapshot>, range: StatsRange, kind: SparkKind) -> Vec<f32> {
+    let n = spark_slot_count(range);
+    let ordered = ordered_range_days(n);
+    let pairs: Vec<(String, f32)> = snap
+        .map(|s| {
+            s.days
+                .iter()
+                .map(|d| {
+                    let v = match kind {
+                        SparkKind::Input => d.input as f32,
+                        SparkKind::Output => d.output as f32,
+                        SparkKind::Tasks => d.tasks as f32,
+                        SparkKind::Hours => d.busy_secs as f32,
+                    };
+                    (d.day.clone(), v)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    bucket_daily_spark(&ordered, &pairs)
+}
+
+/// Badge colours from a percent delta (`None` when there is no prior window).
+fn delta_badge_colors(pct: Option<f64>) -> Option<(Color32, Color32)> {
+    let p = pct?;
+    if !p.is_finite() {
+        return None;
+    }
+    if p >= 0.0 {
+        Some((BADGE_POS_BG, BADGE_POS_FG))
+    } else {
+        Some((BADGE_NEG_BG, BADGE_NEG_FG))
+    }
+}
+
+/// One spark value per calendar day in `ordered_days`; missing days → `0.0`.
+fn bucket_daily_spark(ordered_days: &[String], values: &[(String, f32)]) -> Vec<f32> {
+    use std::collections::HashMap;
+    let map: HashMap<&str, f32> = values.iter().map(|(d, v)| (d.as_str(), *v)).collect();
+    ordered_days
         .iter()
-        .map(|d| if input { d.input as f32 } else { d.output as f32 })
+        .map(|d| map.get(d.as_str()).copied().unwrap_or(0.0))
         .collect()
-}
-
-fn spark_tasks(snap: &StatsSnapshot) -> Vec<f32> {
-    snap.days.iter().map(|d| d.tasks as f32).collect()
-}
-
-fn spark_hours(snap: &StatsSnapshot) -> Vec<f32> {
-    snap.days.iter().map(|d| d.busy_secs as f32).collect()
 }
 
 fn cache_subtext(snap: &StatsSnapshot) -> String {
@@ -1005,4 +1104,33 @@ fn today_str() -> String {
     jiff::ZonedDateTime::now()
         .strftime("%Y-%m-%d")
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn delta_badge_colors_signed() {
+        assert_eq!(
+            delta_badge_colors(Some(12.0)),
+            Some((BADGE_POS_BG, BADGE_POS_FG))
+        );
+        assert_eq!(
+            delta_badge_colors(Some(-3.0)),
+            Some((BADGE_NEG_BG, BADGE_NEG_FG))
+        );
+        assert_eq!(delta_badge_colors(None), None);
+    }
+
+    #[test]
+    fn bucket_daily_spark_fills_gaps() {
+        let days = vec![
+            "2025-01-01".into(),
+            "2025-01-02".into(),
+            "2025-01-03".into(),
+        ];
+        let vals = vec![("2025-01-01".into(), 10.0), ("2025-01-03".into(), 7.0)];
+        assert_eq!(bucket_daily_spark(&days, &vals), vec![10.0, 0.0, 7.0]);
+    }
 }
