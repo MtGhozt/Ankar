@@ -45,6 +45,8 @@ pub struct AnkarStatsStore {
     dirty: bool,
     last_flush: Instant,
     last_tick: Instant,
+    /// Sub-second time carried between ticks.
+    pending_secs: f64,
     /// Previous status per tab id — detect starts (transitions into Active).
     prev_status: HashMap<u64, SessionStatus>,
     path: PathBuf,
@@ -61,6 +63,7 @@ impl Default for AnkarStatsStore {
             dirty: false,
             last_flush: Instant::now(),
             last_tick: Instant::now(),
+            pending_secs: 0.0,
             prev_status: HashMap::new(),
             path,
         }
@@ -72,11 +75,7 @@ impl AnkarStatsStore {
         let now = Instant::now();
         let dt = now.saturating_duration_since(self.last_tick).as_secs_f64();
         self.last_tick = now;
-        if dt <= 0.0 || dt > 10.0 {
-            // Skip huge gaps (sleep / debugger).
-            return;
-        }
-        let dt_secs = dt.round().clamp(0.0, 10.0) as u64;
+        let dt_secs = take_whole_secs(&mut self.pending_secs, dt);
         if dt_secs == 0 {
             return;
         }
@@ -111,7 +110,9 @@ impl AnkarStatsStore {
                 SessionStatus::Idle | SessionStatus::Finished => {}
             }
             self.prev_status.insert(tab.id, tab.status);
-            self.dirty = true;
+            if matches!(tab.status, SessionStatus::Active | SessionStatus::Waiting) {
+                self.dirty = true;
+            }
         }
 
         if self.dirty && self.last_flush.elapsed() >= FLUSH_EVERY {
@@ -202,6 +203,20 @@ impl AnkarStatsStore {
 
         (busy, waiting, starts, agents, days, activity)
     }
+}
+
+/// Add `dt` (ignored unless `0 < dt <= 10`, e.g. sleep) to `pending`; return the whole seconds
+/// now due and keep the fraction.
+fn take_whole_secs(pending: &mut f64, dt: f64) -> u64 {
+    if dt > 0.0 && dt <= 10.0 {
+        *pending += dt;
+    }
+    if *pending < 1.0 {
+        return 0;
+    }
+    let whole = pending.floor();
+    *pending -= whole;
+    whole as u64
 }
 
 fn agent_key(tab: &crate::layout::Tab) -> String {
@@ -296,6 +311,18 @@ fn atomic_write(path: &PathBuf, data: &StatsFile) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fractional_ticks_accumulate_and_gaps_are_ignored() {
+        let mut p = 0.0;
+        let total: u64 = (0..10).map(|_| take_whole_secs(&mut p, 0.1)).sum();
+        // 0.1 * 10 may land a hair under 1.0 in f64; the next tick must still pay out.
+        assert_eq!(total + take_whole_secs(&mut p, 0.1), 1);
+        assert_eq!(take_whole_secs(&mut p, 60.0), 0);
+        assert_eq!(take_whole_secs(&mut p, -1.0), 0);
+        assert_eq!(take_whole_secs(&mut p, 2.5), 2);
+        assert!((p - 0.6).abs() < 0.2);
+    }
 
     #[test]
     fn prune_keeps_recent() {
