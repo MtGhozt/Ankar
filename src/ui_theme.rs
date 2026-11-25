@@ -7,9 +7,7 @@ use egui::{
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicU32, Ordering};
-#[cfg(debug_assertions)]
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 // --- Surfaces (midterm global tokens) ---
 pub const BG: Color32 = Color32::from_rgb(0x00, 0x00, 0x00);
@@ -150,16 +148,32 @@ pub struct FontLineMetrics {
 pub fn cell_size_px(metrics: FontLineMetrics, dpi: f32) -> (f32, f32) {
     let dpi = if dpi.is_finite() && dpi > 0.0 { dpi } else { 1.0 };
     let width = metrics.advance;
-    let line = metrics.ascent + metrics.descent + metrics.line_gap;
-    let height = (line * dpi).round().max(1.0) / dpi;
+    // A zero gap stays zero. Do not add a positive gap and do not invent 1.2 em.
+    let sum = metrics.ascent
+        + metrics.descent
+        + if metrics.line_gap == 0.0 { metrics.line_gap } else { 0.0 };
+    let height = (sum * dpi).round().max(1.0) / dpi;
     (width, height)
 }
 
-/// How far below the row top the glyph line box starts. Half of any leftover
-/// pixel (the line box rounded up to the pixel grid) so the baseline, one
-/// ascent below that top, stays centred in the filled row.
-pub fn glyph_top_offset(row_h: f32, line_h: f32) -> f32 {
-    ((row_h - line_h) * 0.5).max(0.0)
+/// Galley top relative to the row top.
+///
+/// The ink baseline is `row_top + (row_h - (ascent + descent)) / 2 + ascent`,
+/// snapped to a physical pixel. `baseline_from_galley_top` is where egui put
+/// that baseline. Leading past `ascent` is subtracted so the ink stays centred
+/// in the cell; the cell is not grown to fit the galley.
+pub fn glyph_top_offset(
+    row_h: f32,
+    ascent: f32,
+    descent: f32,
+    baseline_from_galley_top: f32,
+    ppp: f32,
+) -> f32 {
+    let ppp = if ppp.is_finite() && ppp > 0.0 { ppp } else { 1.0 };
+    let baseline = (row_h - (ascent + descent)) * 0.5 + ascent;
+    let baseline = (baseline * ppp).round() / ppp;
+    let extra = (baseline_from_galley_top - ascent).max(0.0);
+    baseline - ascent - extra
 }
 
 fn load_bits(bits: &AtomicU32) -> f32 {
@@ -170,7 +184,7 @@ fn store_bits(bits: &AtomicU32, value: f32) {
     bits.store(value.to_bits(), Ordering::Relaxed);
 }
 
-fn font_line_metrics() -> FontLineMetrics {
+pub fn font_line_metrics() -> FontLineMetrics {
     FontLineMetrics {
         advance: load_bits(&ADVANCE_BITS),
         ascent: load_bits(&ASCENT_BITS),
@@ -224,6 +238,10 @@ pub fn sync_cell_metrics(ctx: &Context) {
 /// One line: font, DPI, the four font metrics, the cell, and the grid.
 /// `grid` is `None` at startup, before a pane has been laid out.
 pub fn log_cell_metrics(grid: Option<(u16, u16)>) {
+    static LOGGED: AtomicBool = AtomicBool::new(false);
+    if LOGGED.swap(true, Ordering::Relaxed) {
+        return;
+    }
     let m = font_line_metrics();
     let (w, h) = cell_size_px(m, pixels_per_point());
     let grid = match grid {
@@ -818,13 +836,22 @@ mod tests {
         let (w, h) = cell_size_px(m, 1.0);
         assert!((w - 7.224_609_4).abs() < 1e-4, "real advance, not ceiled: {w}");
         assert!(w <= m.advance + 1.0);
-        assert_eq!(h, 14.0, "round(ascent+descent+gap) = 14, not 12*1.2 = 14.4");
+        assert_eq!(h, 14.0, "round(ascent+descent) = 14; a zero gap adds nothing");
         let (w2, h2) = cell_size_px(m, 2.0);
         assert_eq!(w2, w, "dpi must not scale an advance already in points");
         assert_eq!(h2, 14.0);
-        // The rounded cell is one pixel taller than the raw line box; half of that centres the baseline.
-        assert!((glyph_top_offset(h, m.ascent + m.descent + m.line_gap) - 0.015625).abs() < 1e-4);
-        assert_eq!(glyph_top_offset(10.0, 12.0), 0.0, "never above the row");
+        let mut gapped = m;
+        gapped.line_gap = 4.0;
+        assert_eq!(cell_size_px(gapped, 1.0).1, h, "a positive line gap is not extra leading");
+        // Baseline snapped to a pixel: galley top is that baseline minus the ascent.
+        let top = glyph_top_offset(h, m.ascent, m.descent, m.ascent, 1.0);
+        let baseline = ((h - (m.ascent + m.descent)) * 0.5 + m.ascent).round();
+        assert!((top - (baseline - m.ascent)).abs() < 1e-4, "top {top}");
+        let lower = glyph_top_offset(h, m.ascent, m.descent, m.ascent + 3.0, 1.0);
+        assert!(
+            (lower - (top - 3.0)).abs() < 1e-4,
+            "leading past the ascent shifts the galley up"
+        );
     }
 
     #[test]
