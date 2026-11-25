@@ -159,6 +159,8 @@ pub struct TerminalSession {
     window_size: Arc<Mutex<WindowSize>>,
     /// OSC 52 copy waiting for the UI thread (the clipboard only works inside a frame).
     clipboard: Arc<Mutex<Option<String>>>,
+    /// Last cell/button reported for motion, so pixels inside one cell stay quiet.
+    last_motion: Option<(u16, u16, u8)>,
     pub colors: TermColors,
 }
 
@@ -325,6 +327,7 @@ impl TerminalSession {
             exit_code: exit_code_state,
             window_size,
             clipboard,
+            last_motion: None,
             colors,
         })
     }
@@ -526,34 +529,35 @@ impl TerminalSession {
         row: u16,
         pressed: bool,
         motion: bool,
+        modifiers: u8,
     ) {
-        let mode = self.snapshot.mode;
-        // 1-based coordinates for the protocol.
-        let x = col.saturating_add(1);
-        let y = row.saturating_add(1);
-        let mut b = button;
+        let key = (col, row, button | modifiers | if motion { 32 } else { 0 });
         if motion {
-            b |= 32;
-        }
-        let bytes = if mode.contains(TermMode::SGR_MOUSE) {
-            let ch = if pressed || motion { b'M' } else { b'm' };
-            format!("\x1b[<{b};{x};{y}{ch}").into_bytes()
-        } else {
-            // X10 classic — coords must fit in a byte after +32 (≤ 223).
-            if x > 223 || y > 223 {
+            // Motion is only useful when the cell changes; pixel jitter inside one
+            // cell would otherwise flood the PTY.
+            if self.last_motion == Some(key) {
                 return;
             }
-            let release_or = if pressed || motion { b } else { 3 };
-            vec![
-                0x1b,
-                b'[',
-                b'M',
-                release_or.saturating_add(32),
-                (x as u8).saturating_add(32),
-                (y as u8).saturating_add(32),
-            ]
-        };
-        self.notifier.notify(bytes);
+            self.last_motion = Some(key);
+        } else {
+            self.last_motion = None;
+        }
+        if let Some(bytes) = mouse_sequence(
+            self.snapshot.mode,
+            button,
+            col,
+            row,
+            pressed,
+            motion,
+            modifiers,
+        ) {
+            self.notifier.notify(bytes);
+        }
+    }
+
+    /// Forget the last motion cell (pointer left the pane).
+    pub fn clear_mouse_motion(&mut self) {
+        self.last_motion = None;
     }
 
     pub fn idle_for(&self) -> Duration {
@@ -567,6 +571,48 @@ impl TerminalSession {
 impl Drop for TerminalSession {
     fn drop(&mut self) {
         let _ = self.notifier.0.send(Msg::Shutdown);
+    }
+}
+
+/// Encode a mouse report. `button` is 0/1/2, 3 for no button, 64/65 for wheel;
+/// `modifiers` uses the protocol bits (4 shift, 8 alt, 16 ctrl).
+fn mouse_sequence(
+    mode: TermMode,
+    button: u8,
+    col: u16,
+    row: u16,
+    pressed: bool,
+    motion: bool,
+    modifiers: u8,
+) -> Option<Vec<u8>> {
+    // 1-based coordinates for the protocol.
+    let x = col.saturating_add(1);
+    let y = row.saturating_add(1);
+    let mut b = button | modifiers;
+    if motion {
+        b |= 32;
+    }
+    if mode.contains(TermMode::SGR_MOUSE) {
+        let ch = if pressed || motion { 'M' } else { 'm' };
+        Some(format!("\x1b[<{b};{x};{y}{ch}").into_bytes())
+    } else {
+        // X10 classic — coords must fit in a byte after +32 (≤ 223).
+        if x > 223 || y > 223 {
+            return None;
+        }
+        let code = if pressed || motion {
+            b
+        } else {
+            3 | modifiers
+        };
+        Some(vec![
+            0x1b,
+            b'[',
+            b'M',
+            code.saturating_add(32),
+            (x as u8).saturating_add(32),
+            (y as u8).saturating_add(32),
+        ])
     }
 }
 
@@ -657,5 +703,46 @@ struct EventProxy(mpsc::Sender<Event>);
 impl EventListener for EventProxy {
     fn send_event(&self, event: Event) {
         let _ = self.0.send(event);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sgr_reports_motion_release_wheel_and_modifiers() {
+        let mode = TermMode::SGR_MOUSE | TermMode::MOUSE_MOTION;
+        assert_eq!(
+            mouse_sequence(mode, 3, 4, 2, true, true, 0).unwrap(),
+            b"\x1b[<35;5;3M",
+            "no-button motion"
+        );
+        assert_eq!(
+            mouse_sequence(mode, 0, 4, 2, false, false, 0).unwrap(),
+            b"\x1b[<0;5;3m",
+            "release uses lowercase m"
+        );
+        assert_eq!(
+            mouse_sequence(mode, 64, 4, 2, true, false, 4).unwrap(),
+            b"\x1b[<68;5;3M",
+            "wheel up with shift"
+        );
+        assert_eq!(
+            mouse_sequence(mode, 0, 4, 2, true, false, 16 | 8).unwrap(),
+            b"\x1b[<24;5;3M",
+            "click with ctrl+alt"
+        );
+    }
+
+    #[test]
+    fn x10_drops_coordinates_that_do_not_fit_a_byte() {
+        let mode = TermMode::MOUSE_REPORT_CLICK;
+        assert!(mouse_sequence(mode, 0, 223, 0, true, false, 0).is_none());
+        assert_eq!(
+            mouse_sequence(mode, 0, 0, 0, false, false, 4).unwrap(),
+            vec![0x1b, b'[', b'M', 32 + 7, 32 + 1, 32 + 1],
+            "release is button 3 plus modifiers"
+        );
     }
 }

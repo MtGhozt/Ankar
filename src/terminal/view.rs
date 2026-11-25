@@ -58,30 +58,29 @@ impl TerminalView {
             response.request_focus();
         }
 
-        if focused {
-            if response.has_focus() {
-                ui.memory_mut(|m| {
-                    m.set_focus_lock_filter(
-                        response.id,
-                        egui::EventFilter {
-                            tab: true,
-                            horizontal_arrows: true,
-                            vertical_arrows: true,
-                            escape: true,
-                        },
-                    );
-                });
-            }
-            // Keys only when the terminal widget has focus (sidebar search can keep it).
-            handle_input(
-                ui,
-                &response,
-                session,
-                font_size,
-                response.has_focus(),
-                content,
-            );
+        if focused && response.has_focus() {
+            ui.memory_mut(|m| {
+                m.set_focus_lock_filter(
+                    response.id,
+                    egui::EventFilter {
+                        tab: true,
+                        horizontal_arrows: true,
+                        vertical_arrows: true,
+                        escape: true,
+                    },
+                );
+            });
         }
+        // Pointer reporting must work while hovering, even if another widget owns
+        // the keyboard. Keys stay gated on this pane being active and focused.
+        handle_input(
+            ui,
+            &response,
+            session,
+            font_size,
+            focused && response.has_focus(),
+            content,
+        );
         paint_grid(ui, &response, &painter, session, &font_id, metrics, content);
         response
     }
@@ -234,13 +233,25 @@ fn handle_wheel(
     }
 }
 
+/// Protocol modifier bits: shift 4, alt 8, ctrl 16.
+fn mouse_modifiers(m: egui::Modifiers) -> u8 {
+    (if m.shift { 4 } else { 0 })
+        | (if m.alt { 8 } else { 0 })
+        | (if m.ctrl || m.command { 16 } else { 0 })
+}
+
 fn handle_mouse_report(
     ui: &Ui,
     response: &egui::Response,
     session: &mut TerminalSession,
     content: Rect,
 ) {
+    if !response.hovered() {
+        session.clear_mouse_motion();
+        return;
+    }
     let mode = session.snapshot().mode;
+    let modifiers = ui.input(|i| i.modifiers);
     let events: Vec<egui::Event> = ui.input(|i| i.events.clone());
     for event in events {
         match event {
@@ -248,6 +259,7 @@ fn handle_mouse_report(
                 pos,
                 button,
                 pressed,
+                modifiers,
                 ..
             } if response.rect.contains(pos) => {
                 let local = to_content_local(pos, content);
@@ -258,7 +270,14 @@ fn handle_mouse_report(
                     egui::PointerButton::Secondary => 2,
                     egui::PointerButton::Extra1 | egui::PointerButton::Extra2 => continue,
                 };
-                session.report_mouse(btn, col, row, pressed, false);
+                session.report_mouse(
+                    btn,
+                    col,
+                    row,
+                    pressed,
+                    false,
+                    mouse_modifiers(modifiers),
+                );
             }
             egui::Event::PointerMoved(pos)
                 if response.rect.contains(pos)
@@ -274,12 +293,13 @@ fn handle_mouse_report(
                 } else if ui.input(|i| i.pointer.button_down(egui::PointerButton::Secondary)) {
                     2
                 } else if mode.contains(TermMode::MOUSE_MOTION) {
-                    3 // motion with no button (rare)
+                    3 // motion with no button held (DECSET 1003)
                 } else {
                     continue;
                 };
+                // 1002 only reports drags; 1003 also reports plain hover.
                 if pressed || mode.contains(TermMode::MOUSE_MOTION) {
-                    session.report_mouse(btn, col, row, true, true);
+                    session.report_mouse(btn, col, row, true, true, mouse_modifiers(modifiers));
                 }
             }
             egui::Event::MouseWheel { delta, .. } if response.hovered() => {
@@ -292,8 +312,9 @@ fn handle_mouse_report(
                 let local = to_content_local(pos, content);
                 let (col, row) = session.cell_at(local.x, local.y);
                 let btn = if delta.y > 0.0 { 64 } else { 65 };
-                session.report_mouse(btn, col, row, true, false);
+                session.report_mouse(btn, col, row, true, false, mouse_modifiers(modifiers));
             }
+            egui::Event::PointerGone => session.clear_mouse_motion(),
             _ => {}
         }
     }
