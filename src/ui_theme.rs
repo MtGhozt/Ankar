@@ -6,8 +6,9 @@ use egui::{
 };
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 #[cfg(debug_assertions)]
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 
 // --- Surfaces (midterm global tokens) ---
 pub const BG: Color32 = Color32::from_rgb(0x00, 0x00, 0x00);
@@ -65,20 +66,45 @@ pub const TERM_FG: Color32 = Color32::from_rgb(0xE8, 0xE8, 0xE8);
 pub const PANE_DIM: Color32 = Color32::from_black_alpha(102);
 
 /// UI type scale (logical px). Only these two sizes for chrome text.
-pub const SIZE_UI: f32 = 13.0;
-pub const SIZE_UI_SMALL: f32 = 12.0;
+pub const SIZE_UI: f32 = 12.0;
+pub const SIZE_UI_SMALL: f32 = 11.0;
 /// Aliases kept for call sites; same values as midterm `ui` / `ui_small`.
 pub const SIZE_TITLE: f32 = SIZE_UI;
 pub const SIZE_SUB: f32 = SIZE_UI_SMALL;
 pub const SIZE_KBD: f32 = SIZE_UI_SMALL;
 
-/// Terminal (Hack) size and fixed midterm cell metrics (logical px).
+/// Reference terminal size (Hack) and the cell metrics measured for it (logical px). Other
+/// sizes scale these linearly: `cell_w` / `cell_h`.
 pub const TERM_FONT_SIZE: f32 = 14.33;
 pub const CELL_W: f32 = 8.627;
 pub const CELL_H: f32 = 17.733;
+/// Default `font_size` in config.toml and the zoom limits.
+pub const DEFAULT_TERM_FONT: f32 = 12.0;
+pub const MIN_TERM_FONT: f32 = 8.0;
+pub const MAX_TERM_FONT: f32 = 32.0;
 /// Padding inside each pane before col 0 / row 0.
-pub const PANE_PAD_X: f32 = 14.0;
-pub const PANE_PAD_Y: f32 = 15.33;
+pub const PANE_PAD_X: f32 = 12.0;
+pub const PANE_PAD_Y: f32 = 12.0;
+
+/// Terminal size in use, as f32 bits. Set once per frame from the config; the row/column
+/// helpers below read it so every painter and hit test agrees on the grid.
+static TERM_FONT_BITS: AtomicU32 = AtomicU32::new(TERM_FONT_SIZE.to_bits());
+
+pub fn set_term_font_size(size: f32) {
+    TERM_FONT_BITS.store(size.clamp(MIN_TERM_FONT, MAX_TERM_FONT).to_bits(), Ordering::Relaxed);
+}
+
+pub fn term_font_size() -> f32 {
+    f32::from_bits(TERM_FONT_BITS.load(Ordering::Relaxed))
+}
+
+pub fn cell_w() -> f32 {
+    CELL_W * term_font_size() / TERM_FONT_SIZE
+}
+
+pub fn cell_h() -> f32 {
+    CELL_H * term_font_size() / TERM_FONT_SIZE
+}
 
 /// Round a logical coordinate onto a physical pixel boundary.
 #[inline]
@@ -92,13 +118,13 @@ pub fn snap(v: f32, ppp: f32) -> f32 {
 /// Row top for terminal row `n` (0-based), given the pane's content top (after pad).
 #[inline]
 pub fn term_row_top(content_top: f32, row: i32, ppp: f32) -> f32 {
-    snap(content_top + row as f32 * CELL_H, ppp)
+    snap(content_top + row as f32 * cell_h(), ppp)
 }
 
 /// Glyph left edge for column `col` (0-based).
 #[inline]
 pub fn term_col_x(content_left: f32, col: u16, ppp: f32) -> f32 {
-    snap(content_left + col as f32 * CELL_W, ppp)
+    snap(content_left + col as f32 * cell_w(), ppp)
 }
 
 pub const RADIUS_CTRL: u8 = 8;
@@ -253,6 +279,8 @@ pub fn apply(ctx: &Context) {
     ctx.options_mut(|o| {
         o.fallback_theme = Theme::Dark;
         o.sync_window_theme = true;
+        // Ctrl+= / Ctrl+- / Ctrl+0 zoom the terminal font (app.rs), not the whole UI.
+        o.zoom_with_keyboard = false;
     });
     ctx.send_viewport_cmd(egui::ViewportCommand::SetTheme(egui::SystemTheme::Dark));
 
@@ -279,9 +307,9 @@ pub fn apply(ctx: &Context) {
 }
 
 fn apply_spacing(s: &mut Style) {
-    s.spacing.item_spacing = egui::vec2(8.0, 4.0);
-    s.spacing.button_padding = egui::vec2(10.0, 5.0);
-    s.spacing.interact_size.y = 30.0;
+    s.spacing.item_spacing = egui::vec2(6.0, 3.0);
+    s.spacing.button_padding = egui::vec2(8.0, 4.0);
+    s.spacing.interact_size.y = 26.0;
     s.spacing.scroll = egui::style::ScrollStyle::floating();
 }
 
@@ -292,7 +320,7 @@ fn apply_text_styles(s: &mut Style) {
         (TextStyle::Body, FontId::new(SIZE_UI, Proportional)),
         (TextStyle::Button, FontId::new(SIZE_UI, Proportional)),
         (TextStyle::Heading, FontId::new(SIZE_UI, Proportional)),
-        (TextStyle::Monospace, FontId::new(TERM_FONT_SIZE, Monospace)),
+        (TextStyle::Monospace, FontId::new(DEFAULT_TERM_FONT, Monospace)),
     ]);
 }
 

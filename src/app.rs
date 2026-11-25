@@ -200,6 +200,15 @@ impl eframe::App for AnkarApp {
         let cwd = self.workspace.active_tab().and_then(|t| t.cwd.clone());
         self.files.sync_shell_cwd(cwd);
 
+        if let Some(size) = ui.input_mut(|i| zoom_request(i, self.config.font_size)) {
+            self.config.font_size = size;
+            resize_now(&mut self.workspace);
+            if !self.config_load_failed {
+                let _ = self.config.save();
+            }
+        }
+        ui_theme::set_term_font_size(self.config.font_size);
+
         handle_shortcuts(
             ui,
             &mut self.workspace,
@@ -1021,6 +1030,30 @@ fn consume_chord(i: &mut egui::InputState, mods: Modifiers, key: Key) -> bool {
     hit
 }
 
+/// Ctrl+= / Ctrl+- / Ctrl+0: the new terminal font size, or `None` when no zoom key was hit.
+/// "+" is Shift+= on most layouts, so both are accepted.
+fn zoom_request(i: &mut egui::InputState, current: f32) -> Option<f32> {
+    let cmd = Modifiers::COMMAND;
+    let cmd_shift = Modifiers::COMMAND | Modifiers::SHIFT;
+    let mut hit = |keys: &[Key]| {
+        keys.iter()
+            .fold(false, |acc, k| consume_chord(i, cmd, *k) | consume_chord(i, cmd_shift, *k) | acc)
+    };
+    if hit(&[Key::Plus, Key::Equals]) {
+        Some(zoomed_font(current, 1.0))
+    } else if hit(&[Key::Minus]) {
+        Some(zoomed_font(current, -1.0))
+    } else if hit(&[Key::Num0]) {
+        Some(ui_theme::DEFAULT_TERM_FONT)
+    } else {
+        None
+    }
+}
+
+fn zoomed_font(current: f32, step: f32) -> f32 {
+    (current + step).clamp(ui_theme::MIN_TERM_FONT, ui_theme::MAX_TERM_FONT)
+}
+
 fn handle_shortcuts(
     ui: &egui::Ui,
     workspace: &mut Workspace,
@@ -1342,6 +1375,26 @@ mod tests {
         assert!(hit(key_event(Key::T, Some(Key::T))));
         assert!(hit(key_event(Key::Y, Some(Key::T))), "other logical key, T by position");
         assert!(!hit(key_event(Key::Y, Some(Key::Y))));
+    }
+
+    #[test]
+    fn ctrl_equals_minus_zero_zoom_the_terminal_font_within_limits() {
+        let press = |key, modifiers| {
+            let ev = egui::Event::Key { key, physical_key: Some(key), pressed: true, repeat: false, modifiers };
+            let ctx = Context::default();
+            ctx.begin_pass(egui::RawInput { events: vec![ev], ..Default::default() });
+            let size = ctx.input_mut(|i| zoom_request(i, 12.0));
+            let _ = ctx.end_pass();
+            size
+        };
+        let ctrl = Modifiers::COMMAND;
+        assert_eq!(press(Key::Equals, ctrl), Some(13.0));
+        assert_eq!(press(Key::Plus, ctrl | Modifiers::SHIFT), Some(13.0));
+        assert_eq!(press(Key::Minus, ctrl), Some(11.0));
+        assert_eq!(press(Key::Num0, ctrl), Some(ui_theme::DEFAULT_TERM_FONT));
+        assert_eq!(press(Key::Equals, Modifiers::NONE), None);
+        assert_eq!(zoomed_font(ui_theme::MAX_TERM_FONT, 1.0), ui_theme::MAX_TERM_FONT);
+        assert_eq!(zoomed_font(ui_theme::MIN_TERM_FONT, -1.0), ui_theme::MIN_TERM_FONT);
     }
 
     #[test]

@@ -1,7 +1,7 @@
 use super::backend::{CellMetrics, ResizeState, TerminalSession, VisibleCell};
 use super::resize::DEBOUNCE;
 use super::bindings::{map_key, KeyAction};
-use crate::ui_theme::{self, CELL_H, CELL_W, PANE_PAD_X, PANE_PAD_Y};
+use crate::ui_theme::{self, PANE_PAD_X, PANE_PAD_Y};
 use alacritty_terminal::index::{Column, Line, Point};
 use alacritty_terminal::selection::{SelectionRange, SelectionType};
 use alacritty_terminal::term::cell::Flags;
@@ -32,12 +32,11 @@ impl TerminalView {
             ui.ctx().copy_text(text);
         }
 
-        // Midterm: Hack at 14.33 with fixed cell metrics (config size is for scroll only).
-        let paint_size = ui_theme::TERM_FONT_SIZE;
-        let font_id = FontId::new(paint_size, FONT_FAMILY);
+        // Hack at the configured size; cell metrics scale from the measured reference.
+        let font_id = FontId::new(ui_theme::term_font_size(), FONT_FAMILY);
         let metrics = CellMetrics {
-            width: CELL_W,
-            height: CELL_H,
+            width: ui_theme::cell_w(),
+            height: ui_theme::cell_h(),
         };
         let content = content_rect(response.rect, ppp);
         match session.resize(content.width(), content.height(), metrics) {
@@ -1217,6 +1216,7 @@ fn paint_row_underlines(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ui_theme::{CELL_H, CELL_W};
     use alacritty_terminal::vte::ansi::{Color as TermColor, NamedColor, Rgb};
     use crate::terminal::backend::Snapshot;
     use crate::terminal::theme::TermColors;

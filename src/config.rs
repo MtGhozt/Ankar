@@ -34,7 +34,7 @@ fn default_scrollback_lines() -> usize {
 }
 
 fn default_font_size() -> f32 {
-    crate::ui_theme::TERM_FONT_SIZE
+    crate::ui_theme::DEFAULT_TERM_FONT
 }
 
 fn default_accent() -> String {

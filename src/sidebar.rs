@@ -1093,7 +1093,7 @@ fn draw_session_row(
     let Some(tab) = workspace.tabs.get(idx) else {
         return;
     };
-    const ROW_H: f32 = 45.33;
+    const ROW_H: f32 = 40.0;
     let selected = idx == workspace.active_tab;
     let (agent_icon, agent_color, logo_key) = crate::logos::agent_visual(tab, config);
     let logo_tex = logo_key.and_then(|k| logos.get(ui.ctx(), k, 18.0));
