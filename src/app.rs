@@ -575,7 +575,7 @@ impl eframe::App for AnkarApp {
                 .show(ui, |ui| {
                     let rect = ui.max_rect();
                     let display = shown_cwd.as_deref().or(cwd.as_deref());
-                    match self.footer.draw(ui, rect, display, &git) {
+                    match self.footer.draw(ui, rect, display, &git, &self.git) {
                         Some(FooterAction::Cd(dir)) if accept_cd => {
                             let here = self.workspace.active_tab().map(|t| (t.id, t.focused_pane, t.cwd.clone()));
                             self.cd_active_shell(&dir);

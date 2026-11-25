@@ -17,8 +17,8 @@ fn footer_popup_max_height() -> f32 {
     4.0 * 2.0 + 6.0 * 2.0 + ui_theme::SIZE_UI + 4.0 + 5.0 + ROW_H * MAX_ROWS as f32
 }
 
-/// Keep the footer picker fully on screen when it would cross the top edge.
-fn clamp_footer_popup_anchor(ctx: &egui::Context, anchor: Pos2) -> Pos2 {
+/// Keep a footer popup fully on screen when it would cross the top edge.
+pub(crate) fn clamp_footer_popup_anchor(ctx: &egui::Context, anchor: Pos2) -> Pos2 {
     let top = ctx.content_rect().top();
     let y = anchor.y.max(top + footer_popup_max_height());
     Pos2::new(anchor.x, y)
@@ -125,6 +125,12 @@ fn first_selectable(rows: &[Row], entries: &[Entry]) -> usize {
 impl DirPicker {
     pub fn is_open(&self) -> bool {
         self.dir.is_some()
+    }
+
+    pub fn close(&mut self) {
+        self.dir = None;
+        self.new_session = false;
+        self.folders_only = false;
     }
 
     pub fn toggle(&mut self, cwd: &Path) {

@@ -2,12 +2,14 @@
 //! branch chip, and a changed-files chip with +N/-N lines that opens the changes pane. The git
 //! facts come from the app's [`crate::changes::GitWatch`].
 
-use crate::changes::GitSnapshot;
-use crate::dir_picker::DirPicker;
+use crate::changes::{GitSnapshot, GitWatch};
+use crate::dir_picker::{self, DirPicker};
+use crate::gitinfo;
 use crate::ui_theme::{self, Icon};
 use egui::text::LayoutJob;
-use egui::{Color32, CornerRadius, FontFamily, FontId, Pos2, Rect, Sense, Stroke, TextFormat, Ui, Vec2};
+use egui::{Align2, Color32, CornerRadius, FontFamily, FontId, Frame, Key, Modifiers, Pos2, Rect, Sense, Stroke, TextFormat, Ui, Vec2};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, Receiver};
 
 const FOOTER_BOTTOM_MARGIN: f32 = 8.0;
 const FOOTER_BLOCK_PAD: f32 = 6.0;
@@ -21,6 +23,7 @@ pub const FOOTER_H: f32 = FOOTER_BOTTOM_MARGIN + FOOTER_BLOCK_H;
 #[derive(Default)]
 pub struct ShellFooter {
     picker: DirPicker,
+    branches: BranchMenu,
 }
 
 pub enum FooterAction {
@@ -56,7 +59,14 @@ fn append(job: &mut LayoutJob, text: &str, color: Color32) {
 
 impl ShellFooter {
     /// Paints the footer into `rect`; reports a cd from the picker or a click on the changes chip.
-    pub fn draw(&mut self, ui: &mut Ui, rect: Rect, cwd: Option<&Path>, git: &GitSnapshot) -> Option<FooterAction> {
+    pub fn draw(
+        &mut self,
+        ui: &mut Ui,
+        rect: Rect,
+        cwd: Option<&Path>,
+        git: &GitSnapshot,
+        watch: &GitWatch,
+    ) -> Option<FooterAction> {
         let block_bottom = rect.bottom() - FOOTER_BOTTOM_MARGIN;
         let block_top = block_bottom - FOOTER_BLOCK_H;
         let block = Rect::from_min_max(egui::pos2(rect.left(), block_top), egui::pos2(rect.right(), block_bottom));
@@ -71,22 +81,35 @@ impl ShellFooter {
         let (branch, totals) = (git.branch.clone(), git.totals());
         let mut x = row.left();
         let mut action = None;
+        self.branches.poll(watch);
+        let mut cd = None;
         if let Some(cwd) = cwd {
             let text = display_cwd(cwd, dirs::home_dir().as_deref());
             let job = plain(&text, ui_theme::TEXT_MUTED);
             let resp = chip(ui, &mut x, rect, Some(ChipIcon::Glyph(Icon::Folder)), job, "cwd");
             if resp.clicked() {
+                self.branches.dismiss();
                 self.picker.toggle(cwd);
             }
-            if let Some(dir) = self
+            cd = self
                 .picker
-                .show(ui.ctx(), resp.rect.left_top() - Vec2::new(0.0, 4.0), resp.rect, Some(cwd))
-            {
-                action = Some(FooterAction::Cd(dir));
-            }
+                .show(ui.ctx(), resp.rect.left_top() - Vec2::new(0.0, 4.0), resp.rect, Some(cwd));
         }
         if let Some(branch) = branch {
-            chip(ui, &mut x, rect, Some(ChipIcon::Branch), plain(&branch, ui_theme::TEXT_MUTED), "branch");
+            let resp = chip(ui, &mut x, rect, Some(ChipIcon::Branch), plain(&branch, ui_theme::TEXT_MUTED), "branch");
+            if resp.clicked() {
+                // The cd popup can cover this chip; that click is not a directory choice.
+                self.picker.close();
+                cd = None;
+                if let Some(root) = git.root.as_deref() {
+                    self.branches.toggle(ui.ctx(), root);
+                }
+            }
+            let anchor = resp.rect.left_top() - Vec2::new(0.0, 4.0);
+            self.branches.show(ui.ctx(), anchor, resp.rect, git.root.as_deref(), &branch);
+        }
+        if let Some(dir) = cd {
+            action = Some(FooterAction::Cd(dir));
         }
         if let Some((files, added, removed)) = totals.filter(|t| t.0 > 0) {
             let mut job = plain(&files.to_string(), ui_theme::TEXT_MUTED);
@@ -154,6 +177,198 @@ fn paint_branch_icon(painter: &egui::Painter, center: Pos2, color: Color32) {
         Color32::TRANSPARENT,
         stroke,
     ));
+}
+
+const MENU_W: f32 = 360.0;
+const MENU_ROW_H: f32 = 24.0;
+const MENU_ROWS: usize = 10;
+
+/// Local-branch list above the footer chip. Listing and `git switch` run on `ankar-git-job`.
+#[derive(Default)]
+struct BranchMenu {
+    open: bool,
+    root: Option<PathBuf>,
+    query: String,
+    names: Vec<String>,
+    list: Option<Receiver<Vec<String>>>,
+    job: Option<Receiver<Result<(), String>>>,
+    error: Option<String>,
+    just_opened: bool,
+}
+
+fn spawn_list(ctx: &egui::Context, root: PathBuf) -> Option<Receiver<Vec<String>>> {
+    let (tx, rx) = mpsc::channel();
+    let ctx = ctx.clone();
+    let spawned = std::thread::Builder::new().name("ankar-git-job".into()).spawn(move || {
+        let names = gitinfo::run(
+            &root,
+            &["for-each-ref", "--sort=-committerdate", "refs/heads", "--format=%(refname:short)"],
+        )
+        .map(|s| s.lines().filter(|l| !l.is_empty()).map(str::to_owned).collect())
+        .unwrap_or_default();
+        let _ = tx.send(names);
+        ctx.request_repaint();
+    });
+    spawned.ok()?;
+    Some(rx)
+}
+
+fn spawn_switch(ctx: &egui::Context, root: PathBuf, branch: String) -> Option<Receiver<Result<(), String>>> {
+    let (tx, rx) = mpsc::channel();
+    let ctx = ctx.clone();
+    let spawned = std::thread::Builder::new().name("ankar-git-job".into()).spawn(move || {
+        let _ = tx.send(switch_branch(&root, &branch));
+        ctx.request_repaint();
+    });
+    spawned.ok()?;
+    Some(rx)
+}
+
+fn switch_branch(root: &Path, branch: &str) -> Result<(), String> {
+    let out = gitinfo::command(root, &["switch", "--", branch])
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .output()
+        .map_err(|e| format!("git: {e}"))?;
+    if out.status.success() {
+        return Ok(());
+    }
+    let err = String::from_utf8_lossy(&out.stderr);
+    let text = err.trim();
+    Err(if text.is_empty() { "git failed".into() } else { text.to_owned() })
+}
+
+impl BranchMenu {
+    fn dismiss(&mut self) {
+        self.open = false;
+    }
+
+    fn toggle(&mut self, ctx: &egui::Context, root: &Path) {
+        if self.open {
+            self.open = false;
+            return;
+        }
+        self.open = true;
+        self.root = Some(root.to_path_buf());
+        self.query.clear();
+        self.names.clear();
+        self.error = None;
+        self.just_opened = true;
+        self.list = spawn_list(ctx, root.to_path_buf());
+    }
+
+    /// Applies a finished `git switch` and drops the wait on [`GitWatch::refresh`].
+    fn poll(&mut self, watch: &GitWatch) {
+        if let Some(Ok(names)) = self.list.as_ref().map(|rx| rx.try_recv()) {
+            self.list = None;
+            self.names = names;
+        }
+        if let Some(Ok(result)) = self.job.as_ref().map(|rx| rx.try_recv()) {
+            self.job = None;
+            watch.invalidate();
+            if self.open {
+                match result {
+                    Ok(()) => self.open = false,
+                    Err(e) => self.error = Some(e),
+                }
+            }
+        }
+    }
+
+    fn show(&mut self, ctx: &egui::Context, anchor: Pos2, dismiss: Rect, root: Option<&Path>, current: &str) {
+        if self.open && self.root.as_deref() != root {
+            self.open = false;
+        }
+        if !self.open {
+            return;
+        }
+        let esc = ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape));
+        let anchor = dir_picker::clamp_footer_popup_anchor(ctx, anchor);
+        let mut pick = None;
+        let area = egui::Area::new(egui::Id::unique("footer_branch_menu"))
+            .order(egui::Order::Foreground)
+            .pivot(Align2::LEFT_BOTTOM)
+            .fixed_pos(anchor)
+            .show(ctx, |ui| {
+                Frame::NONE
+                    .fill(ui_theme::SURFACE_2)
+                    .stroke(Stroke::new(1.0, ui_theme::CHIP_BORDER))
+                    .corner_radius(CornerRadius::same(ui_theme::RADIUS_ROW))
+                    .shadow(ui_theme::popup_shadow())
+                    .inner_margin(4.0)
+                    .show(ui, |ui| {
+                        ui.set_width(MENU_W);
+                        ui.spacing_mut().item_spacing = Vec2::ZERO;
+                        let edit = egui::TextEdit::singleline(&mut self.query)
+                            .hint_text("Search branches...")
+                            .font(FontId::new(ui_theme::SIZE_UI, FontFamily::Proportional))
+                            .text_color(ui_theme::TEXT)
+                            .frame(Frame::NONE)
+                            .margin(Vec2::new(8.0, 6.0))
+                            .desired_width(f32::INFINITY);
+                        let resp = ui.add(edit);
+                        if std::mem::take(&mut self.just_opened) {
+                            resp.request_focus();
+                        }
+                        let (line, _) = ui.allocate_exact_size(Vec2::new(MENU_W, 5.0), Sense::hover());
+                        ui.painter().hline(line.x_range(), line.center().y, Stroke::new(1.0, ui_theme::CHIP_BORDER));
+                        let q = self.query.trim().to_lowercase();
+                        let names: Vec<String> = self
+                            .names
+                            .iter()
+                            .filter(|n| q.is_empty() || n.to_lowercase().contains(&q))
+                            .cloned()
+                            .collect();
+                        let error = self.error.clone();
+                        let busy = self.job.is_some();
+                        egui::ScrollArea::vertical()
+                            .max_height(MENU_ROW_H * MENU_ROWS as f32)
+                            .auto_shrink([false, true])
+                            .show(ui, |ui| {
+                                if let Some(err) = error {
+                                    ui.add(
+                                        egui::Label::new(
+                                            egui::RichText::new(err).size(ui_theme::SIZE_UI_SMALL).color(ui_theme::ERROR),
+                                        )
+                                        .wrap(),
+                                    );
+                                }
+                                for name in names {
+                                    let (rect, resp) = ui.allocate_exact_size(Vec2::new(MENU_W, MENU_ROW_H), Sense::click());
+                                    let on = name == current;
+                                    if resp.hovered() {
+                                        ui.painter().rect_filled(rect, CornerRadius::same(4), ui_theme::ROW_HOVER);
+                                    }
+                                    let color = if on { ui_theme::TEXT } else { ui_theme::TEXT_MUTED };
+                                    let label = if on { format!("\u{2713} {name}") } else { format!("   {name}") };
+                                    ui.painter().text(
+                                        egui::pos2(rect.left() + 10.0, rect.center().y),
+                                        Align2::LEFT_CENTER,
+                                        label,
+                                        FontId::new(ui_theme::SIZE_UI, FontFamily::Proportional),
+                                        color,
+                                    );
+                                    if resp.clicked() && !busy {
+                                        pick = Some(name);
+                                    }
+                                }
+                            });
+                    });
+            });
+        let clicked_away = ctx.input(|i| {
+            i.pointer.any_pressed()
+                && i.pointer.interact_pos().is_some_and(|p| !area.response.rect.contains(p) && !dismiss.contains(p))
+        });
+        if esc || clicked_away {
+            self.open = false;
+            return;
+        }
+        if self.job.is_none() {
+            if let Some((name, root)) = pick.zip(self.root.clone()) {
+                self.error = None;
+                self.job = spawn_switch(ctx, root, name);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
