@@ -648,6 +648,23 @@ fn is_box_geometry(c: char) -> bool {
         || matches!(c, '\u{2580}'..='\u{259F}')
 }
 
+/// Snap a span to whole physical pixels so neighbours share their edge exactly.
+fn px_span(lo: f32, hi: f32, ppp: f32) -> (f32, f32) {
+    let lo_px = (lo * ppp).round();
+    let hi_px = (hi * ppp).round().max(lo_px + 1.0);
+    (lo_px / ppp, hi_px / ppp)
+}
+
+/// Filled rect as a raw mesh: no anti-aliasing halo, so adjacent rects tile.
+fn push_solid_rect(shapes: &mut Vec<Shape>, rect: Rect, color: Color32) {
+    if rect.width() <= 0.0 || rect.height() <= 0.0 {
+        return;
+    }
+    let mut mesh = egui::Mesh::default();
+    mesh.add_colored_rect(rect, color);
+    shapes.push(Shape::mesh(mesh));
+}
+
 type Frac = (f32, f32, f32, f32);
 
 fn push_rect(shapes: &mut Vec<Shape>, x: f32, y: f32, w: f32, h: f32, fg: Color32, fx: Frac) {
@@ -788,7 +805,8 @@ fn paint_row_box_drawing(
             ui_theme::term_col_x(origin_x, cell.col.saturating_add(width_cells as u16), ppp);
         let w = (x_end - x).max(cell_w * width_cells);
         let cx = x + w * 0.5;
-        let cy = y + cell_h * 0.5;
+        // Centre on whole physical pixels so the two arms share one clean edge.
+        let cy = ui_theme::snap(y + row_h * 0.5, ppp);
         if paint_block(shapes, c, x, y, w, row_h, fg) {
             continue;
         }
@@ -807,23 +825,37 @@ fn paint_row_box_drawing(
         let Some(arms) = box_arms(c) else {
             continue;
         };
-        let mut line = |a: Pos2, b: Pos2, weight: Weight| {
-            shapes.push(Shape::LineSegment {
-                points: [a, b],
-                stroke: Stroke::new(weight.px(cell_w, cell_h), fg),
-            });
+        let vertical = |shapes: &mut Vec<Shape>, weight: Weight, y0: f32, y1: f32| {
+            let half = weight.px(cell_w, cell_h) * 0.5;
+            let (x0, x1) = px_span(cx - half, cx + half, ppp);
+            push_solid_rect(
+                shapes,
+                Rect::from_min_max(Pos2::new(x0, y0), Pos2::new(x1, y1)),
+                fg,
+            );
         };
+        let horizontal = |shapes: &mut Vec<Shape>, weight: Weight, x0: f32, x1: f32| {
+            let half = weight.px(cell_w, cell_h) * 0.5;
+            let (y0, y1) = px_span(cy - half, cy + half, ppp);
+            push_solid_rect(
+                shapes,
+                Rect::from_min_max(Pos2::new(x0, y0), Pos2::new(x1, y1)),
+                fg,
+            );
+        };
+        // Full row spans: row N's bottom is exactly row N+1's top, so a vertical
+        // bar stays solid instead of showing the line-cap anti-aliasing seams.
         if let Some(weight) = arms.up {
-            line(Pos2::new(cx, y), Pos2::new(cx, cy), weight);
+            vertical(shapes, weight, y, cy);
         }
         if let Some(weight) = arms.down {
-            line(Pos2::new(cx, cy), Pos2::new(cx, y + row_h), weight);
+            vertical(shapes, weight, cy, y + row_h);
         }
         if let Some(weight) = arms.left {
-            line(Pos2::new(x, cy), Pos2::new(cx, cy), weight);
+            horizontal(shapes, weight, x, cx);
         }
         if let Some(weight) = arms.right {
-            line(Pos2::new(cx, cy), Pos2::new(x + w, cy), weight);
+            horizontal(shapes, weight, cx, x + w);
         }
     }
 }
@@ -1066,6 +1098,51 @@ fn paint_row_underlines(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alacritty_terminal::vte::ansi::{Color as TermColor, NamedColor, Rgb};
+    use crate::terminal::theme::TermColors;
+
+    fn cell(c: char) -> VisibleCell {
+        VisibleCell {
+            line: 0,
+            col: 0,
+            c,
+            fg: TermColor::Spec(Rgb {
+                r: 118,
+                g: 153,
+                b: 254,
+            }),
+            bg: TermColor::Named(NamedColor::Background),
+            flags: Flags::empty(),
+        }
+    }
+
+    #[test]
+    fn heavy_vertical_fills_the_snapped_row_without_seams() {
+        let cell = cell('┃');
+        let ppp = 1.5;
+        let mut shapes = Vec::new();
+        paint_row_box_drawing(
+            &mut shapes,
+            0.0,
+            0.0,
+            CELL_W,
+            CELL_H,
+            18.0,
+            &[&cell],
+            None,
+            &TermColors::default(),
+            ppp,
+        );
+        assert_eq!(shapes.len(), 2, "up and down arms");
+        let top = shapes[0].visual_bounding_rect();
+        let bottom = shapes[1].visual_bounding_rect();
+        assert!((top.min.y - 0.0).abs() < 1e-4);
+        assert!((top.max.y - bottom.min.y).abs() < 1e-4, "shared row edge");
+        assert!((bottom.max.y - 18.0).abs() < 1e-4);
+        for v in [top.min.x, top.max.x, top.min.y, top.max.y] {
+            assert!(((v * ppp) - (v * ppp).round()).abs() < 1e-4, "whole pixel");
+        }
+    }
 
     #[test]
     fn heavy_is_thicker_and_blocks_keep_their_fraction() {
