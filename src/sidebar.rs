@@ -340,18 +340,21 @@ pub fn draw(
         egui::pos2(kbd_right - kbd_w * 0.5, search_rect.center().y),
         Vec2::new(kbd_w, kbd_h),
     );
-    painter.rect(
-        kbd_rect,
-        CornerRadius::same(ui_theme::RADIUS_KBD),
-        ui_theme::KBD_BG,
-        Stroke::new(1.0, ui_theme::KBD_BORDER),
-        egui::StrokeKind::Inside,
-    );
-    painter.galley(
-        kbd_rect.center() - kbd_galley.size() * 0.5,
-        kbd_galley,
-        ui_theme::TEXT_MUTED,
-    );
+    // The chord is a hint, not a label: shown only while hovering or typing in the field.
+    if ui.rect_contains_pointer(search_rect) || ui.memory(|m| m.has_focus(search_id)) {
+        painter.rect(
+            kbd_rect,
+            CornerRadius::same(ui_theme::RADIUS_KBD),
+            ui_theme::KBD_BG,
+            Stroke::new(1.0, ui_theme::KBD_BORDER),
+            egui::StrokeKind::Inside,
+        );
+        painter.galley(
+            kbd_rect.center() - kbd_galley.size() * 0.5,
+            kbd_galley,
+            ui_theme::TEXT_MUTED,
+        );
+    }
 
     // Text field between icon and kbd.
     let edit_left = map_sx(42.67);
@@ -696,8 +699,7 @@ pub fn draw(
         }
     }
     if new_session {
-        let profile = crate::shell::default_profile();
-        let _ = workspace.open_tab(ui.ctx(), &profile, None);
+        workspace.new_session(ui.ctx());
     }
     if new_in_folder {
         let profile = crate::shell::default_profile();

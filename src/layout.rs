@@ -158,6 +158,13 @@ impl Workspace {
         Ok(tab_id)
     }
 
+    /// The "New session" action (sidebar button and Ctrl+Shift+T): default shell, home folder.
+    pub fn new_session(&mut self, ctx: &Context) {
+        if let Err(e) = self.open_tab(ctx, &crate::shell::default_profile(), None) {
+            log::warn!("new session failed: {e}");
+        }
+    }
+
     pub fn open_command_tab(
         &mut self,
         ctx: &Context,

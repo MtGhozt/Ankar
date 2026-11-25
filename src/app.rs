@@ -1009,6 +1009,22 @@ fn tab_bar_right_icon(ui: &mut egui::Ui, kind: Icon, tip: &str) -> egui::Respons
     resp.on_hover_text(tip)
 }
 
+/// consume_key, but a chord also matches by physical key: a layout that reports another logical
+/// key for Ctrl+Shift+<letter> must not silently kill the shortcut.
+fn consume_chord(i: &mut egui::InputState, mods: Modifiers, key: Key) -> bool {
+    if i.consume_key(mods, key) {
+        return true;
+    }
+    let mut hit = false;
+    i.events.retain(|e| {
+        let is_match = matches!(e, egui::Event::Key { physical_key: Some(k), pressed: true, modifiers, .. }
+            if *k == key && modifiers.matches_logically(mods));
+        hit |= is_match;
+        !is_match
+    });
+    hit
+}
+
 fn handle_shortcuts(
     ui: &egui::Ui,
     workspace: &mut Workspace,
@@ -1023,41 +1039,40 @@ fn handle_shortcuts(
     let alt = Modifiers::ALT;
 
     ui.input_mut(|i| {
-        if i.consume_key(cs, Key::I) {
+        if consume_chord(i, cs, Key::I) {
             stats.toggle();
         }
-        if i.consume_key(cs, Key::T) {
-            let profile = crate::shell::default_profile();
-            let cwd = workspace.active_tab().and_then(|t| t.cwd.clone());
-            let _ = workspace.open_tab(&ctx, &profile, cwd);
+        if consume_chord(i, cs, Key::T) {
+            workspace.new_session(&ctx);
         }
-        if i.consume_key(cs, Key::W) && workspace.close_focused_pane() {
+        if consume_chord(i, cs, Key::W) && workspace.close_focused_pane() {
             workspace.close_active_tab();
         }
-        if i.consume_key(cs, Key::K) {
+        if consume_chord(i, cs, Key::K) {
             palette.open = !palette.open;
             if !palette.open {
                 palette.query.clear();
             }
         }
-        if i.consume_key(cs, Key::B) {
+        if consume_chord(i, cs, Key::B) {
             sidebar.show = !sidebar.show;
         }
-        if i.consume_key(cs, Key::F) {
+        if consume_chord(i, cs, Key::F) {
             sidebar.view = SidebarView::Files;
             sidebar.show = true;
         }
-        if i.consume_key(cs, Key::L) {
+        if consume_chord(i, cs, Key::L) {
             sidebar.show = true;
+            sidebar.view = SidebarView::Sessions;
             sidebar.search_focus = true;
         }
-        if i.consume_key(cs, Key::P) {
+        if consume_chord(i, cs, Key::P) {
             workspace.toggle_pin_active();
         }
-        if i.consume_key(cs, Key::N) {
+        if consume_chord(i, cs, Key::N) {
             *show_menu = !*show_menu;
         }
-        if i.consume_key(cs, Key::S) {
+        if consume_chord(i, cs, Key::S) {
             if let Err(e) = persist::save_workspace(workspace, &sidebar.archived) {
                 log::warn!("manual save failed: {e}");
             } else {
@@ -1066,13 +1081,13 @@ fn handle_shortcuts(
                 workspace.last_autosave = std::time::Instant::now();
             }
         }
-        if i.consume_key(cs, Key::D) {
+        if consume_chord(i, cs, Key::D) {
             let _ = workspace.split_focused(&ctx, SplitDir::Vertical);
         }
-        if i.consume_key(cs, Key::E) {
+        if consume_chord(i, cs, Key::E) {
             let _ = workspace.split_focused(&ctx, SplitDir::Horizontal);
         }
-        if i.consume_key(cs, Key::Tab) && !workspace.tabs.is_empty() {
+        if consume_chord(i, cs, Key::Tab) && !workspace.tabs.is_empty() {
             let n = workspace.tabs.len();
             workspace.active_tab = (workspace.active_tab + n - 1) % n;
         }
@@ -1308,6 +1323,30 @@ fn render_node(
 mod tests {
     use super::*;
     use egui::viewport::ResizeDirection::*;
+
+    #[test]
+    fn chord_matches_by_logical_or_physical_key() {
+        let cs = Modifiers::COMMAND | Modifiers::SHIFT;
+        let key_event = |key, physical_key| egui::Event::Key {
+            key,
+            physical_key,
+            pressed: true,
+            repeat: false,
+            modifiers: cs,
+        };
+        let ctx = Context::default();
+        let hit = |ev| {
+            let raw = egui::RawInput { events: vec![ev], ..Default::default() };
+            let mut hit = false;
+            ctx.begin_pass(raw);
+            ctx.input_mut(|i| hit = consume_chord(i, cs, Key::T));
+            let _ = ctx.end_pass();
+            hit
+        };
+        assert!(hit(key_event(Key::T, Some(Key::T))));
+        assert!(hit(key_event(Key::Y, Some(Key::T))), "other logical key, T by position");
+        assert!(!hit(key_event(Key::Y, Some(Key::Y))));
+    }
 
     #[test]
     fn window_edges_and_corners_map_to_resize_directions() {
