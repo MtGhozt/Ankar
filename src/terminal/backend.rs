@@ -186,6 +186,8 @@ impl TerminalSession {
         let env = HashMap::from([
             ("TERM".to_owned(), "xterm-256color".to_owned()),
             ("COLORTERM".to_owned(), "truecolor".to_owned()),
+            // Dark-background hint (foreground 15, background 0) for apps that cannot query it.
+            ("COLORFGBG".to_owned(), "15;0".to_owned()),
             ("TERM_PROGRAM".to_owned(), "Ankar".to_owned()),
             ("TERM_PROGRAM_VERSION".to_owned(), env!("CARGO_PKG_VERSION").to_owned()),
         ]);
@@ -814,6 +816,25 @@ mod tests {
             ],
             "bytes doubled, same terminator as the query"
         );
+    }
+
+    /// What Junie (and any TUI picking light/dark) sends: OSC 11 with BEL, expecting the
+    /// background back with the same terminator; black means "dark theme".
+    #[test]
+    fn osc_11_query_with_bel_gets_the_black_background_back_with_bel() {
+        use alacritty_terminal::vte::ansi::Processor;
+        let (tx, rx) = mpsc::channel();
+        let mut term = Term::new(term::Config::default(), &TermSize::new(80, 24), EventProxy(tx));
+        Processor::<alacritty_terminal::vte::ansi::StdSyncHandler>::new().advance(&mut term, b"\x1b]11;?\x07");
+        let colors = TermColors::default();
+        let replies: Vec<Vec<u8>> = rx
+            .try_iter()
+            .filter_map(|e| match e {
+                Event::ColorRequest(i, format) => query_color(&colors, i, None).map(|c| format(c).into_bytes()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(replies, [b"\x1b]11;rgb:0000/0000/0000\x07".to_vec()]);
     }
 
     #[test]

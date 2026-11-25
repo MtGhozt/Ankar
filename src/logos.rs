@@ -61,6 +61,14 @@ impl LogoAtlas {
         self.installed.get(command).copied().unwrap_or(true)
     }
 
+    /// Runs the PATH check again: the startup result goes stale when a tool is installed
+    /// (or PATH changes) while Ankar is open.
+    pub fn recheck(&mut self, command: &str) -> bool {
+        let ok = command_installed(command);
+        self.installed.insert(command.to_owned(), ok);
+        ok
+    }
+
     fn poll_installed(&mut self) {
         let Some(rx) = &self.installed_rx else {
             return;
@@ -186,9 +194,30 @@ pub fn agent_visual(tab: &Tab, config: &Config) -> (Icon, Color32, Option<&'stat
     (Icon::Terminal, ui_theme::TEXT_MUTED, None)
 }
 
+/// True if `command` resolves on PATH: first by looking for it (and its `.exe`/`.cmd`/`.bat`
+/// shims) in every PATH folder, then with `where.exe` (App Execution Aliases and the like).
+pub fn command_installed(command: &str) -> bool {
+    let pathext = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into());
+    std::env::var_os("PATH").is_some_and(|path| on_path(command, &path, &pathext))
+        || where_exe(command)
+}
+
+/// Windows runs a bare name through PATHEXT, so an extension-less file does not count: only
+/// `<name><ext>` for each PATHEXT entry, or the name itself when it already carries one.
+fn on_path(command: &str, path: &std::ffi::OsStr, pathext: &str) -> bool {
+    let exts = pathext.split(';').filter(|e| !e.is_empty());
+    let with_ext = std::path::Path::new(command)
+        .extension()
+        .is_some_and(|own| pathext.split(';').any(|e| e.trim_start_matches('.').eq_ignore_ascii_case(&own.to_string_lossy())));
+    std::env::split_paths(path).any(|dir| {
+        (with_ext && dir.join(command).is_file())
+            || exts.clone().any(|ext| dir.join(format!("{command}{ext}")).is_file())
+    })
+}
+
 /// `where.exe` check — true if the command resolves on PATH.
 /// Must use `CREATE_NO_WINDOW` on Windows or each probe flashes a console ("pum pum").
-pub fn command_installed(command: &str) -> bool {
+fn where_exe(command: &str) -> bool {
     let mut cmd = Command::new("where.exe");
     cmd.arg(command)
         .stdout(std::process::Stdio::null())
@@ -198,4 +227,25 @@ pub fn command_installed(command: &str) -> bool {
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
     cmd.status().map(|s| s.success()).unwrap_or(false)
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shims_on_path_resolve_but_bare_files_do_not() {
+        let dir = std::env::temp_dir().join(format!("ankar-path-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for file in ["junie.bat", "copilot.cmd", "tool.exe", "copilot", "scriptonly"] {
+            std::fs::write(dir.join(file), b"").unwrap();
+        }
+        let path = std::env::join_paths([std::path::Path::new(r"C:\no\such\dir"), dir.as_path()]).unwrap();
+        let ext = ".COM;.EXE;.BAT;.CMD";
+        assert!(on_path("junie", &path, ext), ".bat shim");
+        assert!(on_path("copilot", &path, ext), ".cmd shim");
+        assert!(on_path("tool", &path, ext) && on_path("tool.exe", &path, ext));
+        assert!(!on_path("scriptonly", &path, ext), "no extension, not runnable");
+        assert!(!on_path("missing", &path, ext));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

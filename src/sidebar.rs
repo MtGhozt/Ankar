@@ -612,7 +612,7 @@ pub fn draw(
                 paint_launcher_button(ui, btn_rect, tex.as_ref(), launcher, installed);
             }
             if resp.clicked() {
-                if installed {
+                if installed || logos.recheck(&launcher.command) {
                     let _ = launchers::run_launcher(ui.ctx(), workspace, launcher, cwd.clone());
                 } else {
                     let ps = crate::shell::ShellProfile::powershell();
