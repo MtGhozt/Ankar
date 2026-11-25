@@ -48,10 +48,55 @@ struct CacheEntry {
     db_mtime: (Option<u64>, Option<u64>),
 }
 
-pub struct StatsLoader {
-    tx: Option<mpsc::Sender<StatsSnapshot>>,
-    rx: Receiver<StatsSnapshot>,
+/// Request scheduling: one worker at a time, newest requested range wins.
+#[derive(Default)]
+struct Sched {
+    generation: u64,
     inflight: bool,
+    pending: Option<StatsRange>,
+}
+
+impl Sched {
+    /// Some(generation) = launch now; None = queued behind the running load.
+    fn submit(&mut self, range: StatsRange) -> Option<u64> {
+        if self.inflight {
+            self.pending = Some(range);
+            return None;
+        }
+        self.inflight = true;
+        self.generation += 1;
+        Some(self.generation)
+    }
+
+    /// A result arrived: (keep it?, next load to launch).
+    fn finish(&mut self, generation: u64) -> (bool, Option<(u64, StatsRange)>) {
+        if generation != self.generation {
+            return (false, None);
+        }
+        match self.pending.take() {
+            Some(r) => {
+                self.generation += 1;
+                (false, Some((self.generation, r)))
+            }
+            None => {
+                self.inflight = false;
+                (true, None)
+            }
+        }
+    }
+
+    fn abort(&mut self) {
+        self.inflight = false;
+        self.pending = None;
+    }
+}
+
+pub struct StatsLoader {
+    tx: Option<mpsc::Sender<(u64, StatsSnapshot)>>,
+    rx: Receiver<(u64, StatsSnapshot)>,
+    sched: Sched,
+    /// Warning snapshot when the worker thread could not start.
+    failed: Option<StatsSnapshot>,
     cache: Option<CacheEntry>,
     /// Shared read of Ankar store for the worker (cloned snapshot of hours).
     ankar: Arc<Mutex<AnkarStatsStore>>,
@@ -63,17 +108,15 @@ impl StatsLoader {
         Self {
             tx: Some(tx),
             rx,
-            inflight: false,
+            sched: Sched::default(),
+            failed: None,
             cache: None,
             ankar,
         }
     }
 
     pub fn request(&mut self, range: StatsRange, force: bool) {
-        if self.inflight {
-            return;
-        }
-        if !force {
+        if !self.sched.inflight && !force {
             if let Some(c) = &self.cache {
                 if c.range == range && c.loaded_at.elapsed() < Duration::from_secs(60) {
                     let mtime = opencode::db_path()
@@ -85,12 +128,18 @@ impl StatsLoader {
                 }
             }
         }
+        if let Some(generation) = self.sched.submit(range) {
+            self.spawn(generation, range);
+        }
+    }
+
+    fn spawn(&mut self, generation: u64, range: StatsRange) {
         let Some(tx) = self.tx.clone() else {
+            self.sched.abort();
             return;
         };
         let ankar = self.ankar.clone();
-        self.inflight = true;
-        thread::Builder::new()
+        let spawned = thread::Builder::new()
             .name("ankar-stats".into())
             .spawn(move || {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -98,24 +147,34 @@ impl StatsLoader {
                 }));
                 let snap = match result {
                     Ok(s) => s,
-                    Err(_) => StatsSnapshot {
-                        range,
-                        warnings: vec![
-                            "Stats loader panicked; showing empty snapshot".into(),
-                        ],
-                        computed_at: SystemTime::now(),
-                        ..StatsSnapshot::default()
-                    },
+                    Err(_) => {
+                        warning_snapshot(range, "Stats loader panicked; showing empty snapshot")
+                    }
                 };
-                let _ = tx.send(snap);
-            })
-            .ok();
+                let _ = tx.send((generation, snap));
+            });
+        if spawned.is_err() {
+            self.sched.abort();
+            self.failed = Some(warning_snapshot(
+                range,
+                "Stats loader could not start its thread",
+            ));
+        }
     }
 
     pub fn poll(&mut self) -> Option<StatsSnapshot> {
+        if let Some(w) = self.failed.take() {
+            return Some(w);
+        }
         match self.rx.try_recv() {
-            Ok(snap) => {
-                self.inflight = false;
+            Ok((generation, snap)) => {
+                let (keep, next) = self.sched.finish(generation);
+                if let Some((g, r)) = next {
+                    self.spawn(g, r);
+                }
+                if !keep {
+                    return self.failed.take();
+                }
                 let mtime = opencode::db_path()
                     .map(|p| opencode::mtime_pair(&p))
                     .unwrap_or((None, None));
@@ -129,7 +188,7 @@ impl StatsLoader {
             }
             Err(TryRecvError::Empty) => None,
             Err(TryRecvError::Disconnected) => {
-                self.inflight = false;
+                self.sched.abort();
                 // Recreate channel.
                 let (tx, rx) = mpsc::channel();
                 self.tx = Some(tx);
@@ -140,11 +199,20 @@ impl StatsLoader {
     }
 
     pub fn is_loading(&self) -> bool {
-        self.inflight
+        self.sched.inflight
     }
 
     pub fn cached(&self) -> Option<&StatsSnapshot> {
         self.cache.as_ref().map(|c| &c.snap)
+    }
+}
+
+fn warning_snapshot(range: StatsRange, msg: &str) -> StatsSnapshot {
+    StatsSnapshot {
+        range,
+        warnings: vec![msg.into()],
+        computed_at: SystemTime::now(),
+        ..StatsSnapshot::default()
     }
 }
 
@@ -204,9 +272,7 @@ fn compute(range: StatsRange, ankar: &Arc<Mutex<AnkarStatsStore>>) -> StatsSnaps
 
     // Tasks = OpenCode sessions + cursor chats + Ankar starts (sessions already includes both).
     // OpenCode sessions counted in snap.sessions; Ankar starts added for card.
-    let tasks_total = snap
-        .sessions
-        .saturating_add(snap.ankar_starts);
+    let tasks_total = snap.sessions.saturating_add(snap.ankar_starts);
 
     // Primary hours: Ankar busy if any, else OpenCode, else cursor.
     snap.agent_hours = if snap.ankar_busy_secs > 0 {
@@ -268,4 +334,35 @@ fn range_label(range: StatsRange, since_ms: i64, _until_ms: i64) -> String {
     let z = ts.to_zoned_datetime(jiff::tz::TimeZone::system());
     let start = z.strftime("%b %d").to_string();
     format!("{start} — today")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn range_change_while_loading_is_queued_and_stale_dropped() {
+        let mut s = Sched::default();
+        let g1 = s.submit(StatsRange::Days30).unwrap();
+        assert!(s.submit(StatsRange::Days7).is_none());
+        assert!(s.submit(StatsRange::Days90).is_none());
+        let (keep, next) = s.finish(g1);
+        assert!(!keep);
+        let (g2, r) = next.unwrap();
+        assert_eq!(r, StatsRange::Days90);
+        assert!(s.inflight);
+        assert_eq!(s.finish(g1), (false, None));
+        assert_eq!(s.finish(g2), (true, None));
+        assert!(!s.inflight);
+    }
+
+    #[test]
+    fn abort_clears_inflight_and_pending() {
+        let mut s = Sched::default();
+        s.submit(StatsRange::All);
+        s.submit(StatsRange::Days7);
+        s.abort();
+        assert!(!s.inflight && s.pending.is_none());
+        assert!(s.submit(StatsRange::All).is_some());
+    }
 }
