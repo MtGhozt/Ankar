@@ -66,8 +66,10 @@ struct LoadResult {
 #[derive(Default)]
 pub struct FileViewer {
     pub root: Option<PathBuf>,
-    /// Last shell cwd applied to `root`; manual Parent/Home navigation sticks until it changes.
+    /// Active tab cwd last seen by `sync_shell_cwd` (for the tab-folder control).
     synced_cwd: Option<PathBuf>,
+    synced_tab_id: Option<u64>,
+    files_panel_visible: bool,
     pub open_file: Option<PathBuf>,
     content: FileContent,
     /// Heavy (>10 MB); dropped whenever the panel is hidden.
@@ -89,10 +91,19 @@ pub struct FileViewer {
 }
 
 impl FileViewer {
-    /// Follow the shell cwd, but only when it actually changes.
-    pub fn sync_shell_cwd(&mut self, cwd: Option<PathBuf>) {
-        if self.synced_cwd != cwd {
+    /// Follow the active tab cwd when the Files panel opens, the tab changes, or cwd changes.
+    pub fn sync_shell_cwd(&mut self, tab_id: Option<u64>, cwd: Option<PathBuf>, panel_visible: bool) {
+        let opened = panel_visible && !self.files_panel_visible;
+        self.files_panel_visible = panel_visible;
+        let tab_changed = self.synced_tab_id != tab_id;
+        let cwd_changed = self.synced_cwd != cwd;
+        if cwd_changed {
             self.synced_cwd = cwd.clone();
+        }
+        if tab_changed {
+            self.synced_tab_id = tab_id;
+        }
+        if panel_visible && (opened || tab_changed || cwd_changed) {
             self.set_root(cwd);
         }
     }
@@ -195,6 +206,10 @@ impl FileViewer {
         self.set_root(dirs::home_dir());
     }
 
+    pub fn go_tab_cwd(&mut self) {
+        self.set_root(self.synced_cwd.clone());
+    }
+
     /// Draw the tree (browsing only; a clicked file opens in the viewer pane). Returns a folder
     /// that asked for a new tab ("New tab here").
     pub fn draw(&mut self, ui: &mut Ui) -> Option<PathBuf> {
@@ -217,9 +232,6 @@ impl FileViewer {
         ui.painter().rect_filled(sep, 0.0, ui_theme::BORDER);
         ui.add_space(4.0);
 
-        if self.root.is_none() {
-            self.root = dirs::home_dir();
-        }
         let Some(root) = self.root.clone() else {
             ui.label(ui_theme::text_sub("No home folder."));
             return None;
@@ -246,6 +258,13 @@ impl FileViewer {
                 .clicked()
             {
                 self.go_home();
+            }
+            if ui
+                .add(egui::Button::new(ui_theme::icon(Icon::Terminal, 14.0, ui_theme::TEXT_MUTED)).frame(false))
+                .on_hover_text("Current tab folder")
+                .clicked()
+            {
+                self.go_tab_cwd();
             }
             // Inter has no ↻; Hack (monospace) does.
             if ui
@@ -583,7 +602,9 @@ fn tree_row(
     selected: bool,
     dim: bool,
 ) -> egui::Response {
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 24.0), Sense::click());
+    let mut rect = ui.available_rect_before_wrap();
+    rect.max.y = rect.min.y + 24.0;
+    let resp = ui.allocate_rect(rect, Sense::click());
     let fill = if selected {
         ui_theme::SURFACE_SEL
     } else if resp.hovered() {

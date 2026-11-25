@@ -349,8 +349,11 @@ impl eframe::App for AnkarApp {
             }
         }
 
-        let cwd = self.workspace.active_tab().and_then(|t| t.cwd.clone());
-        self.files.sync_shell_cwd(cwd);
+        let files_panel = self.sidebar.show && self.sidebar.view == SidebarView::Files;
+        let active_tab = self.workspace.active_tab();
+        let tab_id = active_tab.map(|t| t.id);
+        let cwd = active_tab.and_then(|t| t.cwd.clone());
+        self.files.sync_shell_cwd(tab_id, cwd, files_panel);
 
         if let Some(size) = ui.input_mut(|i| zoom_request(i, self.config.font_size)) {
             self.config.font_size = size;
