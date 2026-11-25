@@ -433,7 +433,7 @@ fn paint_grid(
         // row_top(n) snapped; bottom = next row's top (no seams).
         let y = ui_theme::term_row_top(origin.y, *row, ppp);
         let y_next = ui_theme::term_row_top(origin.y, *row + 1, ppp);
-        let row_h = (y_next - y).max(cell_h);
+        let row_h = y_next - y;
         paint_row_backgrounds(
             &mut shapes,
             origin.x,
@@ -963,13 +963,12 @@ fn paint_row_backgrounds(
     let mut run_start_x = 0.0;
     let mut run_end_x = 0.0;
 
-    // Whole-pixel mesh rects that overlap by 1 physical px: no anti-aliased
-    // hairline between rows or between adjacent runs of the same colour.
-    let overlap = 1.0 / ppp;
+    // Whole-pixel mesh rects: edges come from the snapped column/row grid, so
+    // neighbours share them exactly (no hairline, no bleed into the next cell).
     let flush = |shapes: &mut Vec<Shape>, bg: Color32, x0: f32, x1: f32| {
         if bg != colors.background && x1 > x0 {
-            let (x0, x1) = px_span(x0, x1 + overlap, ppp);
-            let (y0, y1) = px_span(y, y + cell_h + overlap, ppp);
+            let (x0, x1) = px_span(x0, x1, ppp);
+            let (y0, y1) = px_span(y, y + cell_h, ppp);
             push_solid_rect(
                 shapes,
                 Rect::from_min_max(Pos2::new(x0, y0), Pos2::new(x1, y1)),
@@ -1209,6 +1208,41 @@ mod tests {
                 assert!((width - expected).abs() < 1e-3, "col {col} ppp {ppp}: {width}");
             }
         }
+    }
+
+    #[test]
+    fn backgrounds_tile_rows_and_columns_without_overlap() {
+        let ppp = 1.25;
+        let bg = TermColor::Spec(Rgb { r: 30, g: 30, b: 40 });
+        let mut a = cell(' ');
+        a.bg = bg;
+        let mut b = a.clone();
+        b.col = 1;
+        b.bg = TermColor::Spec(Rgb { r: 50, g: 30, b: 40 });
+        let rect_of = |row: i32, cells: &[&VisibleCell]| {
+            let y = ui_theme::term_row_top(0.0, row, ppp);
+            let h = ui_theme::term_row_top(0.0, row + 1, ppp) - y;
+            let mut shapes = Vec::new();
+            paint_row_backgrounds(
+                &mut shapes,
+                0.0,
+                y,
+                CELL_W,
+                h,
+                cells,
+                None,
+                &TermColors::default(),
+                Point::new(Line(0), Column(0)),
+                ppp,
+                false,
+            );
+            shapes.iter().map(|s| s.visual_bounding_rect()).collect::<Vec<_>>()
+        };
+        let row0 = rect_of(0, &[&a, &b]);
+        let row1 = rect_of(1, &[&a]);
+        assert_eq!(row0.len(), 2);
+        assert!((row0[0].max.x - row0[1].min.x).abs() < 1e-4, "columns share an edge");
+        assert!((row0[0].max.y - row1[0].min.y).abs() < 1e-4, "rows share an edge");
     }
 
     #[test]
