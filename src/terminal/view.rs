@@ -667,19 +667,28 @@ fn push_solid_rect(shapes: &mut Vec<Shape>, rect: Rect, color: Color32) {
 
 type Frac = (f32, f32, f32, f32);
 
-fn push_rect(shapes: &mut Vec<Shape>, x: f32, y: f32, w: f32, h: f32, fg: Color32, fx: Frac) {
-    let rect = Rect::from_min_max(
-        Pos2::new(x + w * fx.0, y + h * fx.1),
-        Pos2::new(x + w * fx.2, y + h * fx.3),
-    );
-    shapes.push(Shape::Rect(RectShape::filled(
-        rect,
-        CornerRadius::ZERO,
+#[allow(clippy::too_many_arguments)]
+fn push_rect(
+    shapes: &mut Vec<Shape>,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    fg: Color32,
+    fx: Frac,
+    ppp: f32,
+) {
+    let (x0, x1) = px_span(x + w * fx.0, x + w * fx.2, ppp);
+    let (y0, y1) = px_span(y + h * fx.1, y + h * fx.3, ppp);
+    push_solid_rect(
+        shapes,
+        Rect::from_min_max(Pos2::new(x0, y0), Pos2::new(x1, y1)),
         fg,
-    )));
+    );
 }
 
 /// U+2580–U+259F as cell fractions (eighths, halves, shades, quadrants).
+#[allow(clippy::too_many_arguments)]
 fn paint_block(
     shapes: &mut Vec<Shape>,
     c: char,
@@ -688,6 +697,7 @@ fn paint_block(
     w: f32,
     h: f32,
     fg: Color32,
+    ppp: f32,
 ) -> bool {
     let parts: &[Frac] = match c {
         '▀' => &[(0.0, 0.0, 1.0, 0.5)],
@@ -731,7 +741,7 @@ fn paint_block(
         _ => fg,
     };
     for &part in parts {
-        push_rect(shapes, x, y, w, h, fg, part);
+        push_rect(shapes, x, y, w, h, fg, part, ppp);
     }
     true
 }
@@ -807,7 +817,7 @@ fn paint_row_box_drawing(
         let cx = x + w * 0.5;
         // Centre on whole physical pixels so the two arms share one clean edge.
         let cy = ui_theme::snap(y + row_h * 0.5, ppp);
-        if paint_block(shapes, c, x, y, w, row_h, fg) {
+        if paint_block(shapes, c, x, y, w, row_h, fg, ppp) {
             continue;
         }
         if is_arc(c) {
@@ -923,18 +933,18 @@ fn paint_row_backgrounds(
     let mut run_start_x = 0.0;
     let mut run_end_x = 0.0;
 
-    // Overlap by 1 physical px so adjacent rows/cols have no hairline gaps.
+    // Whole-pixel mesh rects that overlap by 1 physical px: no anti-aliased
+    // hairline between rows or between adjacent runs of the same colour.
     let overlap = 1.0 / ppp;
     let flush = |shapes: &mut Vec<Shape>, bg: Color32, x0: f32, x1: f32| {
         if bg != colors.background && x1 > x0 {
-            shapes.push(Shape::Rect(RectShape::filled(
-                Rect::from_min_max(
-                    Pos2::new(ui_theme::snap(x0, ppp), y),
-                    Pos2::new(ui_theme::snap(x1, ppp) + overlap, y + cell_h + overlap),
-                ),
-                CornerRadius::ZERO,
+            let (x0, x1) = px_span(x0, x1 + overlap, ppp);
+            let (y0, y1) = px_span(y, y + cell_h + overlap, ppp);
+            push_solid_rect(
+                shapes,
+                Rect::from_min_max(Pos2::new(x0, y0), Pos2::new(x1, y1)),
                 bg,
-            )));
+            );
         }
     };
 
@@ -1151,10 +1161,65 @@ mod tests {
         assert_eq!(box_arms('│').unwrap().up, Some(Weight::Light));
         assert_eq!(box_arms('┃').unwrap().up, Some(Weight::Heavy));
         let mut shapes = Vec::new();
-        assert!(paint_block(&mut shapes, '▌', 0.0, 0.0, w, h, Color32::WHITE));
+        assert!(paint_block(
+            &mut shapes,
+            '▌',
+            0.0,
+            0.0,
+            w,
+            h,
+            Color32::WHITE,
+            1.0
+        ));
         let rect = shapes[0].visual_bounding_rect();
         assert!((rect.width() - w * 0.5).abs() < 0.01);
         assert!(is_box_geometry('▎') && is_box_geometry('╹'));
         assert!(!is_box_geometry('╱')); // diagonals keep the font glyph
+    }
+
+    #[test]
+    fn block_rects_share_whole_pixel_edges() {
+        let ppp = 1.5;
+        let mut shapes = Vec::new();
+        assert!(paint_block(
+            &mut shapes,
+            '█',
+            0.0,
+            0.0,
+            CELL_W,
+            CELL_H,
+            Color32::WHITE,
+            ppp
+        ));
+        assert!(paint_block(
+            &mut shapes,
+            '█',
+            CELL_W,
+            0.0,
+            CELL_W,
+            CELL_H,
+            Color32::WHITE,
+            ppp
+        ));
+        let left = shapes[0].visual_bounding_rect();
+        let right = shapes[1].visual_bounding_rect();
+        assert!((left.max.x - right.min.x).abs() < 1e-4);
+        for v in [left.min.x, left.max.x, left.min.y, left.max.y] {
+            assert!(((v * ppp) - (v * ppp).round()).abs() < 1e-4, "whole pixel");
+        }
+
+        let mut half = Vec::new();
+        assert!(paint_block(
+            &mut half,
+            '▀',
+            0.0,
+            0.0,
+            CELL_W,
+            CELL_H,
+            Color32::WHITE,
+            ppp
+        ));
+        let top = half[0].visual_bounding_rect();
+        assert!(((top.max.y * ppp) - (top.max.y * ppp).round()).abs() < 1e-4);
     }
 }
