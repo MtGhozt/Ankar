@@ -204,6 +204,14 @@ fn default_launchers() -> Vec<Launcher> {
             color: "#F0F0F0".into(),
             logo: "copilot".into(),
         },
+        Launcher {
+            name: "junie".into(),
+            command: "junie".into(),
+            args: vec![],
+            icon: "bot".into(),
+            color: "#F0F0F0".into(),
+            logo: "junie".into(),
+        },
     ]
 }
 
@@ -365,5 +373,20 @@ color = "#8A8A8A"
         );
         fs::write(path, body)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn junie_is_added_to_an_existing_config_and_has_a_logo() {
+        let mut old = Config { launchers: Vec::new(), ..Config::default() };
+        old.merge_default_launchers();
+        let junie = old.launchers.iter().find(|l| l.name == "junie").expect("junie launcher");
+        assert_eq!(junie.command, "junie");
+        assert_eq!(junie.logo_key(), "junie");
+        assert!(crate::logos::embedded_logo(junie.logo_key()).is_some());
     }
 }

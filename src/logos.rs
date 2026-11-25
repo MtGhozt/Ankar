@@ -92,7 +92,7 @@ impl LogoAtlas {
     }
 }
 
-fn embedded_logo(key: &str) -> Option<(&'static str, &'static [u8])> {
+pub(crate) fn embedded_logo(key: &str) -> Option<(&'static str, &'static [u8])> {
     Some(match key.to_ascii_lowercase().as_str() {
         "opencode" => ("opencode", &include_bytes!("../assets/logos/opencode.png")[..]),
         "openai" | "codex" => ("openai", &include_bytes!("../assets/logos/openai.png")[..]),
