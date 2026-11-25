@@ -70,6 +70,9 @@ fn default_logo_key() -> String {
 pub struct Config {
     pub default_shell: String,
     pub waiting_timeout_secs: u64,
+    /// Windows toast when an agent finishes a long job while Ankar is in the background.
+    #[serde(default)]
+    pub notifications: bool,
     #[serde(default = "default_font_size")]
     pub font_size: f32,
     #[serde(default = "default_accent")]
@@ -121,6 +124,7 @@ impl Default for Config {
         Self {
             default_shell: "powershell".into(),
             waiting_timeout_secs: 30,
+            notifications: false,
             font_size: default_font_size(),
             accent: default_accent(),
             pinned_projects: Vec::new(),
@@ -330,6 +334,10 @@ default_shell = "{default_shell}"
 # Seconds without PTY output before a live session is "waiting"
 waiting_timeout_secs = {waiting_timeout_secs}
 
+# Windows toasts (default false). When true, you only get one if Ankar is not the focused
+# window and an agent (OpenCode) goes from working to idle after working for over 30 seconds.
+notifications = {notifications}
+
 # Terminal font size (points) — Hack at 14.33, cell 8.627×17.733
 font_size = {font_size}
 
@@ -371,6 +379,7 @@ color = "#8A8A8A"
 "##,
             default_shell = self.default_shell,
             waiting_timeout_secs = self.waiting_timeout_secs,
+            notifications = self.notifications,
             font_size = self.font_size,
             scrollback_lines = self.scrollback_lines,
             sidebar_width = self.sidebar_width,

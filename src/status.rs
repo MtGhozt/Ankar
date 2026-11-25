@@ -5,9 +5,13 @@ use crate::terminal::AgentState;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
+const MIN_WORK_FOR_TOAST: Duration = Duration::from_secs(30);
+
 /// Track previous statuses so we only notify on transitions.
 pub struct StatusTracker {
     prev: HashMap<u64, SessionStatus>,
+    /// When each tab's agent started its current run of work (OSC 7501 `working`).
+    working_since: HashMap<u64, Instant>,
     /// Ignore toasts while the window is still settling (focus flashes, PATH probes).
     started: Instant,
 }
@@ -16,6 +20,7 @@ impl Default for StatusTracker {
     fn default() -> Self {
         Self {
             prev: HashMap::new(),
+            working_since: HashMap::new(),
             started: Instant::now(),
         }
     }
@@ -85,11 +90,16 @@ impl StatusTracker {
                 .unwrap_or(SessionStatus::Active);
             if prev != new_status {
                 tab.status_changed_at = Instant::now();
-                if notify_ok
-                    && matches!(
-                        new_status,
-                        SessionStatus::Waiting | SessionStatus::Finished
-                    )
+            }
+            // Toast only for an agent-reported working -> idle after a long job. Quiet prompts,
+            // bells and exits never notify.
+            if any_working {
+                self.working_since.entry(tab.id).or_insert_with(Instant::now);
+            } else if let Some(since) = self.working_since.remove(&tab.id) {
+                if config.notifications
+                    && notify_ok
+                    && new_status == SessionStatus::Waiting
+                    && since.elapsed() >= MIN_WORK_FOR_TOAST
                 {
                     notify::session_status_changed(&tab.session_name, new_status, window_focused);
                 }

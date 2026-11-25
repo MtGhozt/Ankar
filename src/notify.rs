@@ -7,8 +7,8 @@ pub fn session_status_changed(session_name: &str, status: SessionStatus, window_
     }
     let (summary, body) = match status {
         SessionStatus::Waiting => (
-            "Ankar — waiting",
-            format!("{session_name} is waiting for input"),
+            "Ankar — done",
+            format!("{session_name} finished working"),
         ),
         SessionStatus::Finished => (
             "Ankar — finished",
