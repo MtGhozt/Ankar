@@ -47,6 +47,23 @@ fn xtversion_reply() -> String {
     format!("\x1bP>|Ankar {}\x1b\\", env!("CARGO_PKG_VERSION"))
 }
 
+/// CSI requests the terminal must answer: DA1/DA2, DSR, window reports, XTVERSION,
+/// kitty keyboard query, DECRQM.
+fn csi_is_query(params: &[u8], fin: u8) -> bool {
+    match fin {
+        b'c' | b'n' | b't' => true,
+        b'q' => params.starts_with(b">"),
+        b'u' => params == b"?",
+        b'p' => params.ends_with(b"$"),
+        _ => false,
+    }
+}
+
+/// OSC with a `?` field: colour queries (4/10/11/12), 52 clipboard reads, 7501 state queries.
+fn osc_is_query(buf: &[u8]) -> bool {
+    buf.split(|&b| b == b';').skip(1).any(|field| field == b"?")
+}
+
 /// Byte-at-a-time OSC scanner; keeps its state between `feed` calls, so a sequence
 /// split across two reads still parses.
 pub struct OscScanner {
@@ -94,6 +111,9 @@ impl OscScanner {
                     Mode::Csi
                 }
                 (Mode::Csi, 0x40..=0x7e) => {
+                    if csi_is_query(&self.csi, b) {
+                        log::debug!("pty query: CSI {}{}", String::from_utf8_lossy(&self.csi), b as char);
+                    }
                     if b == b'q' && (self.csi == b">" || self.csi == b">0") {
                         if let Some(reply) = &self.reply {
                             reply(xtversion_reply());
@@ -124,6 +144,9 @@ impl OscScanner {
     }
 
     fn finish(&mut self) -> Mode {
+        if !self.overflow && osc_is_query(&self.buf) {
+            log::debug!("pty query: OSC {}", String::from_utf8_lossy(&self.buf));
+        }
         if !self.overflow {
             if let Some(rest) = self.buf.strip_prefix(b"7501;") {
                 if let Ok(report) = std::str::from_utf8(rest) {
@@ -437,6 +460,53 @@ mod tests {
         assert_eq!(replies(&[b"abc\x1b[>0", b"q"]), [want], "split across reads, explicit 0");
         // DECSCUSR, DA2 and other CSI finals are not XTVERSION.
         assert!(replies(&[b"\x1b[2 q\x1b[>c\x1b[?25h\x1b[31;1m"]).is_empty());
+    }
+
+    #[test]
+    fn queries_are_told_apart_from_plain_sequences() {
+        for (params, fin) in [(&b""[..], b'c'), (b">", b'c'), (b"6", b'n'), (b"14", b't'), (b">", b'q'), (b"?", b'u'), (b"?2026$", b'p')] {
+            assert!(csi_is_query(params, fin), "{:?}{}", params, fin as char);
+        }
+        for (params, fin) in [(&b"31;1"[..], b'm'), (b"2 ", b'q'), (b"?25", b'h'), (b"1;24", b'r')] {
+            assert!(!csi_is_query(params, fin), "{:?}{}", params, fin as char);
+        }
+        for buf in [&b"11;?"[..], b"10;?", b"4;1;?", b"7501;?"] {
+            assert!(osc_is_query(buf), "{}", String::from_utf8_lossy(buf));
+        }
+        for buf in [&b"0;title?"[..], b"7;file:///C:/x", b"11;rgb:0000/0000/0000"] {
+            assert!(!osc_is_query(buf), "{}", String::from_utf8_lossy(buf));
+        }
+    }
+
+    /// Inbox Windows ConPTY swallows OSC 10/11 and DA queries, so TUIs (Junie) never learn the
+    /// background and fall back to a light theme. Passes only when a current conpty.dll +
+    /// OpenConsole.exe sit beside the test binary or on PATH.
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "spawns a real ConPTY; cargo test -- --ignored"]
+    fn conpty_passes_the_osc_11_background_query_through() {
+        use alacritty_terminal::tty::{self, EventedReadWrite};
+        let script = "[Console]::Out.Write('QSTART' + [char]27 + ']11;?' + [char]7 + 'QEND'); Start-Sleep 2";
+        let opts = tty::Options {
+            shell: Some(tty::Shell::new(
+                "powershell.exe".to_owned(),
+                vec!["-NoProfile".to_owned(), "-Command".to_owned(), script.to_owned()],
+            )),
+            ..tty::Options::default()
+        };
+        let size = WindowSize { num_lines: 24, num_cols: 80, cell_width: 8, cell_height: 16 };
+        let mut pty = tty::new(&opts, size, 0).expect("conpty");
+        let (mut out, mut buf) = (Vec::new(), [0u8; 4096]);
+        let deadline = Instant::now() + std::time::Duration::from_secs(15);
+        while Instant::now() < deadline && !out.windows(4).any(|w| w == b"QEND") {
+            match pty.reader().read(&mut buf) {
+                Ok(n) if n > 0 => out.extend_from_slice(&buf[..n]),
+                _ => std::thread::sleep(std::time::Duration::from_millis(20)),
+            }
+        }
+        let text = String::from_utf8_lossy(&out);
+        assert!(text.contains("QEND"), "no output: {text:?}");
+        assert!(text.contains("\x1b]11;?"), "OSC 11 query swallowed by ConPTY: {text:?}");
     }
 
     #[test]

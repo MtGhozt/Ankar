@@ -284,6 +284,7 @@ impl TerminalSession {
                             break;
                         }
                         Event::PtyWrite(data) => {
+                            log::debug!("pty reply: {data:?}");
                             pty_notifier.notify(data.as_bytes().to_vec());
                         }
                         Event::Bell => {
@@ -322,7 +323,7 @@ impl TerminalSession {
                                 .flatten();
                             let reply =
                                 query_color(&query_colors, *index, set_cursor).map(|rgb| format(rgb));
-                            log::debug!("osc color query index={index} reply={reply:?}");
+                            log::debug!("pty reply: color index={index} {reply:?}");
                             if let Some(reply) = reply {
                                 pty_notifier.notify(reply.into_bytes());
                             }
@@ -330,7 +331,9 @@ impl TerminalSession {
                         Event::TextAreaSizeRequest(format) => {
                             let size = window_size_flag.lock().ok().map(|g| *g);
                             if let Some(size) = size {
-                                pty_notifier.notify(format(size).into_bytes());
+                                let reply = format(size);
+                                log::debug!("pty reply: text area {reply:?}");
+                                pty_notifier.notify(reply.into_bytes());
                             }
                         }
                         Event::ClipboardStore(_, text) => {

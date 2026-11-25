@@ -87,7 +87,7 @@ fn main() -> anyhow::Result<()> {
     }
     let exe_dir = exe.as_deref().and_then(std::path::Path::parent);
     match logging::conpty_dll(exe_dir, std::env::var_os("PATH").as_deref()) {
-        Some(dll) => log::info!("ConPTY: {} (OpenConsole.exe expected beside it)", dll.display()),
+        Some(dll) => log::info!("ConPTY: {} (OpenConsole.exe expected in x64\\ beside it)", dll.display()),
         None => log::info!("ConPTY: inbox Windows API; no conpty.dll beside ankar.exe or on PATH"),
     }
 

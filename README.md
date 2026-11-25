@@ -32,6 +32,23 @@ cargo build --release
 .\target\release\ankar.exe
 ```
 
+### Recommended: a current ConPTY next to `ankar.exe`
+
+The ConPTY built into Windows swallows terminal queries (OSC 10/11 background colour, DA), so
+TUIs such as Junie fall back to a light theme and Copilot cannot read the palette. Take
+`conpty.dll` and `OpenConsole.exe` (MIT) from the `Microsoft.Windows.Console.ConPTY` NuGet
+package and lay them out like this (the layout Warp ships):
+
+```
+ankar.exe
+conpty.dll
+x64\OpenConsole.exe
+```
+
+Ankar logs which ConPTY it uses at startup
+(`ConPTY: ...` in `%APPDATA%\ankar\ankar-log.txt`). Check with
+`cargo test conpty_passes -- --ignored` (passes only with the newer ConPTY).
+
 ## Migrating from nacar
 
 On first launch, Ankar copies `config.toml` and `sessions.json` from `%APPDATA%\nacar` to `%APPDATA%\ankar` if those files do not already exist in the new folder. The old `%APPDATA%\nacar` folder is left in place so you can delete it yourself after confirming the migration.
