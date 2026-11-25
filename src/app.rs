@@ -202,6 +202,26 @@ impl eframe::App for AnkarApp {
             &mut self.stats,
         );
 
+        // Our own title bar, full width: the OS frame is gone (chromeless window).
+        egui::Panel::top("tab_bar")
+            .exact_size(TAB_BAR_H)
+            .frame(Frame::NONE.fill(ui_theme::SURFACE_1))
+            .show_separator_line(false)
+            .show(ui, |ui| {
+                let open_stats = draw_tab_bar(
+                    ui,
+                    &mut self.workspace,
+                    &mut self.sidebar,
+                    &mut self.files,
+                    &mut self.show_profile_menu,
+                    &self.config,
+                    &mut self.logos,
+                );
+                if open_stats {
+                    self.stats.toggle();
+                }
+            });
+
         // Manual panel widths — egui's built-in SidePanel resize fought PanelState
         // and bounced on release. We own the width via exact_size + drag handles.
         let window_w = ui
@@ -221,24 +241,15 @@ impl eframe::App for AnkarApp {
                     ui.set_clip_rect(ui.max_rect());
                     let sidebar_rect = ui.max_rect();
 
-                    // Title strip (y 0–38) stays a drag region; the toggle lives in the tab bar.
-                    let content_top = sidebar_rect.top() + 38.0;
-                    let content_rect = egui::Rect::from_min_max(
-                        egui::pos2(sidebar_rect.left(), content_top),
-                        sidebar_rect.max,
+                    sidebar::draw(
+                        ui,
+                        &mut self.workspace,
+                        &mut self.config,
+                        &mut self.sidebar,
+                        &mut self.logos,
+                        !self.config_load_failed,
+                        sidebar_rect,
                     );
-                    ui.scope_builder(egui::UiBuilder::new().max_rect(content_rect), |ui| {
-                        ui.set_width(ui.available_width());
-                        sidebar::draw(
-                            ui,
-                            &mut self.workspace,
-                            &mut self.config,
-                            &mut self.sidebar,
-                            &mut self.logos,
-                            !self.config_load_failed,
-                            sidebar_rect,
-                        );
-                    });
                 });
 
             let resize = drag_resize_edge(
@@ -310,26 +321,6 @@ impl eframe::App for AnkarApp {
             let _ = self.workspace.open_tab(ui.ctx(), &profile, Some(cwd));
         }
 
-        // Tab bar over content only (midterm: 38 px, no sub-row under it).
-        egui::Panel::top("tab_bar")
-            .exact_size(38.0)
-            .frame(Frame::NONE.fill(ui_theme::SURFACE_1))
-            .show_separator_line(false)
-            .show(ui, |ui| {
-                let open_stats = draw_tab_bar(
-                    ui,
-                    &mut self.workspace,
-                    &mut self.sidebar,
-                    &mut self.files,
-                    &mut self.show_profile_menu,
-                    &self.config,
-                    &mut self.logos,
-                );
-                if open_stats {
-                    self.stats.toggle();
-                }
-            });
-
         let recent_dirs = if self.show_profile_menu {
             recent_dirs(&self.workspace, self.files.root.as_ref())
         } else {
@@ -338,7 +329,7 @@ impl eframe::App for AnkarApp {
         if self.show_profile_menu {
             egui::Area::new(egui::Id::unique("profile_menu"))
                 .order(egui::Order::Foreground)
-                .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-8.0, 40.0))
+                .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-8.0, TAB_BAR_H + 2.0))
                 .show(ui.ctx(), |ui| {
                     Frame::NONE
                         .fill(ui_theme::SURFACE_1)
@@ -458,6 +449,7 @@ impl eframe::App for AnkarApp {
         }
 
         self.stats.draw(ui);
+        window_edge_resize(ui.ctx());
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
@@ -508,9 +500,16 @@ const TAB_WIDTH: f32 = 224.0;
 const MIN_TAB_WIDTH: f32 = 96.0;
 /// Gap between the window edge and the right icons (the edge eats a few px on Windows).
 const RIGHT_ICONS_PAD: f32 = 10.0;
-/// Fixed slot at the right edge: padding + stats and files icons (2 × 22 px hit targets).
-const RIGHT_ICONS_W: f32 = RIGHT_ICONS_PAD + 44.0;
-const TAB_BAR_H: f32 = 38.0;
+/// Windows-style caption buttons.
+const WIN_BTN_W: f32 = 46.0;
+/// Fixed slot at the right edge: stats and files icons (2 × 22 px), gap, 3 caption buttons.
+const RIGHT_ICONS_W: f32 = RIGHT_ICONS_PAD + 44.0 + 6.0 + 3.0 * WIN_BTN_W;
+const TAB_BAR_H: f32 = 32.0;
+/// Caption-button hover for close, as in Windows.
+const CLOSE_RED: Color32 = Color32::from_rgb(0xE8, 0x11, 0x23);
+/// Invisible grab zones on the window edges (the OS frame is gone).
+const EDGE_GRAB: f32 = 4.0;
+const CORNER_GRAB: f32 = 10.0;
 
 fn draw_tab_bar(
     ui: &mut egui::Ui,
@@ -522,6 +521,15 @@ fn draw_tab_bar(
     logos: &mut LogoAtlas,
 ) -> bool {
     let bar_rect = ui.max_rect();
+    // Registered first, so every control added later wins the pointer; what is left of the
+    // bar is the window's drag handle (double click toggles maximize).
+    let drag = ui.interact(bar_rect, ui.scope_id().with("bar_drag"), Sense::click_and_drag());
+    let maximized = ui.input(|i| i.viewport().maximized).unwrap_or(false);
+    if drag.double_clicked() {
+        ui.ctx().send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
+    } else if drag.drag_started_by(egui::PointerButton::Primary) {
+        ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+    }
     let painter = ui.painter();
     // Bottom border (erased under the active tab later).
     painter.hline(
@@ -593,7 +601,7 @@ fn draw_tab_bar(
                     let sep_x = rect.left();
                     ui.painter().vline(
                         sep_x,
-                        egui::Rangef::new(rect.top() + 12.0, rect.top() + 12.0 + 14.67),
+                        egui::Rangef::new(rect.center().y - 7.33, rect.center().y + 7.33),
                         Stroke::new(1.0, ui_theme::TAB_SEP),
                     );
                 }
@@ -642,7 +650,7 @@ fn draw_tab_bar(
             if selected {
                 // Left-aligned: icon at x+5.3, title at x+26.7, fade last 20%.
                 let icon_x = rect.left() + 5.3;
-                let icon_y = rect.top() + 8.0;
+                let icon_y = rect.center().y - 8.0;
                 paint_tab_icon(
                     ui,
                     logo_tex.as_ref(),
@@ -653,7 +661,7 @@ fn draw_tab_bar(
                     tab.status,
                 );
                 let title_x = rect.left() + 26.7;
-                let title_baseline = rect.top() + 25.33;
+                let title_baseline = rect.center().y + 6.33;
                 paint_tab_title_fade(
                     ui,
                     &title,
@@ -697,7 +705,7 @@ fn draw_tab_bar(
                     paint_tab_title_fade(
                         ui,
                         &title,
-                        egui::pos2(start_x + 17.0, rect.top() + 25.33),
+                        egui::pos2(start_x + 17.0, rect.center().y + 6.33),
                         title_right - (start_x + 17.0),
                         ui_theme::TEXT_MUTED,
                         fade_to,
@@ -754,7 +762,20 @@ fn draw_tab_bar(
         |ui| {
             ui.spacing_mut().item_spacing.x = 0.0;
             // RTL: the first thing added sits at the window edge.
-            ui.add_space(RIGHT_ICONS_PAD);
+            let ctx = ui.ctx().clone();
+            let cmd = |c| ctx.send_viewport_cmd(c);
+            if window_button(ui, WinButton::Close, "Close").clicked() {
+                cmd(egui::ViewportCommand::Close);
+            }
+            let max_kind = if maximized { WinButton::Restore } else { WinButton::Maximize };
+            let max_tip = if maximized { "Restore" } else { "Maximize" };
+            if window_button(ui, max_kind, max_tip).clicked() {
+                cmd(egui::ViewportCommand::Maximized(!maximized));
+            }
+            if window_button(ui, WinButton::Minimize, "Minimize").clicked() {
+                cmd(egui::ViewportCommand::Minimized(true));
+            }
+            ui.add_space(6.0);
             // Midterm right icons: 18px activity + files (RTL paints files first).
             if tab_bar_right_icon(ui, Icon::Folder, "Files (Ctrl+Shift+F)").clicked() {
                 files.show = !files.show;
@@ -910,6 +931,119 @@ fn icon_square(ui: &mut egui::Ui, kind: Icon, tip: &str) -> egui::Response {
         egui::FontId::new(14.0, egui::FontFamily::Name(ui_theme::FONT_ICONS.into())),
         ui_theme::TEXT_MUTED,
     );
+    resp.on_hover_text(tip)
+}
+
+/// Which window edge or corner a point at `pos` grabs (None inside, or when maximized).
+fn edge_at(pos: egui::Pos2, win: egui::Rect) -> Option<egui::viewport::ResizeDirection> {
+    use egui::viewport::ResizeDirection::*;
+    let near = |v: f32, edge: f32, grab: f32| (v - edge).abs() <= grab;
+    let (l, r) = (near(pos.x, win.left(), CORNER_GRAB), near(pos.x, win.right(), CORNER_GRAB));
+    let (t, b) = (near(pos.y, win.top(), CORNER_GRAB), near(pos.y, win.bottom(), CORNER_GRAB));
+    match (l, r, t, b) {
+        (true, _, true, _) => return Some(NorthWest),
+        (_, true, true, _) => return Some(NorthEast),
+        (true, _, _, true) => return Some(SouthWest),
+        (_, true, _, true) => return Some(SouthEast),
+        _ => {}
+    }
+    if near(pos.x, win.left(), EDGE_GRAB) {
+        Some(West)
+    } else if near(pos.x, win.right(), EDGE_GRAB) {
+        Some(East)
+    } else if near(pos.y, win.top(), EDGE_GRAB) {
+        Some(North)
+    } else if near(pos.y, win.bottom(), EDGE_GRAB) {
+        Some(South)
+    } else {
+        None
+    }
+}
+
+/// Without the OS frame nothing resizes the window: grab zones on the edges do.
+fn window_edge_resize(ctx: &Context) {
+    use egui::viewport::ResizeDirection::*;
+    let (pos, pressed, win, maximized) = ctx.input(|i| {
+        (
+            i.pointer.hover_pos(),
+            i.pointer.button_pressed(egui::PointerButton::Primary),
+            i.content_rect(),
+            i.viewport().maximized.unwrap_or(false) || i.viewport().fullscreen.unwrap_or(false),
+        )
+    });
+    let Some(dir) = pos.filter(|_| !maximized).and_then(|p| edge_at(p, win)) else {
+        return;
+    };
+    ctx.set_cursor_icon(match dir {
+        North | South => egui::CursorIcon::ResizeVertical,
+        East | West => egui::CursorIcon::ResizeHorizontal,
+        NorthWest | SouthEast => egui::CursorIcon::ResizeNwSe,
+        NorthEast | SouthWest => egui::CursorIcon::ResizeNeSw,
+    });
+    if pressed {
+        ctx.send_viewport_cmd(egui::ViewportCommand::BeginResize(dir));
+    }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum WinButton {
+    Minimize,
+    Maximize,
+    Restore,
+    Close,
+}
+
+/// A 46 px caption button with a hairline glyph; close turns red on hover.
+fn window_button(ui: &mut egui::Ui, kind: WinButton, tip: &str) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(WIN_BTN_W, TAB_BAR_H), Sense::click());
+    let close = kind == WinButton::Close;
+    let hot = resp.hovered();
+    if hot {
+        let fill = if close { CLOSE_RED } else { ui_theme::SURFACE_SEL };
+        ui.painter().rect_filled(rect, CornerRadius::ZERO, fill);
+    }
+    let color = if hot && close {
+        Color32::WHITE
+    } else if hot {
+        ui_theme::TEXT
+    } else {
+        ui_theme::TEXT_MUTED
+    };
+    let stroke = Stroke::new(1.0, color);
+    let ppp = ui.ctx().pixels_per_point();
+    // Half-pixel centre keeps 1 px strokes crisp.
+    let c = egui::pos2(
+        (rect.center().x * ppp).floor() / ppp + 0.5 / ppp,
+        (rect.center().y * ppp).floor() / ppp + 0.5 / ppp,
+    );
+    let p = ui.painter();
+    match kind {
+        WinButton::Minimize => {
+            p.hline(c.x - 5.0..=c.x + 5.0, c.y, stroke);
+        }
+        WinButton::Maximize => {
+            p.rect_stroke(
+                egui::Rect::from_center_size(c, Vec2::splat(10.0)),
+                CornerRadius::ZERO,
+                stroke,
+                egui::StrokeKind::Inside,
+            );
+        }
+        WinButton::Restore => {
+            let front = egui::Rect::from_center_size(c + Vec2::new(-1.0, 1.0), Vec2::splat(8.0));
+            p.rect_stroke(front, CornerRadius::ZERO, stroke, egui::StrokeKind::Inside);
+            // Back window: only the part that peeks out above and to the right.
+            let (l, t, r) = (front.left() + 2.0, front.top() - 2.0, front.right() + 2.0);
+            p.line_segment([egui::pos2(l, t), egui::pos2(r, t)], stroke);
+            p.line_segment([egui::pos2(r, t), egui::pos2(r, t + 8.0)], stroke);
+            p.line_segment([egui::pos2(l, t), egui::pos2(l, front.top())], stroke);
+            p.line_segment([egui::pos2(front.right(), t + 8.0), egui::pos2(r, t + 8.0)], stroke);
+        }
+        WinButton::Close => {
+            p.line_segment([c + Vec2::new(-5.0, -5.0), c + Vec2::new(5.0, 5.0)], stroke);
+            p.line_segment([c + Vec2::new(-5.0, 5.0), c + Vec2::new(5.0, -5.0)], stroke);
+        }
+    }
     resp.on_hover_text(tip)
 }
 
@@ -1222,5 +1356,25 @@ fn render_node(
                 dirty,
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use egui::viewport::ResizeDirection::*;
+
+    #[test]
+    fn window_edges_and_corners_map_to_resize_directions() {
+        let win = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), Vec2::new(800.0, 600.0));
+        let at = |x, y| edge_at(egui::pos2(x, y), win);
+        assert_eq!(at(0.0, 300.0), Some(West));
+        assert_eq!(at(799.0, 300.0), Some(East));
+        assert_eq!(at(400.0, 1.0), Some(North));
+        assert_eq!(at(400.0, 599.0), Some(South));
+        assert_eq!(at(3.0, 3.0), Some(NorthWest));
+        assert_eq!(at(797.0, 597.0), Some(SouthEast));
+        assert_eq!(at(400.0, 300.0), None);
+        assert_eq!(at(400.0, 16.0), None, "the bar below the top edge only drags");
     }
 }

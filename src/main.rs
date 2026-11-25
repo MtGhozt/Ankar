@@ -79,6 +79,9 @@ fn main() -> anyhow::Result<()> {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size(window_size)
             .with_min_inner_size([640.0, 400.0])
+            // Chromeless: the app draws its own caption bar (see `draw_tab_bar`).
+            .with_decorations(false)
+            .with_transparent(false)
             .with_title(title.clone()),
         // Native monitor DPI (e.g. 1.5 at 150%). Do not set_pixels_per_point.
         renderer: eframe::Renderer::Glow,

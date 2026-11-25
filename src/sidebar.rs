@@ -89,7 +89,7 @@ pub fn draw(
     // midterm footer: launchers y 951–974, archived baseline 1016 in 1033 window → ~92 / ~46 from bottom.
     let divider_launcher_y = sidebar_rect.bottom() - 92.0;
     let divider_archived_y = sidebar_rect.bottom() - 46.0;
-    let filter_bottom_y = sidebar_rect.top() + 151.33;
+    let filter_bottom_y = sidebar_rect.top() + 113.33;
     let archived_list_h = if sidebar.show_archived {
         (sidebar.archived.len() as f32 * 28.0).min(160.0) + 8.0
     } else {
@@ -108,7 +108,7 @@ pub fn draw(
     let mut start_rename: Option<usize> = None;
 
     // --- Top actions: New session 260×30 + folder 30×30 (mockup x 6 / 273.33) ---
-    ui.add_space(7.33); // title strip ends at y38; buttons at y45.33 → +7.33 into content
+    ui.add_space(7.33);
     let row = ui.available_rect_before_wrap();
     let (actions_rect, _) = ui.allocate_exact_size(Vec2::new(row.width(), 30.0), Sense::hover());
     let side_l = 6.0;
