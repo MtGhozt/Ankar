@@ -733,7 +733,37 @@ fn is_arc(c: char) -> bool {
 fn is_box_geometry(c: char) -> bool {
     box_arms(c).is_some()
         || is_arc(c)
-        || matches!(c, '\u{2580}'..='\u{259F}')
+        || matches!(c, '\u{2580}'..='\u{259F}' | '\u{2800}'..='\u{28FF}')
+}
+
+/// Raised dots of a braille pattern (U+2800–U+28FF) as (column, row) in the 2x4 grid.
+/// Bits 0-2 are the left column top to bottom, bits 3-5 the right one, bits 6 and 7 the
+/// bottom row (left, right).
+fn braille_dots(c: char) -> Vec<(u8, u8)> {
+    const DOTS: [(u8, u8); 8] = [(0, 0), (0, 1), (0, 2), (1, 0), (1, 1), (1, 2), (0, 3), (1, 3)];
+    let bits = (c as u32).wrapping_sub(0x2800);
+    if bits > 0xFF {
+        return Vec::new();
+    }
+    DOTS.iter().enumerate().filter(|(i, _)| bits >> i & 1 == 1).map(|(_, d)| *d).collect()
+}
+
+/// Spinners and graphs use braille constantly; fonts either lack it or draw dots of a
+/// different size, so the dots are circles on the cell's own 2x4 grid.
+fn paint_braille(shapes: &mut Vec<Shape>, c: char, rect: Rect, fg: Color32) -> bool {
+    if !('\u{2800}'..='\u{28FF}').contains(&c) {
+        return false;
+    }
+    let (pitch_x, pitch_y) = (rect.width() / 2.0, rect.height() / 4.0);
+    let radius = pitch_x.min(pitch_y) * 0.4;
+    for (col, row) in braille_dots(c) {
+        let center = Pos2::new(
+            rect.left() + pitch_x * (col as f32 + 0.5),
+            rect.top() + pitch_y * (row as f32 + 0.5),
+        );
+        shapes.push(Shape::circle_filled(center, radius, fg));
+    }
+    true
 }
 
 /// Snap a span to whole physical pixels so neighbours share their edge exactly.
@@ -908,6 +938,10 @@ fn paint_row_box_drawing(
         // Centre on whole physical pixels so the two arms share one clean edge.
         let cy = ui_theme::snap(y + row_h * 0.5, ppp);
         if paint_block(shapes, c, x, y, w, row_h, fg, ppp) {
+            continue;
+        }
+        let cell_rect = Rect::from_min_size(Pos2::new(x, y), Vec2::new(w, row_h));
+        if paint_braille(shapes, c, cell_rect, fg) {
             continue;
         }
         if is_arc(c) {
@@ -1373,6 +1407,21 @@ mod tests {
         assert_eq!(shapes.len(), 1, "one solid run, no per-cell seams");
         let w = ui_theme::term_col_x(0.0, 3, 1.0);
         assert!((shapes[0].visual_bounding_rect().width() - w).abs() < 1.0);
+    }
+
+    #[test]
+    fn braille_is_drawn_as_dots_on_the_2x4_grid() {
+        assert_eq!(braille_dots('\u{2800}'), vec![]);
+        assert_eq!(braille_dots('\u{280B}'), vec![(0, 0), (0, 1), (1, 0)], "⠋ = dots 1 2 4");
+        assert_eq!(braille_dots('\u{28FF}').len(), 8);
+        assert_eq!(braille_dots('a'), vec![]);
+        let rect = Rect::from_min_size(Pos2::new(10.0, 20.0), Vec2::new(8.0, 16.0));
+        let mut shapes = Vec::new();
+        assert!(paint_braille(&mut shapes, '\u{2839}', rect, Color32::WHITE));
+        assert_eq!(shapes.len(), 4, "⠹ has four dots");
+        assert!(shapes.iter().all(|s| rect.contains_rect(s.visual_bounding_rect())), "dots stay in the cell");
+        assert!(!paint_braille(&mut shapes, 'x', rect, Color32::WHITE));
+        assert!(is_box_geometry('\u{283C}'), "text pass skips braille");
     }
 
     #[test]

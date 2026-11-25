@@ -325,6 +325,29 @@ fn apply_text_styles(s: &mut Style) {
 }
 
 fn install_fonts(ctx: &Context) {
+    let mut fonts = font_definitions();
+    add_system_symbols(&mut fonts);
+    ctx.set_fonts(fonts);
+}
+
+/// Monochrome emoji (U+2705, U+1F525): the bundled symbols font has none, Windows ships Segoe UI
+/// Symbol. Last in the proportional and monospace chains; skipped when the file is missing.
+fn add_system_symbols(fonts: &mut FontDefinitions) {
+    let Some(windir) = std::env::var_os("WINDIR") else {
+        return;
+    };
+    let path = std::path::Path::new(&windir).join("Fonts").join("seguisym.ttf");
+    let Ok(bytes) = std::fs::read(path) else {
+        return;
+    };
+    fonts.font_data.insert("SegoeSymbols".to_owned(), Arc::new(FontData::from_owned(bytes)));
+    for family in [FontFamily::Proportional, FontFamily::Monospace] {
+        fonts.families.entry(family).or_default().push("SegoeSymbols".to_owned());
+    }
+}
+
+/// Inter + icons + bundled symbols on top of egui's defaults (Hack for monospace).
+fn font_definitions() -> FontDefinitions {
     let mut fonts = FontDefinitions::default();
 
     fonts.font_data.insert(
@@ -380,7 +403,7 @@ fn install_fonts(ctx: &Context) {
         .entry(FontFamily::Monospace)
         .or_default()
         .push("AnkarSymbols".to_owned());
-    ctx.set_fonts(fonts);
+    fonts
 }
 
 fn visuals() -> Visuals {
@@ -443,4 +466,65 @@ fn visuals() -> Visuals {
     // Scrollbars
     v.widgets.noninteractive.bg_fill = SURFACE_1;
     v
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Minimal cmap lookup (formats 4 and 12) so the test needs no font crate.
+    fn font_has(font: &[u8], c: u32) -> bool {
+        let u16_at = |o: usize| u16::from_be_bytes([font[o], font[o + 1]]) as usize;
+        let u32_at = |o: usize| u32::from_be_bytes([font[o], font[o + 1], font[o + 2], font[o + 3]]) as usize;
+        let cmap = (0..u16_at(4))
+            .map(|i| 12 + i * 16)
+            .find(|&r| &font[r..r + 4] == b"cmap")
+            .map(|r| u32_at(r + 8))
+            .expect("cmap table");
+        (0..u16_at(cmap + 2)).any(|i| {
+            let sub = cmap + u32_at(cmap + 4 + i * 8 + 4);
+            match u16_at(sub) {
+                12 => (0..u32_at(sub + 12)).any(|g| {
+                    let o = sub + 16 + g * 12;
+                    (u32_at(o)..=u32_at(o + 4)).contains(&(c as usize))
+                }),
+                4 => {
+                    let segs = u16_at(sub + 6) / 2;
+                    let (end, start) = (sub + 14, sub + 16 + segs * 2);
+                    (0..segs).any(|s| {
+                        let (e, st) = (u16_at(end + s * 2), u16_at(start + s * 2));
+                        let range_pos = start + segs * 4 + s * 2;
+                        let (delta, range) = (u16_at(start + segs * 2 + s * 2), u16_at(range_pos));
+                        if !(st..=e).contains(&(c as usize)) {
+                            return false;
+                        }
+                        if range == 0 {
+                            return (c as usize + delta) & 0xFFFF != 0;
+                        }
+                        u16_at(range_pos + range + 2 * (c as usize - st)) != 0
+                    })
+                }
+                _ => false,
+            }
+        })
+    }
+
+    #[test]
+    fn symbols_font_has_the_missing_glyphs_and_is_last_in_every_text_chain() {
+        let font = include_bytes!("../assets/fonts/ankar-symbols.ttf");
+        for c in (0x280B..=0x283C).chain([0x2B1D, 0x21BB, 0x25CF]) {
+            assert!(font_has(font, c), "U+{c:04X} missing from ankar-symbols.ttf");
+        }
+        assert!(!font_has(font, 0x41), "the lookup is not a constant true");
+        let fonts = font_definitions();
+        for family in [
+            FontFamily::Proportional,
+            FontFamily::Monospace,
+            FontFamily::Name(FONT_MEDIUM.into()),
+        ] {
+            let chain = &fonts.families[&family];
+            assert_eq!(chain.last().map(String::as_str), Some("AnkarSymbols"), "{family:?}");
+            assert!(fonts.font_data.contains_key("AnkarSymbols"));
+        }
+    }
 }
