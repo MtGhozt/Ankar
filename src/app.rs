@@ -219,38 +219,8 @@ impl eframe::App for AnkarApp {
                     ui.set_width(ui.available_width());
                     ui.set_clip_rect(ui.max_rect());
                     let sidebar_rect = ui.max_rect();
-                    let painter = ui.painter();
 
-                    // Title strip (y 0–38): drag area x 0–70; panel-left toggle at (81.33, 10).
-                    let toggle_rect = egui::Rect::from_min_size(
-                        egui::pos2(sidebar_rect.left() + 81.33, sidebar_rect.top() + 10.0),
-                        Vec2::splat(18.7),
-                    );
-                    let toggle_id = ui.scope_id().with("sidebar_toggle");
-                    let toggle_resp = ui.interact(toggle_rect, toggle_id, Sense::click());
-                    if toggle_resp.hovered() {
-                        painter.rect_filled(
-                            toggle_rect.expand(4.0),
-                            CornerRadius::same(ui_theme::RADIUS_KBD),
-                            ui_theme::HOVER,
-                        );
-                    }
-                    painter.text(
-                        toggle_rect.center(),
-                        egui::Align2::CENTER_CENTER,
-                        Icon::PanelLeft.codepoint().to_string(),
-                        egui::FontId::new(
-                            18.7,
-                            egui::FontFamily::Name(ui_theme::FONT_ICONS.into()),
-                        ),
-                        ui_theme::TEXT_MUTED,
-                    );
-                    let toggle_resp =
-                        toggle_resp.on_hover_text("Hide sidebar (Ctrl+Shift+B)");
-                    if toggle_resp.clicked() {
-                        self.sidebar.show = false;
-                    }
-
+                    // Title strip (y 0–38) stays a drag region; the toggle lives in the tab bar.
                     let content_top = sidebar_rect.top() + 38.0;
                     let content_rect = egui::Rect::from_min_max(
                         egui::pos2(sidebar_rect.left(), content_top),
@@ -521,7 +491,7 @@ fn draw_tab_bar(
         bar_rect.min,
         egui::pos2(right_rect.left(), bar_rect.bottom()),
     );
-    let fixed_left = 13.0 + 28.0 + if sidebar.show { 0.0 } else { 28.0 };
+    let fixed_left = 13.0 + 28.0;
     let tab_w = ((left_rect.width() - fixed_left) / workspace.tabs.len().max(1) as f32)
         .clamp(MIN_TAB_WIDTH, TAB_WIDTH);
 
@@ -534,10 +504,14 @@ fn draw_tab_bar(
         ui.set_min_height(TAB_BAR_H);
         ui.spacing_mut().item_spacing.x = 0.0;
 
-        if !sidebar.show
-            && icon_square(ui, Icon::PanelLeft, "Show sidebar (Ctrl+Shift+B)").clicked()
-        {
-            sidebar.show = true;
+        // One control in both states: same slot, size and hover as the right-side icons.
+        let sidebar_tip = if sidebar.show {
+            "Hide sidebar (Ctrl+Shift+B)"
+        } else {
+            "Show sidebar (Ctrl+Shift+B)"
+        };
+        if icon_square(ui, Icon::PanelLeft, sidebar_tip).clicked() {
+            sidebar.show = !sidebar.show;
         }
 
         for (i, tab) in workspace.tabs.iter().enumerate() {
