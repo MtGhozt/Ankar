@@ -113,11 +113,12 @@ fn main() -> anyhow::Result<()> {
         ..Default::default()
     };
 
-    eframe::run_native(
+    let run = eframe::run_native(
         &title,
         native_options,
         Box::new(|cc| Ok(Box::new(app::AnkarApp::new(cc)?))),
-    )
-    .map_err(|e| anyhow::anyhow!("eframe failed: {e}"))
-    .context("failed to start Ankar")
+    );
+    terminal::join_conpty_teardown_workers();
+    run.map_err(|e| anyhow::anyhow!("eframe failed: {e}"))
+        .context("failed to start Ankar")
 }

@@ -2,7 +2,7 @@ use super::osc::{AgentInfo, OscTap};
 use super::resize::{grid_size, hold_frame, ResizeDebouncer};
 use super::theme::{indexed_256, TermColors};
 use alacritty_terminal::event::{Event, EventListener, Notify, OnResize, WindowSize};
-use alacritty_terminal::event_loop::{EventLoop, Msg, Notifier};
+use alacritty_terminal::event_loop::{EventLoop, EventLoopSender, Msg, Notifier};
 use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::{Column, Line, Point, Side};
 use alacritty_terminal::selection::{Selection, SelectionRange, SelectionType};
@@ -18,6 +18,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 const MAX_SCROLLBACK: usize = 50_000;
@@ -374,10 +375,15 @@ impl TerminalSession {
                 }
             });
         if let Err(e) = reader {
-            release_hosts(shell_pid, &host_pids);
-            let _ = notifier.0.send(Msg::Shutdown);
-            let _ = pty_thread.join();
-            close_child_handle(child_handle);
+            handoff_conpty_teardown(
+                id,
+                shell_pid,
+                host_pids,
+                notifier.0.clone(),
+                pty_thread,
+                child_handle,
+                false,
+            );
             return Err(e.into());
         }
 
@@ -688,18 +694,86 @@ impl Drop for TerminalSession {
     fn drop(&mut self) {
         // A detached PTY thread is killed on process exit before ClosePseudoConsole, and that
         // call deadlocks unless the host is already gone (it waits for a reader to drain).
-        release_hosts(self.shell_pid.take(), &std::mem::take(&mut self.host_pids));
-        let _ = self.notifier.0.send(Msg::Shutdown);
-        if let Some(thread) = self.pty_thread.take() {
-            let _ = thread.join();
+        let id = self.id;
+        let shell_pid = self.shell_pid.take();
+        let host_pids = std::mem::take(&mut self.host_pids);
+        let shutdown = self.notifier.0.clone();
+        let child_handle = self.child_handle;
+        if let Some(pty_thread) = self.pty_thread.take() {
+            handoff_conpty_teardown(
+                id,
+                shell_pid,
+                host_pids,
+                shutdown,
+                pty_thread,
+                child_handle,
+                true,
+            );
         }
-        close_child_handle(self.child_handle);
-        let live = LIVE_CONPTY.fetch_sub(1, Ordering::Relaxed).saturating_sub(1);
-        log::debug!("conpty drop id={} live={live}", self.id);
     }
 }
 
 static LIVE_CONPTY: AtomicUsize = AtomicUsize::new(0);
+
+fn teardown_workers() -> &'static Mutex<Vec<JoinHandle<()>>> {
+    static WORKERS: Mutex<Vec<JoinHandle<()>>> = Mutex::new(Vec::new());
+    &WORKERS
+}
+
+/// Join ConPTY teardown workers after the window is gone (`main` after `run_native`).
+pub fn join_conpty_teardown_workers() {
+    let handles = std::mem::take(&mut *teardown_workers().lock().unwrap_or_else(|e| e.into_inner()));
+    for handle in handles {
+        let _ = handle.join();
+    }
+}
+
+fn handoff_conpty_teardown(
+    id: u64,
+    shell_pid: Option<u32>,
+    host_pids: Vec<u32>,
+    shutdown: EventLoopSender,
+    pty_thread: PtyThread,
+    child_handle: isize,
+    decrement_live: bool,
+) {
+    let worker = std::thread::spawn(move || {
+        conpty_teardown_worker(
+            id,
+            shell_pid,
+            host_pids,
+            shutdown,
+            pty_thread,
+            child_handle,
+            decrement_live,
+        );
+    });
+    teardown_workers()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push(worker);
+}
+
+fn conpty_teardown_worker(
+    id: u64,
+    shell_pid: Option<u32>,
+    host_pids: Vec<u32>,
+    shutdown: EventLoopSender,
+    pty_thread: PtyThread,
+    child_handle: isize,
+    decrement_live: bool,
+) {
+    let hosts_gone = release_hosts(shell_pid, &host_pids);
+    if hosts_gone {
+        let _ = shutdown.send(Msg::Shutdown);
+        let _ = pty_thread.join();
+    }
+    close_child_handle(child_handle);
+    if decrement_live {
+        let live = LIVE_CONPTY.fetch_sub(1, Ordering::Relaxed).saturating_sub(1);
+        log::debug!("conpty drop id={id} live={live}");
+    }
+}
 
 pub(crate) fn console_host_pids() -> Vec<u32> {
     let me = std::process::id();
@@ -723,13 +797,9 @@ pub(crate) fn release_conpty(shell: Option<u32>, before: &[u32]) {
     release_hosts(shell, &hosts);
 }
 
-fn release_hosts(shell: Option<u32>, hosts: &[u32]) {
-    if let Some(pid) = shell {
-        terminate_tree(pid);
-    }
-    for &pid in hosts {
-        terminate_tree(pid);
-    }
+fn release_hosts(shell: Option<u32>, hosts: &[u32]) -> bool {
+    let shell_ok = shell.is_none_or(terminate_tree);
+    hosts.iter().copied().all(terminate_tree) && shell_ok
 }
 
 fn kill_order(root: u32, edges: &[(u32, u32)]) -> Vec<u32> {
@@ -749,38 +819,39 @@ fn kill_order(root: u32, edges: &[(u32, u32)]) -> Vec<u32> {
     order
 }
 
-fn terminate_tree(root: u32) {
+fn terminate_tree(root: u32) -> bool {
     if root == 0 {
-        return;
+        return true;
     }
     let edges: Vec<(u32, u32)> = crate::procs::snapshot()
         .into_iter()
         .map(|p| (p.pid, p.ppid))
         .collect();
-    for pid in kill_order(root, &edges) {
-        terminate_pid(pid);
-    }
+    kill_order(root, &edges).into_iter().all(terminate_pid)
 }
 
 // shortcut: 2s wait and the pid is not rechecked, if TerminateProcess is ignored or a pid was reused use a job object.
-fn terminate_pid(pid: u32) {
+fn terminate_pid(pid: u32) -> bool {
     #[cfg(windows)]
     unsafe {
         use windows_sys::Win32::Foundation::CloseHandle;
         use windows_sys::Win32::System::Threading::{
             OpenProcess, TerminateProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE,
         };
+        const WAIT_OBJECT_0: u32 = 0x0000_0000;
         let handle = OpenProcess(PROCESS_TERMINATE | PROCESS_SYNCHRONIZE, 0, pid);
         if handle.is_null() {
-            return;
+            return true;
         }
         TerminateProcess(handle, 1);
-        WaitForSingleObject(handle, 2000);
+        let waited = WaitForSingleObject(handle, 2000);
         CloseHandle(handle);
+        waited == WAIT_OBJECT_0
     }
     #[cfg(not(windows))]
     {
         let _ = pid;
+        true
     }
 }
 
