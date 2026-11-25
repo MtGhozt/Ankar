@@ -94,6 +94,8 @@ pub struct Config {
     /// TUIs like Claude Code draw their own — leave false to avoid a double bar.
     #[serde(default)]
     pub pane_status_bar: bool,
+    /// Filter for `ankar-log.txt` (same syntax as `RUST_LOG`, which overrides it).
+    pub log_level: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -129,6 +131,7 @@ impl Default for Config {
             collapsed_groups: Vec::new(),
             custom_titlebar: false,
             pane_status_bar: false,
+            log_level: "info".into(),
         }
     }
 }
@@ -245,6 +248,12 @@ impl Config {
         Ok(Self::config_dir()?.join("config.toml"))
     }
 
+    /// `log_level` from config.toml, read before the logger exists (so nothing here may log).
+    pub fn log_level_on_disk() -> Option<String> {
+        let text = fs::read_to_string(Self::config_path().ok()?).ok()?;
+        toml::from_str::<Config>(&text).ok().map(|c| c.log_level)
+    }
+
     pub fn sessions_path() -> anyhow::Result<PathBuf> {
         Ok(Self::config_dir()?.join("sessions.json"))
     }
@@ -339,6 +348,9 @@ sidebar_width = {sidebar_width}
 # Dim unfocused split panes
 dim_inactive_panes = {dim_inactive_panes}
 
+# Log filter for %APPDATA%\ankar\ankar-log.txt (RUST_LOG overrides): error | warn | info | debug | ankar=debug
+log_level = "{log_level}"
+
 # Pinned project folders (absolute paths)
 pinned_projects = []
 
@@ -370,6 +382,7 @@ color = "#8A8A8A"
             scrollback_lines = self.scrollback_lines,
             sidebar_width = self.sidebar_width,
             dim_inactive_panes = self.dim_inactive_panes,
+            log_level = self.log_level,
         );
         fs::write(path, body)?;
         Ok(())

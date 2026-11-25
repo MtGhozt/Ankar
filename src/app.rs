@@ -43,6 +43,13 @@ impl AnkarApp {
             log::warn!("config load error: {e}");
             (Config::default(), true)
         });
+        log::info!(
+            "fonts: terminal {} px, UI {}/{} px, pixels_per_point {}",
+            config.font_size,
+            ui_theme::SIZE_UI,
+            ui_theme::SIZE_UI_SMALL,
+            cc.egui_ctx.pixels_per_point()
+        );
         let (mut workspace, archived) = Workspace::new(&cc.egui_ctx, config.scrollback_lines)?;
         for tab in &mut workspace.tabs {
             if config.pinned_sessions.contains(&tab.session_name) {
@@ -107,6 +114,13 @@ impl AnkarApp {
             }
             PaletteAction::ToggleStats => {
                 self.stats.toggle();
+            }
+            PaletteAction::OpenLogFolder => {
+                if let Ok(dir) = Config::config_dir() {
+                    if let Err(e) = std::process::Command::new("explorer.exe").arg(&dir).spawn() {
+                        log::warn!("could not open {}: {e}", dir.display());
+                    }
+                }
             }
             PaletteAction::RestoreArchived(i) => {
                 if i < self.sidebar.archived.len() {

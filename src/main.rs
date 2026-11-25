@@ -5,6 +5,7 @@ mod config;
 mod files;
 mod launchers;
 mod layout;
+mod logging;
 mod logos;
 mod notify;
 mod palette;
@@ -20,7 +21,7 @@ mod ui_theme;
 use anyhow::Context;
 
 /// Bumped whenever we need Matias to confirm he's running a fresh binary.
-const BUILD_MARK: &str = "midterm-r13";
+const BUILD_MARK: &str = "r15";
 
 /// Parse `--window-size WxH` (logical px) for midterm acceptance screenshots.
 fn parse_window_size(args: &[String]) -> Option<[f32; 2]> {
@@ -50,10 +51,22 @@ fn parse_wh(s: &str) -> Option<[f32; 2]> {
 }
 
 fn main() -> anyhow::Result<()> {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
-
     if let Err(err) = config::migrate_legacy_dir() {
-        log::warn!("legacy config migration failed: {err}");
+        eprintln!("legacy config migration failed: {err}");
+    }
+    let filter = logging::filter(std::env::var("RUST_LOG").ok(), config::Config::log_level_on_disk());
+    match config::Config::config_dir().and_then(|dir| logging::init(&dir, &filter)) {
+        Ok(path) => {
+            eprintln!("ankar log: {}", path.display());
+            log::info!("log file {} (filter {filter})", path.display());
+        }
+        Err(err) => {
+            env_logger::Builder::new().parse_filters(&filter).init();
+            log::warn!("no log file ({err}); logging to stderr only");
+        }
+    }
+    if let Ok(path) = config::Config::config_path() {
+        log::info!("config {}", path.display());
     }
 
     let args: Vec<String> = std::env::args().collect();
@@ -66,13 +79,16 @@ fn main() -> anyhow::Result<()> {
         None => [1100.0, 700.0],
     };
 
-    if let Ok(exe) = std::env::current_exe() {
-        log::info!(
-            "Ankar {BUILD_MARK} launching from {}",
-            exe.display()
-        );
-    } else {
-        log::info!("Ankar {BUILD_MARK} launching");
+    let version = env!("CARGO_PKG_VERSION");
+    let exe = std::env::current_exe().ok();
+    match &exe {
+        Some(exe) => log::info!("Ankar {version} ({BUILD_MARK}) launching from {}", exe.display()),
+        None => log::info!("Ankar {version} ({BUILD_MARK}) launching"),
+    }
+    let exe_dir = exe.as_deref().and_then(std::path::Path::parent);
+    match logging::conpty_dll(exe_dir, std::env::var_os("PATH").as_deref()) {
+        Some(dll) => log::info!("ConPTY: {} (OpenConsole.exe expected beside it)", dll.display()),
+        None => log::info!("ConPTY: inbox Windows API; no conpty.dll beside ankar.exe or on PATH"),
     }
 
     let title = format!("Ankar ({BUILD_MARK})");
