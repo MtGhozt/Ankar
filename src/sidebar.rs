@@ -10,7 +10,7 @@ use egui::{
     Sense, Stroke, TextureHandle, Ui, Vec2,
 };
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 /// Stable focus id for the sidebar search field.
@@ -471,6 +471,7 @@ pub fn draw(
     let filter = sidebar.filter;
     let mut groups: BTreeMap<String, Vec<usize>> = BTreeMap::new();
     let mut pinned: Vec<usize> = Vec::new();
+    let home = dirs::home_dir();
 
     for (i, tab) in workspace.tabs.iter().enumerate() {
         if !matches_filter(tab.status, filter) {
@@ -492,7 +493,7 @@ pub fn draw(
         if tab.pinned {
             pinned.push(i);
         } else {
-            let key = project_group_key(&tab.project_key);
+            let key = project_group_key(&tab.project_key, home.as_deref());
             groups.entry(key).or_default().push(i);
         }
     }
@@ -860,8 +861,13 @@ fn matches_filter(status: SessionStatus, filter: SessionFilter) -> bool {
     }
 }
 
-fn project_group_key(project_key: &str) -> String {
-    if project_key.is_empty() || project_key == "(no project)" {
+/// Sidebar group of a session: its project folder's name. The home folder is no project (the
+/// group would be the user name), so those sessions fall under "other".
+fn project_group_key(project_key: &str, home: Option<&Path>) -> String {
+    if project_key.is_empty()
+        || project_key == "(no project)"
+        || home.is_some_and(|h| Path::new(project_key) == h)
+    {
         return "other".into();
     }
     PathBuf::from(project_key)
@@ -889,7 +895,8 @@ fn draw_filter_bar(
         ui.ctx()
             .request_repaint_after(Duration::from_millis(100));
     }
-    let time = ui.input(|i| i.time) as f32;
+    // Frozen at 0 with nothing working: the icon is static (any other repaint must not spin it).
+    let time = if n_working > 0 { ui.input(|i| i.time) as f32 } else { 0.0 };
 
     // midterm: container x=6, w=297.33, h=28, padding 2, 3×96.67 segments.
     let row = ui.available_rect_before_wrap();
@@ -1478,4 +1485,18 @@ fn paint_working_spinner(
         painter.circle_filled(p, dot_r, c);
     }
 }
+#[cfg(test)]
+mod tests {
+    use super::*;
 
+    #[test]
+    fn groups_are_project_folders_never_the_user_name() {
+        let home = Path::new(r"C:\Users\matias");
+        let key = |p: &str| project_group_key(p, Some(home));
+        assert_eq!(key(r"C:\dev\Ankar"), "ankar");
+        assert_eq!(key(r"C:\Users\matias\code\OLAP"), "olap");
+        assert_eq!(key(r"C:\Users\matias"), "other", "home is not a project");
+        assert_eq!(key("(no project)"), "other");
+        assert_eq!(key(""), "other");
+    }
+}

@@ -340,12 +340,43 @@ fn restore_layout(
     }
 }
 
+/// The project a session belongs to, as a path: the git repo root above `cwd` (folders are
+/// walked up looking for `.git`), else `cwd` itself. The home folder never counts as a repo
+/// root, so a stray `~/.git` cannot turn every session into one project.
 pub fn project_key_for(cwd: Option<&PathBuf>) -> String {
-    cwd.map(|p| p.display().to_string())
-        .unwrap_or_else(|| "(no project)".into())
+    let Some(cwd) = cwd else {
+        return "(no project)".into();
+    };
+    let home = dirs::home_dir();
+    let root = cwd
+        .ancestors()
+        .take_while(|p| Some(*p) != home.as_deref())
+        .find(|p| p.join(".git").exists())
+        .unwrap_or(cwd);
+    root.display().to_string()
 }
 
 pub fn project_name(cwd: Option<&PathBuf>) -> String {
     cwd.and_then(|p| p.file_name().map(|s| s.to_string_lossy().into_owned()))
         .unwrap_or_else(|| "No project".into())
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn project_is_the_git_root_above_the_cwd_else_the_cwd() {
+        let base = std::env::temp_dir().join(format!("ankar-proj-{}", std::process::id()));
+        let repo = base.join("my-repo");
+        let deep = repo.join("src").join("deep");
+        let plain = base.join("plain");
+        fs::create_dir_all(&deep).unwrap();
+        fs::create_dir_all(repo.join(".git")).unwrap();
+        fs::create_dir_all(&plain).unwrap();
+        assert_eq!(project_key_for(Some(&deep)), repo.display().to_string());
+        assert_eq!(project_key_for(Some(&repo)), repo.display().to_string());
+        assert_eq!(project_key_for(Some(&plain)), plain.display().to_string());
+        assert_eq!(project_key_for(None), "(no project)");
+        let _ = fs::remove_dir_all(&base);
+    }
 }

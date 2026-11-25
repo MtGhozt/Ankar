@@ -186,6 +186,8 @@ impl eframe::App for AnkarApp {
                 if let Some(session) = tab.sessions.get(&focused) {
                     if let Some(new_cwd) = session.cwd() {
                         if tab.cwd.as_ref() != Some(&new_cwd) {
+                            // The sidebar group follows the shell (OSC 7) into another project.
+                            tab.project_key = persist::project_key_for(Some(&new_cwd));
                             tab.cwd = Some(new_cwd);
                             cwd_dirty = true;
                         }
@@ -1054,6 +1056,20 @@ fn zoomed_font(current: f32, step: f32) -> f32 {
     (current + step).clamp(ui_theme::MIN_TERM_FONT, ui_theme::MAX_TERM_FONT)
 }
 
+/// Debug aid for "my shortcut does nothing": every key event that arrives with Ctrl+Shift down,
+/// before any shortcut consumes it, plus who owns the keyboard focus.
+fn log_chord_events(events: &[egui::Event], focused: Option<egui::Id>) {
+    for e in events {
+        if let egui::Event::Key { key, physical_key, pressed, repeat, modifiers } = e {
+            if modifiers.command && modifiers.shift {
+                log::debug!(
+                    "ctrl+shift key: {key:?} physical={physical_key:?} pressed={pressed} repeat={repeat} focus={focused:?}"
+                );
+            }
+        }
+    }
+}
+
 fn handle_shortcuts(
     ui: &egui::Ui,
     workspace: &mut Workspace,
@@ -1067,11 +1083,17 @@ fn handle_shortcuts(
     let cmd = Modifiers::COMMAND;
     let alt = Modifiers::ALT;
 
+    if log::log_enabled!(log::Level::Debug) {
+        let focused = ctx.memory(|m| m.focused());
+        ui.input(|i| log_chord_events(&i.events, focused));
+    }
+
     ui.input_mut(|i| {
         if consume_chord(i, cs, Key::I) {
             stats.toggle();
         }
         if consume_chord(i, cs, Key::T) {
+            log::debug!("Ctrl+Shift+T: new session");
             workspace.new_session(&ctx);
         }
         if consume_chord(i, cs, Key::W) && workspace.close_focused_pane() {
@@ -1375,6 +1397,46 @@ mod tests {
         assert!(hit(key_event(Key::T, Some(Key::T))));
         assert!(hit(key_event(Key::Y, Some(Key::T))), "other logical key, T by position");
         assert!(!hit(key_event(Key::Y, Some(Key::Y))));
+    }
+
+    /// The whole path a real Ctrl+Shift+T takes inside egui: the event as Windows reports it
+    /// (ctrl and command both set), `handle_shortcuts` run first in the frame, and nothing left
+    /// over for the terminal view to forward to the PTY.
+    #[test]
+    fn ctrl_shift_t_opens_a_session_and_is_consumed_before_the_terminal_sees_it() {
+        let modifiers = Modifiers { ctrl: true, shift: true, command: true, ..Default::default() };
+        let key = |k| egui::Event::Key {
+            key: k,
+            physical_key: Some(Key::T),
+            pressed: true,
+            repeat: false,
+            modifiers,
+        };
+        for event in [key(Key::T), key(Key::Y)] {
+            let ctx = Context::default();
+            let mut ws = Workspace {
+                tabs: Vec::new(),
+                active_tab: 0,
+                next_id: 1,
+                profiles: crate::shell::list_profiles(),
+                scrollback_lines: 100,
+                dirty: false,
+                skip_save_until_dirty: true,
+                last_autosave: std::time::Instant::now(),
+            };
+            let mut menu = false;
+            let mut sidebar = SidebarState::default();
+            let mut palette = CommandPalette::default();
+            let mut stats = StatsPanel::new(Arc::new(Mutex::new(AnkarStatsStore::default())));
+            let mut left_over = usize::MAX;
+            let raw = egui::RawInput { events: vec![event], ..Default::default() };
+            let _ = ctx.run_ui(raw, |ui| {
+                handle_shortcuts(ui, &mut ws, &mut menu, &mut sidebar, &mut palette, &mut stats);
+                left_over = ui.input(|i| i.events.len());
+            });
+            assert_eq!(ws.tabs.len(), 1, "a session was opened");
+            assert_eq!(left_over, 0, "the key event never reaches the terminal");
+        }
     }
 
     #[test]

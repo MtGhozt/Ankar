@@ -809,7 +809,7 @@ mod tests {
             [
                 "\x1b]10;rgb:e8e8/e8e8/e8e8\x07",
                 "\x1b]11;rgb:0000/0000/0000\x1b\\",
-                "\x1b]12;rgb:ffff/ffff/ffff\x07",
+                "\x1b]12;rgb:7676/9999/fefe\x07",
                 "\x1b]4;4;rgb:5a5a/a0a0/f2f2\x1b\\",
             ],
             "bytes doubled, same terminator as the query"
@@ -848,7 +848,11 @@ mod tests {
         assert_eq!(reply(&term), Some(blue));
         parser.advance(&mut term, b"\x1b]112\x07");
         assert_eq!(term.colors()[NamedColor::Cursor], None);
-        assert_eq!(reply(&term).map(|c| (c.r, c.g, c.b)), Some((255, 255, 255)), "default is white");
+        assert_eq!(
+            reply(&term).map(|c| (c.r, c.g, c.b)),
+            Some((0x76, 0x99, 0xFE)),
+            "default is the Ankar accent blue"
+        );
     }
 
     #[test]
