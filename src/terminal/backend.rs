@@ -11,7 +11,7 @@ use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::test::TermSize;
 use alacritty_terminal::term::{self, viewport_to_point, Term, TermMode};
 use alacritty_terminal::tty;
-use alacritty_terminal::vte::ansi::{Color, NamedColor, Rgb};
+use alacritty_terminal::vte::ansi::{Color, CursorShape, CursorStyle, NamedColor, Rgb};
 use egui::Context;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -116,6 +116,10 @@ pub struct VisibleCell {
 pub struct Snapshot {
     pub cells: Vec<VisibleCell>,
     pub cursor: Point,
+    /// DECSCUSR shape; `Hidden` when DECTCEM is off.
+    pub cursor_shape: CursorShape,
+    /// OSC 12 override, if the app set one.
+    pub cursor_color: Option<Rgb>,
     pub display_offset: usize,
     pub selection: Option<SelectionRange>,
     pub mode: TermMode,
@@ -127,6 +131,8 @@ impl Default for Snapshot {
         Self {
             cells: Vec::new(),
             cursor: Point::new(Line(0), Column(0)),
+            cursor_shape: CursorShape::Hidden,
+            cursor_color: None,
             display_offset: 0,
             selection: None,
             mode: TermMode::empty(),
@@ -190,6 +196,11 @@ impl TerminalSession {
         let history = scrollback_lines.min(MAX_SCROLLBACK);
         let config = term::Config {
             scrolling_history: history,
+            // Midterm bar until an app picks a shape with DECSCUSR (DECSCUSR 0 returns here).
+            default_cursor_style: CursorStyle {
+                shape: CursorShape::Beam,
+                blinking: false,
+            },
             ..term::Config::default()
         };
         let terminal_size = TerminalSize::default();
@@ -469,6 +480,8 @@ impl TerminalSession {
         }
 
         self.snapshot.cursor = content.cursor.point;
+        self.snapshot.cursor_shape = content.cursor.shape;
+        self.snapshot.cursor_color = content.colors[NamedColor::Cursor];
         self.snapshot.display_offset = content.display_offset;
         self.snapshot.selection = selection;
         self.snapshot.mode = content.mode;
