@@ -106,3 +106,5 @@ cargo/clippy/test output pasted in, re-reading large files, and extra tests or "
 passes nobody asked for.
 Fix: `AGENTS.md` § Token budget; `ankar-step` subagent; lesson recorded here (prompt 17).
 Guard: coordinator + subagents; quiet gate; narrow reads; report ≤10 lines per step.
+
+## 2026-11-25 — an "inherit" subagent in 19 ran on Grok 4.7 High Fast, so unpinned subagents are banned.

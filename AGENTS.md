@@ -64,10 +64,10 @@ Ankar is a Windows desktop terminal written in Rust: eframe/egui 0.37 (glow), al
 1. **Orchestrate, don't do.** For any prompt with more than 2 steps, the main chat is a
    coordinator: it delegates each step to a subagent (one subagent per step, sequential, never
    parallel on the same files) and keeps only the subagent's short report. Mechanical steps
-   (docs, logs, renames, small UI tweaks, config) go to the `ankar-step` subagent (Composer
-   2.5, no Fast); only hard steps (new modules, threading, parsing, tricky bugs) use Grok 4.7
-   Medium. The coordinator never reads source files itself beyond what it needs to brief the
-   subagent.
+   (docs, logs, renames, small UI tweaks, config) go to the `ankar-step` subagent. Hard steps
+   (new modules, threading, parsing, tricky bugs) go to the `ankar-hard` subagent. Never launch
+   a subagent without one of those two pinned agents; never use High or Fast variants. The
+   coordinator never reads source files itself beyond what it needs to brief the subagent.
 2. **Subagent brief** = the step text + file hints + the gate. **Subagent report back** = max
    ~10 lines: what changed, files, commit hash, gate result, anything blocked. No diffs, no logs
    pasted back.
