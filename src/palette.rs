@@ -15,6 +15,7 @@ pub enum PaletteAction {
     NewTab,
     PinActive,
     OpenLogFolder,
+    ColorCheck,
     RestoreArchived(usize),
 }
 
@@ -239,6 +240,12 @@ fn build_groups(
             icon: Some(Icon::Folder),
             shortcut: String::new(),
             action: PaletteAction::OpenLogFolder,
+        },
+        PaletteItem {
+            label: "Debug: check colors (log)".into(),
+            icon: None,
+            shortcut: String::new(),
+            action: PaletteAction::ColorCheck,
         },
     ];
     actions.retain(|i| q.is_empty() || i.label.to_lowercase().contains(q));

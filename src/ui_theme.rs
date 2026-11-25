@@ -60,8 +60,8 @@ pub const ERROR: Color32 = Color32::from_rgb(0xE5, 0x69, 0x5B);
 pub const ACCENT: Color32 = Color32::from_rgb(0x0F, 0x8C, 0xEC);
 /// Cursor when the app set no OSC 12 colour: the Ankar accent blue.
 pub const CURSOR: Color32 = Color32::from_rgb(0x76, 0x99, 0xFE);
-/// Default terminal foreground (`#E8E8E8`).
-pub const TERM_FG: Color32 = Color32::from_rgb(0xE8, 0xE8, 0xE8);
+/// Default terminal foreground (`#D4D4D4`).
+pub const TERM_FG: Color32 = Color32::from_rgb(0xD4, 0xD4, 0xD4);
 /// Unfocused pane dim overlay (black @ 0.4).
 pub const PANE_DIM: Color32 = Color32::from_black_alpha(102);
 

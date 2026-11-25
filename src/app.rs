@@ -1,3 +1,4 @@
+use crate::color_check;
 use crate::config::Config;
 use crate::files::FileViewer;
 use crate::launchers;
@@ -34,6 +35,8 @@ pub struct AnkarApp {
     logos: LogoAtlas,
     stats: StatsPanel,
     ankar_stats: Arc<Mutex<AnkarStatsStore>>,
+    /// Debug colour check in flight: swatch origin, and the flag the screenshot callback sets.
+    color_check: Option<(egui::Pos2, Option<Arc<std::sync::atomic::AtomicBool>>)>,
 }
 
 impl AnkarApp {
@@ -78,7 +81,39 @@ impl AnkarApp {
             logos,
             stats: StatsPanel::new(ankar_stats.clone()),
             ankar_stats,
+            color_check: None,
         })
+    }
+
+    /// Paints the swatches on top of everything, screenshots that frame, logs what came back.
+    fn run_color_check(&mut self, ctx: &Context) {
+        let Some((origin, done)) = &mut self.color_check else {
+            return;
+        };
+        let origin = *origin;
+        if done.as_ref().is_some_and(|d| d.load(std::sync::atomic::Ordering::SeqCst)) {
+            self.color_check = None;
+            return;
+        }
+        let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Debug, egui::Id::unique("color_check")));
+        for (rect, color) in color_check::swatch_rects(origin).iter().zip(color_check::SWATCHES) {
+            painter.rect_filled(*rect, CornerRadius::ZERO, color);
+        }
+        if done.is_none() {
+            let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            *done = Some(flag.clone());
+            let (ppp, repaint) = (ctx.pixels_per_point(), ctx.clone());
+            ctx.request_screenshot(move |image| {
+                for (want, got) in color_check::read_back(&image, ppp, origin) {
+                    let verdict = if got == Some(want) { "exact" } else { "MISMATCH" };
+                    let got = got.map_or_else(|| "off-screen".to_owned(), color_check::hex);
+                    log::info!("color check: painted {} read back {got} ({verdict})", color_check::hex(want));
+                }
+                flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                repaint.request_repaint();
+            });
+        }
+        ctx.request_repaint_after(Duration::from_millis(50));
     }
 
     fn apply_palette_action(&mut self, ctx: &Context, action: PaletteAction) {
@@ -121,6 +156,9 @@ impl AnkarApp {
                         log::warn!("could not open {}: {e}", dir.display());
                     }
                 }
+            }
+            PaletteAction::ColorCheck => {
+                self.color_check = Some((ctx.content_rect().center() - Vec2::new(48.0, 16.0), None));
             }
             PaletteAction::RestoreArchived(i) => {
                 if i < self.sidebar.archived.len() {
@@ -427,6 +465,7 @@ impl eframe::App for AnkarApp {
 
         self.stats.draw(ui);
         window_edge_resize(ui.ctx());
+        self.run_color_check(&ctx);
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {

@@ -832,10 +832,10 @@ mod tests {
         assert_eq!(
             replies,
             [
-                "\x1b]10;rgb:e8e8/e8e8/e8e8\x07",
+                "\x1b]10;rgb:d4d4/d4d4/d4d4\x07",
                 "\x1b]11;rgb:0000/0000/0000\x1b\\",
                 "\x1b]12;rgb:7676/9999/fefe\x07",
-                "\x1b]4;4;rgb:5a5a/a0a0/f2f2\x1b\\",
+                "\x1b]4;4;rgb:4e4e/9b9b/ffff\x1b\\",
             ],
             "bytes doubled, same terminator as the query"
         );

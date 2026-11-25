@@ -5,6 +5,7 @@ mod config;
 mod files;
 mod launchers;
 mod layout;
+mod color_check;
 mod logging;
 mod logos;
 mod notify;
