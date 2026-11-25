@@ -61,19 +61,23 @@ fn visible_rows(entries: &[Entry], has_parent: bool, query: &str) -> Vec<Row> {
         .collect()
 }
 
-/// Path to show, and whether a picker click may type another `cd`.
-/// `pending` is the target just typed and how long ago that was.
-pub fn cwd_follow(reported: &Path, pending: Option<(&Path, Duration)>) -> (PathBuf, bool) {
-    let Some((target, elapsed)) = pending else {
-        return (reported.to_path_buf(), true);
+/// Path to show, whether a picker click may type another `cd`, and whether to drop `pending`.
+/// `pending` is (target, directory from before the cd, how long ago). The second only re-enables
+/// clicks; the target stays shown until the shell reports it or some other directory.
+pub fn cwd_follow(reported: &Path, pending: Option<(&Path, &Path, Duration)>) -> (PathBuf, bool, bool) {
+    let Some((target, origin, elapsed)) = pending else {
+        return (reported.to_path_buf(), true, false);
     };
     if reported == target {
-        return (target.to_path_buf(), true);
+        return (target.to_path_buf(), true, true);
+    }
+    if reported != origin {
+        return (reported.to_path_buf(), true, true);
     }
     if elapsed < Duration::from_secs(1) {
-        return (target.to_path_buf(), false);
+        return (target.to_path_buf(), false, false);
     }
-    (reported.to_path_buf(), true)
+    (target.to_path_buf(), true, false)
 }
 
 fn selectable(row: Row, entries: &[Entry]) -> bool {
@@ -260,13 +264,16 @@ mod tests {
     }
 
     #[test]
-    fn pending_cd_shows_until_the_shell_agrees_or_a_second_passes() {
+    fn pending_cd_stays_on_the_target_until_the_shell_reports() {
         let here = Path::new(r"C:\Programacion\Terminal");
         let parent = Path::new(r"C:\Programacion");
-        assert_eq!(cwd_follow(here, None), (here.into(), true));
-        assert_eq!(cwd_follow(here, Some((parent, Duration::from_millis(999)))), (parent.into(), false));
-        assert_eq!(cwd_follow(parent, Some((parent, Duration::from_millis(10)))), (parent.into(), true));
-        assert_eq!(cwd_follow(here, Some((parent, Duration::from_secs(1)))), (here.into(), true));
+        let elsewhere = Path::new(r"C:\Other");
+        let pending = |elapsed| Some((parent, here, elapsed));
+        assert_eq!(cwd_follow(here, None), (here.into(), true, false));
+        assert_eq!(cwd_follow(parent, pending(Duration::from_millis(10))), (parent.into(), true, true));
+        assert_eq!(cwd_follow(elsewhere, pending(Duration::from_millis(10))), (elsewhere.into(), true, true));
+        assert_eq!(cwd_follow(here, pending(Duration::from_millis(999))), (parent.into(), false, false));
+        assert_eq!(cwd_follow(here, pending(Duration::from_secs(1))), (parent.into(), true, false));
     }
 
     #[test]

@@ -55,9 +55,9 @@ pub struct AnkarApp {
     last_pane_layout: (bool, bool),
     /// Footer visibility last frame (shell tab vs agent tab): a discrete layout jump.
     last_footer_shown: bool,
-    /// Picker `cd` in flight: tab id, pane id, target, when it was typed.
-    /// The session cwd stays what the shell reported, so a timeout can fall back.
-    pending_cd: Option<(u64, u64, PathBuf, std::time::Instant)>,
+    /// Picker `cd` in flight: tab id, pane id, target, directory from before the cd, when it was typed.
+    /// Kept until the shell reports the target or some other directory. Not written into the session cwd.
+    pending_cd: Option<(u64, u64, PathBuf, PathBuf, std::time::Instant)>,
     /// Debug colour check in flight: swatch origin, and the flag the screenshot callback sets.
     color_check: Option<(egui::Pos2, Option<Arc<std::sync::atomic::AtomicBool>>)>,
 }
@@ -154,8 +154,8 @@ impl AnkarApp {
     }
 
     /// Path the footer, picker, and git chips show for the active pane, and whether a new
-    /// picker click is accepted. A picker target is shown for up to a second without writing
-    /// it into the session cwd. Clears a pending cd once the shell reports it or the second passes.
+    /// picker click is accepted. A picker target stays shown, without writing it into the
+    /// session cwd, until the shell reports that path or a different one.
     fn shown_cwd(&mut self) -> (Option<PathBuf>, bool) {
         let Some(tab) = self.workspace.active_tab() else {
             self.pending_cd = None;
@@ -168,19 +168,19 @@ impl AnkarApp {
             }
             return (None, true);
         };
-        let held = self.pending_cd.as_ref().and_then(|(tab, pane, path, at)| {
-            (*tab == tab_id && *pane == pane_id).then(|| (path.clone(), at.elapsed()))
+        let held = self.pending_cd.as_ref().and_then(|(tab, pane, target, origin, at)| {
+            (*tab == tab_id && *pane == pane_id).then(|| (target.clone(), origin.clone(), at.elapsed()))
         });
-        let pending = held.as_ref().map(|(path, elapsed)| (path.as_path(), *elapsed));
-        let (shown, accept) = crate::dir_picker::cwd_follow(&reported, pending);
-        if accept && self.pending_matches(tab_id, pane_id) {
+        let pending = held.as_ref().map(|(target, origin, elapsed)| (target.as_path(), origin.as_path(), *elapsed));
+        let (shown, accept, clear) = crate::dir_picker::cwd_follow(&reported, pending);
+        if clear {
             self.pending_cd = None;
         }
         (Some(shown), accept)
     }
 
     fn pending_matches(&self, tab_id: u64, pane_id: u64) -> bool {
-        self.pending_cd.as_ref().is_some_and(|(tab, pane, _, _)| *tab == tab_id && *pane == pane_id)
+        self.pending_cd.as_ref().is_some_and(|(tab, pane, _, _, _)| *tab == tab_id && *pane == pane_id)
     }
 
     /// Paints the swatches on top of everything, screenshots that frame, logs what came back.
@@ -383,7 +383,7 @@ impl eframe::App for AnkarApp {
         );
 
         let (shown_cwd, accept_cd) = self.shown_cwd();
-        if let Some((_, _, _, at)) = self.pending_cd.as_ref().filter(|_| !accept_cd) {
+        if let Some((_, _, _, _, at)) = self.pending_cd.as_ref().filter(|_| !accept_cd) {
             let left = Duration::from_secs(1).saturating_sub(at.elapsed());
             ui.ctx().request_repaint_after(left);
         }
@@ -588,10 +588,10 @@ impl eframe::App for AnkarApp {
                     let display = shown_cwd.as_deref().or(cwd.as_deref());
                     match self.footer.draw(ui, rect, display, &git) {
                         Some(FooterAction::Cd(dir)) if accept_cd => {
-                            let here = self.workspace.active_tab().map(|t| (t.id, t.focused_pane));
+                            let here = self.workspace.active_tab().map(|t| (t.id, t.focused_pane, t.cwd.clone()));
                             self.cd_active_shell(&dir);
-                            if let Some((id, pane)) = here {
-                                self.pending_cd = Some((id, pane, dir, std::time::Instant::now()));
+                            if let Some((id, pane, Some(origin))) = here {
+                                self.pending_cd = Some((id, pane, dir, origin, std::time::Instant::now()));
                             }
                             ui.ctx().request_repaint();
                         }
