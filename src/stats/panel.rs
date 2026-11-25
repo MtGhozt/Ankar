@@ -10,17 +10,24 @@ use egui::{
 use std::sync::{Arc, Mutex};
 
 const BG: Color32 = Color32::from_rgb(0x00, 0x00, 0x00);
-const CARD_BORDER: Color32 = Color32::from_rgb(0x22, 0x22, 0x22);
-const MUTED: Color32 = Color32::from_rgb(0x88, 0x88, 0x88);
-const TEXT: Color32 = Color32::from_rgb(0xE8, 0xE8, 0xE8);
-const CHIP_ACTIVE: Color32 = Color32::from_rgb(0x2A, 0x2A, 0x2A);
-const BADGE_OK: Color32 = Color32::from_rgb(0x3D, 0xA8, 0x6A);
-const BAR_IN: Color32 = Color32::from_rgb(0x6A, 0x6A, 0x6A);
-const BAR_OUT: Color32 = Color32::from_rgb(0x3A, 0x7C, 0xA5);
-const PROVIDER_ANTHROPIC: Color32 = Color32::from_rgb(0xD4, 0x7B, 0x5A);
-const PROVIDER_GOOGLE: Color32 = Color32::from_rgb(0x5A, 0x9B, 0xE0);
-const PROVIDER_OPENAI: Color32 = Color32::from_rgb(0x6F, 0xA8, 0x7A);
-const PROVIDER_OTHER: Color32 = Color32::from_rgb(0x88, 0x88, 0x88);
+const CARD_BG: Color32 = Color32::from_rgb(0x0C, 0x0C, 0x0C);
+const CARD_BORDER: Color32 = Color32::from_rgb(0x11, 0x11, 0x11);
+const MUTED: Color32 = Color32::from_rgb(0x83, 0x83, 0x83);
+const TEXT: Color32 = Color32::from_rgb(0xE7, 0xE7, 0xE7);
+const SEG_BG: Color32 = Color32::from_rgb(0x10, 0x10, 0x10);
+const SEG_ACTIVE: Color32 = Color32::from_rgb(0x24, 0x24, 0x24);
+const ESC_BG: Color32 = Color32::from_rgb(0x0E, 0x0E, 0x0E);
+const ESC_BORDER: Color32 = Color32::from_rgb(0x1E, 0x1E, 0x1E);
+const BADGE_POS_FG: Color32 = Color32::from_rgb(0x5B, 0xAF, 0x78);
+const BADGE_POS_BG: Color32 = Color32::from_rgb(0x0D, 0x2D, 0x15);
+const SPARK_BAR: Color32 = Color32::from_rgb(0x3A, 0x3A, 0x3A);
+const BAR_IN: Color32 = Color32::from_rgb(0x3E, 0x3E, 0x3E);
+const BAR_OUT: Color32 = Color32::from_rgb(0x4A, 0x9F, 0xFF);
+const PROVIDER_ANTHROPIC: Color32 = Color32::from_rgb(0xBB, 0x5E, 0x4C);
+const PROVIDER_GOOGLE: Color32 = Color32::from_rgb(0x41, 0x78, 0xD3);
+const PROVIDER_OPENAI: Color32 = Color32::from_rgb(0x30, 0x98, 0x7F);
+const PROVIDER_XAI: Color32 = Color32::from_rgb(0x9A, 0x9A, 0x9A);
+const PROVIDER_OTHER: Color32 = Color32::from_rgb(0x5A, 0x5A, 0x5A);
 
 pub struct StatsPanel {
     pub open: bool,
@@ -104,7 +111,7 @@ impl StatsPanel {
         }
         ui.painter().rect_filled(rect, 0.0, BG);
 
-        let mut inner = ui.new_child(egui::UiBuilder::new().max_rect(rect.shrink(16.0)));
+        let mut inner = ui.new_child(egui::UiBuilder::new().max_rect(rect.shrink(22.0)));
         inner.set_clip_rect(rect.intersect(ui.clip_rect()));
         let mut close = false;
         egui::ScrollArea::vertical()
@@ -127,48 +134,68 @@ impl StatsPanel {
         // Header
         ui.horizontal(|ui| {
             ui.vertical(|ui| {
-                ui.label(
-                    RichText::new("Agent usage")
-                        .size(20.0)
-                        .color(TEXT)
-                        .strong(),
-                );
+                ui.label(RichText::new("Agent usage").size(14.0).color(TEXT));
                 let sub = snap.map(|s| s.range_label.as_str()).unwrap_or("…");
                 ui.label(RichText::new(sub).size(12.0).color(MUTED));
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let esc = ui
-                    .add(egui::Button::new(RichText::new("esc").size(11.0).color(MUTED)).frame(false))
-                    .on_hover_cursor(egui::CursorIcon::PointingHand);
-                close = esc.clicked();
-                ui.add_space(8.0);
-                for r in StatsRange::all().into_iter().rev() {
-                    let active = self.range == r;
-                    let fill = if active {
-                        CHIP_ACTIVE
-                    } else {
-                        Color32::TRANSPARENT
-                    };
-                    let resp = Frame::NONE
-                        .fill(fill)
-                        .stroke(Stroke::new(1.0, CARD_BORDER))
-                        .corner_radius(CornerRadius::same(6))
-                        .inner_margin(Margin::symmetric(10, 4))
-                        .show(ui, |ui| {
-                            ui.label(
-                                RichText::new(r.label())
-                                    .size(12.0)
-                                    .color(if active { TEXT } else { MUTED }),
-                            );
-                        })
-                        .response
-                        .interact(Sense::click());
-                    if resp.clicked() && self.range != r {
-                        self.range = r;
-                        self.loader.request(r, false);
-                    }
-                    ui.add_space(4.0);
+                let (esc_rect, esc_resp) =
+                    ui.allocate_exact_size(Vec2::new(29.0, 17.0), Sense::click());
+                let painter = ui.painter();
+                painter.rect_filled(esc_rect, CornerRadius::same(4), ESC_BG);
+                painter.rect_stroke(
+                    esc_rect,
+                    CornerRadius::same(4),
+                    Stroke::new(1.0, ESC_BORDER),
+                    egui::StrokeKind::Inside,
+                );
+                painter.text(
+                    esc_rect.center(),
+                    Align2::CENTER_CENTER,
+                    "esc",
+                    FontId::proportional(11.0),
+                    MUTED,
+                );
+                close = esc_resp.clicked();
+                if esc_resp.hovered() {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                 }
+                ui.add_space(18.0);
+                Frame::NONE
+                    .fill(SEG_BG)
+                    .corner_radius(CornerRadius::same(6))
+                    .inner_margin(Margin::symmetric(2, 2))
+                    .show(ui, |ui| {
+                        ui.set_min_height(22.0);
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 0.0;
+                            for r in StatsRange::all().into_iter().rev() {
+                                let active = self.range == r;
+                                let resp = Frame::NONE
+                                    .fill(if active {
+                                        SEG_ACTIVE
+                                    } else {
+                                        Color32::TRANSPARENT
+                                    })
+                                    .corner_radius(CornerRadius::same(4))
+                                    .inner_margin(Margin::symmetric(8, 2))
+                                    .show(ui, |ui| {
+                                        ui.label(
+                                            RichText::new(r.label())
+                                                .size(12.0)
+                                                .color(if active { TEXT } else { MUTED }),
+                                        );
+                                    })
+                                    .response
+                                    .interact(Sense::click());
+                                if resp.clicked() && self.range != r {
+                                    self.range = r;
+                                    self.loader.request(r, false);
+                                }
+                            }
+                        });
+                    });
+                ui.add_space(6.0);
                 if ui
                     .add(
                         egui::Button::new(RichText::new("↻").size(14.0).color(MUTED))
@@ -354,6 +381,7 @@ fn boxes(
 /// A bordered box `outer_w` wide in total.
 fn boxed(ui: &mut Ui, outer_w: f32, min_h: f32, add: impl FnOnce(&mut Ui)) {
     Frame::NONE
+        .fill(CARD_BG)
         .stroke(Stroke::new(1.0, CARD_BORDER))
         .corner_radius(CornerRadius::same(8))
         .inner_margin(12.0)
@@ -513,11 +541,11 @@ fn metric_card(
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
                     if let Some(p) = format_pct_delta(delta) {
                         Frame::NONE
-                            .fill(Color32::from_rgb(0x1A, 0x3A, 0x28))
+                            .fill(BADGE_POS_BG)
                             .corner_radius(CornerRadius::same(8))
                             .inner_margin(Margin::symmetric(6, 2))
                             .show(ui, |ui| {
-                                ui.label(RichText::new(p).size(11.0).color(BADGE_OK));
+                                ui.label(RichText::new(p).size(11.0).color(BADGE_POS_FG));
                             });
                     }
                 });
@@ -550,7 +578,7 @@ fn paint_sparkline(ui: &Ui, rect: Rect, values: &[f32]) {
             egui::pos2(x, rect.bottom() - h),
             egui::pos2(x + bar_w, rect.bottom()),
         );
-        painter.rect_filled(r, CornerRadius::same(1), Color32::from_rgb(0x3A, 0x3A, 0x3A));
+        painter.rect_filled(r, CornerRadius::same(1), SPARK_BAR);
     }
 }
 
@@ -798,11 +826,11 @@ fn draw_heatmap(ui: &mut Ui, snap: &StatsSnapshot) {
 
 fn heat_color(level: i32) -> Color32 {
     match level.clamp(0, 4) {
-        0 => Color32::from_rgb(0x14, 0x14, 0x14),
-        1 => Color32::from_rgb(0x2A, 0x2A, 0x2A),
-        2 => Color32::from_rgb(0x4A, 0x4A, 0x4A),
-        3 => Color32::from_rgb(0x8A, 0x8A, 0x8A),
-        _ => Color32::from_rgb(0xE0, 0xE0, 0xE0),
+        0 => Color32::from_rgb(0x21, 0x21, 0x21),
+        1 => Color32::from_rgb(0x5A, 0x5A, 0x5A),
+        2 => Color32::from_rgb(0x8E, 0x8E, 0x8E),
+        3 => Color32::from_rgb(0xAB, 0xAB, 0xAB),
+        _ => Color32::from_rgb(0xC2, 0xC2, 0xC2),
     }
 }
 
@@ -941,6 +969,8 @@ fn provider_color(p: &str) -> Color32 {
         PROVIDER_GOOGLE
     } else if l.contains("openai") || l.contains("gpt") {
         PROVIDER_OPENAI
+    } else if l.contains("xai") || l.contains("grok") {
+        PROVIDER_XAI
     } else {
         PROVIDER_OTHER
     }
