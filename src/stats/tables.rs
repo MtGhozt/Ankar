@@ -121,7 +121,7 @@ fn is_selected(filter: Option<&AgentFilter>, a: &AgentRow) -> bool {
 }
 
 /// Section title, `right` muted at the far end, then a #191919 line.
-fn table_title(ui: &mut Ui, title: &str, right: &str) {
+fn table_title(ui: &mut Ui, title: &str, right: &str, width: f32) {
     ui.horizontal(|ui| {
         ui.label(RichText::new(title).size(11.0).color(MUTED).strong());
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -129,7 +129,7 @@ fn table_title(ui: &mut Ui, title: &str, right: &str) {
         });
     });
     ui.add_space(4.0);
-    let (line, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 1.0), Sense::hover());
+    let (line, _) = ui.allocate_exact_size(Vec2::new(width, 1.0), Sense::hover());
     ui.painter().rect_filled(line, CornerRadius::ZERO, SEP);
     ui.add_space(6.0);
 }
@@ -155,8 +155,8 @@ fn cols(rect: Rect) -> Cols {
     }
 }
 
-fn header_row(ui: &mut Ui, labels: [&str; 3]) {
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 14.0), Sense::hover());
+fn header_row(ui: &mut Ui, labels: [&str; 3], width: f32) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(width, 14.0), Sense::hover());
     let c = cols(rect);
     for (x, label) in c.x.iter().zip(labels) {
         ui.painter().text(
@@ -182,13 +182,13 @@ fn paint_numbers(ui: &Ui, c: &Cols, y: f32, vals: [String; 3], color: Color32) {
     }
 }
 
-pub(super) fn draw_models(ui: &mut Ui, snap: &StatsSnapshot) {
-    table_title(ui, "MODELS", &format!("{} models", snap.models.len()));
+pub(super) fn draw_models(ui: &mut Ui, snap: &StatsSnapshot, width: f32) {
+    table_title(ui, "MODELS", &format!("{} models", snap.models.len()), width);
 
     // Stacked provider bar (4 px, radius 2) and its legend.
     let shares = family_shares(&snap.models);
     let total: u64 = shares.iter().map(|s| s.1).sum();
-    let (bar, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 4.0), Sense::hover());
+    let (bar, _) = ui.allocate_exact_size(Vec2::new(width, 4.0), Sense::hover());
     ui.painter().rect_filled(bar, CornerRadius::same(2), SEP);
     let mut x = bar.left();
     for (i, (fam, n)) in shares.iter().enumerate() {
@@ -216,12 +216,12 @@ pub(super) fn draw_models(ui: &mut Ui, snap: &StatsSnapshot) {
     });
     ui.add_space(6.0);
 
-    header_row(ui, ["input", "output", "tasks"]);
+    header_row(ui, ["input", "output", "tasks"], width);
     let (rows, more) = top_with_rest(&snap.models, TOP_MODELS);
     let max = rows.iter().map(|m| m.tokens.total()).max().unwrap_or(0).max(1);
     for (m, is_more) in rows.iter().map(|m| (m, false)).chain(more.iter().map(|m| (m, true))) {
         let (rect, resp) =
-            ui.allocate_exact_size(Vec2::new(ui.available_width(), ROW_H), Sense::hover());
+            ui.allocate_exact_size(Vec2::new(width, ROW_H), Sense::hover());
         let c = cols(rect);
         let y = rect.center().y;
         let color = if is_more { MUTED } else { TEXT };
@@ -252,14 +252,15 @@ pub(super) fn draw_agents(
     filter: &mut Option<AgentFilter>,
     config: &Config,
     logos: &mut LogoAtlas,
+    width: f32,
 ) {
-    table_title(ui, "AGENTS", "click one to see only its usage");
-    header_row(ui, ["input", "output", "time"]);
+    table_title(ui, "AGENTS", "click one to see only its usage", width);
+    header_row(ui, ["input", "output", "time"], width);
     let max_tokens = snap.agents.iter().filter_map(|a| Some(agent_weight(a)).filter(|w| w.0)).map(|w| w.1).max().unwrap_or(1);
     let max_secs = snap.agents.iter().filter(|a| !agent_weight(a).0).map(|a| a.busy_secs).max().unwrap_or(1);
     for a in &snap.agents {
         let (rect, resp) =
-            ui.allocate_exact_size(Vec2::new(ui.available_width(), ROW_H), Sense::click());
+            ui.allocate_exact_size(Vec2::new(width, ROW_H), Sense::click());
         let selected = is_selected(filter.as_ref(), a);
         let dim = filter.is_some() && !selected;
         let fade = |c: Color32| if dim { c.gamma_multiply(0.4) } else { c };

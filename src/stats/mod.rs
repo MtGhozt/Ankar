@@ -13,6 +13,7 @@ mod tables;
 pub use ankar::AnkarStatsStore;
 pub use loader::StatsRange;
 pub use panel::StatsPanel;
+pub(crate) use panel::STATS_PANE_MIN_W;
 
 use serde::{Deserialize, Serialize};
 use std::time::SystemTime;

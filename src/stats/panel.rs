@@ -137,13 +137,13 @@ impl StatsPanel {
         let snap = self.snapshot.as_ref();
         let mut close = false;
 
+        let outer_w = ui.available_width();
+        let content_w = outer_w.min(CONTENT_MAX_W);
+        let tier = layout_tier(content_w);
+        let stack_header = content_w < BREAK_MEDIUM;
+
         // Header
-        ui.horizontal(|ui| {
-            ui.vertical(|ui| {
-                ui.label(RichText::new("Agent usage").size(14.0).color(TEXT));
-                let sub = snap.map(|s| s.range_label.as_str()).unwrap_or("…");
-                ui.label(RichText::new(sub).size(12.0).color(MUTED));
-            });
+        let mut draw_header_controls = |ui: &mut Ui| {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let (esc_rect, esc_resp) =
                     ui.allocate_exact_size(Vec2::new(29.0, 17.0), Sense::click());
@@ -222,62 +222,120 @@ impl StatsPanel {
                     }
                 }
             });
-        });
+        };
+        if stack_header {
+            ui.vertical(|ui| {
+                ui.label(RichText::new("Agent usage").size(14.0).color(TEXT));
+                let sub = snap.map(|s| s.range_label.as_str()).unwrap_or("…");
+                ui.label(RichText::new(sub).size(12.0).color(MUTED));
+                ui.add_space(6.0);
+                draw_header_controls(ui);
+            });
+        } else {
+            ui.horizontal(|ui| {
+                ui.vertical(|ui| {
+                    ui.label(RichText::new("Agent usage").size(14.0).color(TEXT));
+                    let sub = snap.map(|s| s.range_label.as_str()).unwrap_or("…");
+                    ui.label(RichText::new(sub).size(12.0).color(MUTED));
+                });
+                draw_header_controls(ui);
+            });
+        }
 
         ui.add_space(12.0);
 
-        let avail = ui.available_width();
-        let narrow = avail < NARROW_W;
-        draw_kpi_row(ui, snap, self.range, avail, narrow);
-        ui.add_space(14.0);
+        let mut draw_page = |ui: &mut Ui| {
+            draw_kpi_row(ui, snap, self.range, content_w, tier);
+            ui.add_space(14.0);
 
-        // No data yet: the same boxes, empty (a skeleton, never a blank page).
-        let skeleton = StatsSnapshot { range: self.range, ..StatsSnapshot::default() };
-        let snap = snap.unwrap_or(&skeleton);
+            // No data yet: the same boxes, empty (a skeleton, never a blank page).
+            let skeleton = StatsSnapshot { range: self.range, ..StatsSnapshot::default() };
+            let snap = snap.unwrap_or(&skeleton);
 
-        // Middle: tokens by day + heatmap
-        boxes(
-            ui,
-            narrow,
-            200.0,
-            |ui| charts::draw_tokens_by_day(ui, snap),
-            |ui| charts::draw_heatmap(ui, snap),
-        );
+            let side_by_side = tier == LayoutTier::Wide;
+            // Middle: tokens by day + heatmap
+            boxes(
+                ui,
+                side_by_side,
+                200.0,
+                content_w,
+                |ui, w| charts::draw_tokens_by_day(ui, snap, w),
+                |ui, w| charts::draw_heatmap(ui, snap, w),
+            );
 
-        ui.add_space(14.0);
+            ui.add_space(14.0);
 
-        // Bottom: models + agents. A click on an agent row refilters the whole page.
-        let filter_before = self.filter_agent.clone();
-        let filter = &mut self.filter_agent;
-        boxes(
-            ui,
-            narrow,
-            180.0,
-            |ui| tables::draw_models(ui, snap),
-            |ui| tables::draw_agents(ui, snap, filter, config, logos),
-        );
-        if self.filter_agent != filter_before {
-            self.loader.request(self.range, self.filter_agent.clone(), false);
+            // Bottom: models + agents. A click on an agent row refilters the whole page.
+            let filter_before = self.filter_agent.clone();
+            let filter = &mut self.filter_agent;
+            boxes(
+                ui,
+                side_by_side,
+                180.0,
+                content_w,
+                |ui, w| tables::draw_models(ui, snap, w),
+                |ui, w| tables::draw_agents(ui, snap, filter, config, logos, w),
+            );
+            if self.filter_agent != filter_before {
+                self.loader.request(self.range, self.filter_agent.clone(), false);
+            }
+
+            ui.add_space(8.0);
+            for w in &snap.warnings {
+                ui.label(RichText::new(w).size(11.0).color(MUTED));
+            }
+            let ago = snap.computed_at.elapsed().map_or(0, |d| d.as_secs());
+            ui.label(
+                RichText::new("Everything is read locally. Ankar sends nothing anywhere.")
+                    .size(11.0)
+                    .color(MUTED),
+            )
+            .on_hover_text(format!("Updated {ago}s ago"));
+            ui.add_space(24.0);
+        };
+
+        if outer_w > content_w + 1.0 {
+            let side = (outer_w - content_w) * 0.5;
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 0.0;
+                ui.add_space(side);
+                ui.vertical(|ui| {
+                    ui.set_width(content_w);
+                    draw_page(ui);
+                });
+            });
+        } else {
+            draw_page(ui);
         }
-
-        ui.add_space(8.0);
-        for w in &snap.warnings {
-            ui.label(RichText::new(w).size(11.0).color(MUTED));
-        }
-        let ago = snap.computed_at.elapsed().map_or(0, |d| d.as_secs());
-        ui.label(
-            RichText::new("Everything is read locally. Ankar sends nothing anywhere.")
-                .size(11.0)
-                .color(MUTED),
-        )
-        .on_hover_text(format!("Updated {ago}s ago"));
-        ui.add_space(24.0);
         close
     }
 }
 
-/// Below this pane width the cards go 2x2 and the paired boxes stack.
-const NARROW_W: f32 = 640.0;
+/// Content caps at this width and centers in a wider pane.
+const CONTENT_MAX_W: f32 = 1100.0;
+/// Four KPI columns and paired chart/table columns at or above this width.
+const BREAK_WIDE: f32 = 900.0;
+/// Two KPI columns; header title and range selector stack below this width.
+const BREAK_MEDIUM: f32 = 600.0;
+/// Minimum stats pane width when dragging the split (see `app.rs`).
+pub(crate) const STATS_PANE_MIN_W: f32 = 420.0;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LayoutTier {
+    Wide,
+    Medium,
+    Narrow,
+}
+
+fn layout_tier(content_w: f32) -> LayoutTier {
+    if content_w >= BREAK_WIDE {
+        LayoutTier::Wide
+    } else if content_w >= BREAK_MEDIUM {
+        LayoutTier::Medium
+    } else {
+        LayoutTier::Narrow
+    }
+}
 const GAP: f32 = 12.0;
 const KPI_GAP: f32 = 11.0;
 const KPI_H: f32 = 105.0;
@@ -289,9 +347,13 @@ fn draw_kpi_row(
     snap: Option<&StatsSnapshot>,
     range: StatsRange,
     avail: f32,
-    narrow: bool,
+    tier: LayoutTier,
 ) {
-    let cols = if narrow { 2 } else { 4 };
+    let cols = match tier {
+        LayoutTier::Wide => 4,
+        LayoutTier::Medium => 2,
+        LayoutTier::Narrow => 1,
+    };
     let card_w = ((avail - KPI_GAP * (cols - 1) as f32) / cols as f32).max(80.0);
     for row in 0..4 / cols {
         if row > 0 {
@@ -394,42 +456,43 @@ fn draw_metric(ui: &mut Ui, snap: Option<&StatsSnapshot>, range: StatsRange, i: 
     metric_card(ui, w, &value, delta, &sub, &spark, title, &tip);
 }
 
-/// Two bordered boxes: side by side (58/42) or stacked when `narrow`.
+/// Two bordered boxes: side by side (58/42) or stacked when not `side_by_side`.
 fn boxes(
     ui: &mut Ui,
-    narrow: bool,
+    side_by_side: bool,
     min_h: f32,
-    left: impl FnOnce(&mut Ui),
-    right: impl FnOnce(&mut Ui),
+    content_w: f32,
+    left: impl FnOnce(&mut Ui, f32),
+    right: impl FnOnce(&mut Ui, f32),
 ) {
-    let avail = ui.available_width();
-    if narrow {
-        boxed(ui, avail, min_h, left);
-        ui.add_space(GAP);
-        boxed(ui, avail, min_h, right);
+    if side_by_side {
+        let left_outer = (content_w - GAP) * 0.58;
+        let right_outer = content_w - GAP - left_outer;
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 0.0;
+            boxed(ui, left_outer, min_h, |ui, inner| left(ui, inner));
+            ui.add_space(GAP);
+            boxed(ui, right_outer, min_h, |ui, inner| right(ui, inner));
+        });
         return;
     }
-    let left_w = (avail - GAP) * 0.58;
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 0.0;
-        boxed(ui, left_w, min_h, left);
-        ui.add_space(GAP);
-        boxed(ui, avail - GAP - left_w, min_h, right);
-    });
+    boxed(ui, content_w, min_h, |ui, inner| left(ui, inner));
+    ui.add_space(GAP);
+    boxed(ui, content_w, min_h, |ui, inner| right(ui, inner));
 }
 
-/// A bordered box `outer_w` wide in total.
-fn boxed(ui: &mut Ui, outer_w: f32, min_h: f32, add: impl FnOnce(&mut Ui)) {
+/// A bordered box `outer_w` wide in total; `add` receives the inner content width.
+fn boxed(ui: &mut Ui, outer_w: f32, min_h: f32, add: impl FnOnce(&mut Ui, f32)) {
+    let inner_w = (outer_w - BOX_PAD).max(0.0);
     Frame::NONE
         .fill(CARD_BG)
         .stroke(Stroke::new(1.0, CARD_BORDER))
         .corner_radius(CornerRadius::same(8))
         .inner_margin(12.0)
         .show(ui, |ui| {
-            let w = (outer_w - BOX_PAD).max(0.0);
-            ui.set_min_size(Vec2::new(w, min_h));
-            ui.set_max_width(w);
-            add(ui);
+            ui.set_min_size(Vec2::new(inner_w, min_h));
+            ui.set_max_width(inner_w);
+            add(ui, inner_w);
         });
 }
 
@@ -445,40 +508,53 @@ fn metric_card(
     tip: &str,
 ) {
     let (card, response) = ui.allocate_exact_size(Vec2::new(width, KPI_H), Sense::hover());
-    let painter = ui.painter();
-    painter.rect_filled(card, CornerRadius::same(8), CARD_BG);
-    painter.rect_stroke(
-        card,
-        CornerRadius::same(8),
-        Stroke::new(1.0, CARD_BORDER),
-        egui::StrokeKind::Inside,
-    );
-    painter.text(
-        egui::pos2(card.left() + 12.0, card.top() + 16.0),
-        Align2::LEFT_TOP,
-        title,
-        FontId::proportional(11.0),
-        MUTED,
-    );
-    if let (Some(label), Some((bg, fg))) = (format_pct_delta(delta), delta_badge_colors(delta)) {
-        let font = FontId::proportional(11.0);
+    let mut title_right = card.right() - 12.0;
+    let badge = format_pct_delta(delta).zip(delta_badge_colors(delta));
+    let badge_rect = badge.as_ref().map(|(label, _)| {
         let pad_x = 6.0;
-        let pad_y = 2.0;
         let bw = label.chars().count() as f32 * 6.5 + pad_x * 2.0;
-        let bh = 15.0 + pad_y * 2.0;
-        let badge = Rect::from_min_max(
+        title_right -= bw + 4.0;
+        let bh = 15.0 + 4.0;
+        Rect::from_min_max(
             egui::pos2(card.right() - 12.0 - bw, card.top() + 12.0),
             egui::pos2(card.right() - 12.0, card.top() + 12.0 + bh),
+        )
+    });
+    {
+        let painter = ui.painter();
+        painter.rect_filled(card, CornerRadius::same(8), CARD_BG);
+        painter.rect_stroke(
+            card,
+            CornerRadius::same(8),
+            Stroke::new(1.0, CARD_BORDER),
+            egui::StrokeKind::Inside,
         );
-        painter.rect_filled(badge, CornerRadius::same(4), bg);
-        painter.text(
-            badge.center(),
-            Align2::CENTER_CENTER,
-            label,
-            font,
-            fg,
-        );
+        if let (Some((label, (bg, fg))), Some(badge_rect)) = (&badge, badge_rect) {
+            painter.rect_filled(badge_rect, CornerRadius::same(4), *bg);
+            painter.text(
+                badge_rect.center(),
+                Align2::CENTER_CENTER,
+                label,
+                FontId::proportional(11.0),
+                *fg,
+            );
+        }
     }
+    let title_rect = Rect::from_min_max(
+        egui::pos2(card.left() + 12.0, card.top() + 12.0),
+        egui::pos2(title_right, card.top() + 28.0),
+    );
+    ui.scope_builder(
+        egui::UiBuilder::new()
+            .max_rect(title_rect)
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+        |ui| {
+            ui.add(
+                egui::Label::new(RichText::new(title).size(11.0).color(MUTED)).truncate(),
+            );
+        },
+    );
+    let painter = ui.painter();
     painter.text(
         egui::pos2(card.left() + 12.0, card.top() + 32.0),
         Align2::LEFT_TOP,

@@ -692,7 +692,14 @@ impl eframe::App for AnkarApp {
                         ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
                     }
                     if let Some(pos) = resp.interact_pointer_pos().filter(|_| resp.dragged()) {
-                        self.files.pane_ratio = ((pos.x - area.left()) / area.width()).clamp(0.2, 0.8);
+                        let ratio = (pos.x - area.left()) / area.width();
+                        let max_ratio = if self.stats.open {
+                            let half = files::PANE_DIVIDER * 0.5;
+                            (1.0 - (crate::stats::STATS_PANE_MIN_W + half) / area.width()).clamp(0.2, 0.8)
+                        } else {
+                            0.8
+                        };
+                        self.files.pane_ratio = ratio.clamp(0.2, max_ratio);
                     }
                     if resp.drag_stopped() {
                         resize_now(&mut self.workspace);

@@ -94,7 +94,7 @@ fn section_title(ui: &mut Ui, title: &str, right: &str) {
     ui.add_space(8.0);
 }
 
-pub(super) fn draw_tokens_by_day(ui: &mut Ui, snap: &StatsSnapshot) {
+pub(super) fn draw_tokens_by_day(ui: &mut Ui, snap: &StatsSnapshot, width: f32) {
     let days_with = snap.days.iter().filter(|d| d.input + d.output > 0).count();
     let ordered: Vec<String> = match snap.range.days() {
         Some(d) => ordered_range_days(d as usize),
@@ -115,7 +115,7 @@ pub(super) fn draw_tokens_by_day(ui: &mut Ui, snap: &StatsSnapshot) {
 
     let slots = day_slots(&ordered, &snap.days);
     let (rect, resp) = ui.allocate_exact_size(
-        Vec2::new(ui.available_width(), PLOT_H + DATES_H),
+        Vec2::new(width, PLOT_H + DATES_H),
         Sense::hover(),
     );
     let plot = Rect::from_min_size(
@@ -205,7 +205,7 @@ pub(super) fn draw_tokens_by_day(ui: &mut Ui, snap: &StatsSnapshot) {
     }
 }
 
-pub(super) fn draw_heatmap(ui: &mut Ui, snap: &StatsSnapshot) {
+pub(super) fn draw_heatmap(ui: &mut Ui, snap: &StatsSnapshot, width: f32) {
     let (best_wd, best_h, best_n) = peak_activity(&snap.activity);
     let right = if best_n > 0 {
         format!("most active {} {best_h:02} h", DAY_NAMES[best_wd])
@@ -214,11 +214,10 @@ pub(super) fn draw_heatmap(ui: &mut Ui, snap: &StatsSnapshot) {
     };
     section_title(ui, "WHEN THEY WORK", &right);
 
-    let avail = ui.available_width();
-    let cell_w = ((avail - HEAT_LABEL_W - 23.0 * CELL_GAP) / 24.0).clamp(3.0, 15.5);
+    let cell_w = ((width - HEAT_LABEL_W - 23.0 * CELL_GAP) / 24.0).clamp(3.0, 15.5);
     let grid_h = 7.0 * (CELL_H + CELL_GAP) - CELL_GAP;
     let (rect, resp) = ui.allocate_exact_size(
-        Vec2::new(avail, grid_h + HOURS_H + LEGEND_H),
+        Vec2::new(width, grid_h + HOURS_H + LEGEND_H),
         Sense::hover(),
     );
     let origin = pos2(rect.left() + HEAT_LABEL_W, rect.top());
