@@ -62,7 +62,7 @@ UI frame     -> TerminalView::show -> session.resize -> session.sync (snapshot) 
   top-left (`strip_slots`), tabs, then "± +N -N", inbox, stats, caption buttons.
 - Left: sidebar (`Panel::left`, width 180..420, persisted): Sessions/Files switch row, then
   the list or the file tree.
-- Bottom: shell footer (26 px) only when the active tab is a plain shell; the cd picker
+- Bottom: shell footer (39 px) only when the active tab is a plain shell; the cd picker
   (`dir_picker`) floats above its cwd chip.
 - Centre: the tab's split tree (`render_layout`), and, when open for this tab, one right-hand
   pane (`files::pane_split`): the file viewer or the changes pane (`changes.rs`).
