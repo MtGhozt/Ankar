@@ -87,6 +87,11 @@ impl OscScanner {
                         apply_report(&mut info, report);
                     }
                 }
+            } else if let Some(rest) = self.buf.strip_prefix(b"12;") {
+                // Only logged: alacritty_terminal applies it; this shows what the app really sends.
+                log::info!("OSC 12 cursor colour: {:?}", String::from_utf8_lossy(rest));
+            } else if self.buf == b"112" || self.buf.starts_with(b"112;") {
+                log::info!("OSC 112 cursor colour reset");
             } else if let Some(rest) = self.buf.strip_prefix(b"7;") {
                 // Keep everything after `7;`: a path may itself contain `;`.
                 if let Ok(payload) = std::str::from_utf8(rest) {

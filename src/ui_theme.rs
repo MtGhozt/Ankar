@@ -53,7 +53,8 @@ pub const WORKING_RING_DIM: Color32 = Color32::from_rgb(0x90, 0x90, 0x90);
 pub const LAUNCHER_BADGE: Color32 = Color32::from_rgb(0x65, 0xB1, 0x77);
 pub const ERROR: Color32 = Color32::from_rgb(0xE5, 0x69, 0x5B);
 pub const ACCENT: Color32 = Color32::from_rgb(0x0F, 0x8C, 0xEC);
-pub const CURSOR: Color32 = ACCENT;
+/// Cursor when the app set no OSC 12 colour.
+pub const CURSOR: Color32 = Color32::WHITE;
 /// Default terminal foreground (`#E8E8E8`).
 pub const TERM_FG: Color32 = Color32::from_rgb(0xE8, 0xE8, 0xE8);
 /// Unfocused pane dim overlay (black @ 0.4).

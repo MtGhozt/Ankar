@@ -223,6 +223,7 @@ impl TerminalSession {
         let term = Term::new(config, &terminal_size, event_proxy.clone());
 
         let term = Arc::new(FairMutex::new(term));
+        let term_events = term.clone();
         let event_loop = EventLoop::new(term.clone(), event_proxy, pty, false, false)
             .map_err(|e| anyhow::anyhow!("failed to create PTY event loop: {e}"))?;
         let notifier = Notifier(event_loop.channel());
@@ -300,7 +301,12 @@ impl TerminalSession {
                             ctx.request_repaint();
                         }
                         Event::ColorRequest(index, format) => {
-                            let reply = query_color(&query_colors, *index).map(|rgb| format(rgb));
+                            // An OSC 12 query must answer with the colour the app set, not the default.
+                            let set_cursor = (*index == NamedColor::Cursor as usize)
+                                .then(|| term_events.lock().colors()[NamedColor::Cursor])
+                                .flatten();
+                            let reply =
+                                query_color(&query_colors, *index, set_cursor).map(|rgb| format(rgb));
                             log::debug!("osc color query index={index} reply={reply:?}");
                             if let Some(reply) = reply {
                                 pty_notifier.notify(reply.into_bytes());
@@ -679,7 +685,11 @@ fn parse_cwd_title(title: &str) -> Option<PathBuf> {
 }
 
 /// Palette entry reported for OSC 4 / 10 / 11 / 12 queries.
-fn query_color(colors: &TermColors, index: usize) -> Option<Rgb> {
+/// cursor is the colour the app set with OSC 12, if any.
+fn query_color(colors: &TermColors, index: usize, cursor: Option<Rgb>) -> Option<Rgb> {
+    if index == NamedColor::Cursor as usize && cursor.is_some() {
+        return cursor;
+    }
     let c = match index {
         0..=15 => colors.ansi[index],
         16..=255 => indexed_256(index as u8),
@@ -774,11 +784,12 @@ mod tests {
         // OSC 10 / 11 / 12 / 4, with both BEL and ST terminators.
         parser.advance(&mut term, b"\x1b]10;?\x07\x1b]11;?\x1b\\\x1b]12;?\x07\x1b]4;4;?\x1b\\");
         let colors = TermColors::default();
+        let set_cursor = term.colors()[NamedColor::Cursor];
         let replies: Vec<String> = rx
             .try_iter()
             .filter_map(|event| match event {
                 Event::ColorRequest(index, format) => {
-                    query_color(&colors, index).map(|rgb| format(rgb))
+                    query_color(&colors, index, set_cursor).map(|rgb| format(rgb))
                 }
                 _ => None,
             })
@@ -788,11 +799,30 @@ mod tests {
             [
                 "\x1b]10;rgb:e8e8/e8e8/e8e8\x07",
                 "\x1b]11;rgb:0000/0000/0000\x1b\\",
-                "\x1b]12;rgb:0f0f/8c8c/ecec\x07",
+                "\x1b]12;rgb:ffff/ffff/ffff\x07",
                 "\x1b]4;4;rgb:5a5a/a0a0/f2f2\x1b\\",
             ],
             "bytes doubled, same terminator as the query"
         );
+    }
+
+    #[test]
+    fn cursor_query_answers_with_the_colour_the_app_set_until_osc_112() {
+        use alacritty_terminal::vte::ansi::Processor;
+        let (tx, _rx) = mpsc::channel();
+        let mut term = Term::new(term::Config::default(), &TermSize::new(80, 24), EventProxy(tx));
+        let mut parser: Processor = Processor::new();
+        let colors = TermColors::default();
+        let blue = Rgb { r: 0x3b, g: 0x82, b: 0xf6 };
+        let reply = |term: &Term<EventProxy>| {
+            query_color(&colors, NamedColor::Cursor as usize, term.colors()[NamedColor::Cursor])
+        };
+        parser.advance(&mut term, b"\x1b]12;#3b82f6\x07");
+        assert_eq!(term.colors()[NamedColor::Cursor], Some(blue));
+        assert_eq!(reply(&term), Some(blue));
+        parser.advance(&mut term, b"\x1b]112\x07");
+        assert_eq!(term.colors()[NamedColor::Cursor], None);
+        assert_eq!(reply(&term).map(|c| (c.r, c.g, c.b)), Some((255, 255, 255)), "default is white");
     }
 
     #[test]
