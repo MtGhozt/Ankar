@@ -10,7 +10,10 @@ use egui::{
     Align2, Color32, CornerRadius, FontId, Frame, Margin, Rect, RichText, Sense, Stroke,
     Ui, Vec2,
 };
+use std::sync::mpsc::{self, TryRecvError};
 use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::{Duration, Instant};
 
 const BG: Color32 = Color32::from_rgb(0x00, 0x00, 0x00);
 const CARD_BG: Color32 = Color32::from_rgb(0x0C, 0x0C, 0x0C);
@@ -38,6 +41,10 @@ pub struct StatsPanel {
     pub just_opened: bool,
     /// Last click landed in the pane: Esc closes it instead of reaching the terminal.
     pub focused: bool,
+    ram_mb: u32,
+    ram_consoles: u32,
+    ram_last: Instant,
+    ram_rx: Option<mpsc::Receiver<(u32, u32)>>,
 }
 
 impl StatsPanel {
@@ -50,6 +57,10 @@ impl StatsPanel {
             filter_agent: None,
             just_opened: false,
             focused: false,
+            ram_mb: 0,
+            ram_consoles: 0,
+            ram_last: Instant::now(),
+            ram_rx: None,
         }
     }
 
@@ -61,6 +72,7 @@ impl StatsPanel {
             self.just_opened = true;
             self.focused = true;
             self.loader.request(self.range, None, false);
+            self.ram_last = Instant::now() - Duration::from_secs(2);
         }
     }
 
@@ -72,6 +84,36 @@ impl StatsPanel {
         self.snapshot = None;
         self.loader.clear_cache();
         self.filter_agent = None;
+        self.ram_rx = None;
+        self.ram_mb = 0;
+        self.ram_consoles = 0;
+    }
+
+    fn tick_ram(&mut self) {
+        if let Some(rx) = &self.ram_rx {
+            match rx.try_recv() {
+                Ok((mb, consoles)) => {
+                    self.ram_mb = mb;
+                    self.ram_consoles = consoles;
+                    self.ram_last = Instant::now();
+                    self.ram_rx = None;
+                }
+                Err(TryRecvError::Disconnected) => self.ram_rx = None,
+                Err(TryRecvError::Empty) => {}
+            }
+        }
+        if self.ram_rx.is_some() || self.ram_last.elapsed() < Duration::from_secs(2) {
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        self.ram_rx = Some(rx);
+        let pid = std::process::id();
+        thread::spawn(move || {
+            let mb = crate::procs::private_bytes_mb().unwrap_or(0);
+            let procs = crate::procs::snapshot();
+            let consoles = crate::procs::openconsole_child_count(pid, &procs);
+            let _ = tx.send((mb, consoles));
+        });
     }
 
     /// Esc: clears the agent filter first, else closes. Returns true when it closed.
@@ -95,6 +137,7 @@ impl StatsPanel {
         if !self.open {
             return false;
         }
+        self.tick_ram();
         if let Some(snap) = self.loader.poll() {
             self.snapshot = Some(snap);
         }
@@ -291,6 +334,14 @@ impl StatsPanel {
                     .color(MUTED),
             )
             .on_hover_text(format!("Updated {ago}s ago"));
+            ui.label(
+                RichText::new(format!(
+                    "Ankar: {} MB private · {} console hosts",
+                    self.ram_mb, self.ram_consoles,
+                ))
+                .size(11.0)
+                .color(MUTED),
+            );
             ui.add_space(24.0);
         };
 

@@ -84,6 +84,43 @@ pub fn agent_under(shell_pid: u32, procs: &[ProcEntry]) -> Option<&'static str> 
     None
 }
 
+/// Direct `OpenConsole.exe` children of this process (ConPTY console hosts).
+pub fn openconsole_child_count(parent_pid: u32, procs: &[ProcEntry]) -> u32 {
+    procs
+        .iter()
+        .filter(|p| p.ppid == parent_pid && p.exe.eq_ignore_ascii_case("OpenConsole.exe"))
+        .count() as u32
+}
+
+#[cfg(windows)]
+pub fn private_bytes_mb() -> Option<u32> {
+    use windows_sys::Win32::System::ProcessStatus::{
+        GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS, PROCESS_MEMORY_COUNTERS_EX,
+    };
+    use windows_sys::Win32::System::Threading::GetCurrentProcess;
+    // SAFETY: current-process handle; counters sized for EX so PrivateUsage is valid.
+    unsafe {
+        let mut counters = PROCESS_MEMORY_COUNTERS_EX {
+            cb: std::mem::size_of::<PROCESS_MEMORY_COUNTERS_EX>() as u32,
+            ..Default::default()
+        };
+        if GetProcessMemoryInfo(
+            GetCurrentProcess(),
+            &mut counters as *mut PROCESS_MEMORY_COUNTERS_EX as *mut PROCESS_MEMORY_COUNTERS,
+            counters.cb,
+        ) == 0
+        {
+            return None;
+        }
+        Some((counters.PrivateUsage / (1024 * 1024)) as u32)
+    }
+}
+
+#[cfg(not(windows))]
+pub fn private_bytes_mb() -> Option<u32> {
+    None
+}
+
 /// Console hosts ConPTY parks next to the shell; they are not work the user started.
 const HOSTS: &[&str] = &["conhost.exe", "openconsole.exe"];
 
