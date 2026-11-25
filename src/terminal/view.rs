@@ -542,13 +542,16 @@ enum Weight {
 }
 
 impl Weight {
-    /// Light strokes are ~1/8 of the cell; heavy ones are clearly double.
-    fn px(self, cell_w: f32, cell_h: f32) -> f32 {
-        let light = (cell_w.min(cell_h) / 8.0).round().max(1.0);
-        match self {
+    /// Light strokes are ~1/8 of the cell in whole device pixels; heavy ones are
+    /// clearly double. Returned in logical points.
+    fn px(self, cell_w: f32, cell_h: f32, ppp: f32) -> f32 {
+        let ppp = ppp.max(f32::EPSILON);
+        let light = (cell_w.min(cell_h) * ppp / 8.0).round().max(1.0);
+        let device = match self {
             Self::Light => light,
             Self::Heavy => (light * 2.0).max(light + 1.0),
-        }
+        };
+        device / ppp
     }
 }
 
@@ -674,6 +677,14 @@ fn px_span(lo: f32, hi: f32, ppp: f32) -> (f32, f32) {
     let lo_px = (lo * ppp).round();
     let hi_px = (hi * ppp).round().max(lo_px + 1.0);
     (lo_px / ppp, hi_px / ppp)
+}
+
+/// Stroke band of a fixed whole-pixel thickness centred on `center`, so every
+/// cell draws the same width regardless of its fractional position.
+fn px_band(center: f32, thickness: f32, ppp: f32) -> (f32, f32) {
+    let t = (thickness * ppp).round().max(1.0);
+    let lo = (center * ppp - t * 0.5).round();
+    (lo / ppp, (lo + t) / ppp)
 }
 
 /// Filled rect as a raw mesh: no anti-aliasing halo, so adjacent rects tile.
@@ -849,7 +860,7 @@ fn paint_row_box_drawing(
                 y,
                 w,
                 row_h,
-                Stroke::new(Weight::Light.px(cell_w, cell_h), fg),
+                Stroke::new(Weight::Light.px(cell_w, cell_h, ppp), fg),
             );
             continue;
         }
@@ -857,8 +868,7 @@ fn paint_row_box_drawing(
             continue;
         };
         let vertical = |shapes: &mut Vec<Shape>, weight: Weight, y0: f32, y1: f32| {
-            let half = weight.px(cell_w, cell_h) * 0.5;
-            let (x0, x1) = px_span(cx - half, cx + half, ppp);
+            let (x0, x1) = px_band(cx, weight.px(cell_w, cell_h, ppp), ppp);
             push_solid_rect(
                 shapes,
                 Rect::from_min_max(Pos2::new(x0, y0), Pos2::new(x1, y1)),
@@ -866,8 +876,7 @@ fn paint_row_box_drawing(
             );
         };
         let horizontal = |shapes: &mut Vec<Shape>, weight: Weight, x0: f32, x1: f32| {
-            let half = weight.px(cell_w, cell_h) * 0.5;
-            let (y0, y1) = px_span(cy - half, cy + half, ppp);
+            let (y0, y1) = px_band(cy, weight.px(cell_w, cell_h, ppp), ppp);
             push_solid_rect(
                 shapes,
                 Rect::from_min_max(Pos2::new(x0, y0), Pos2::new(x1, y1)),
@@ -1176,9 +1185,36 @@ mod tests {
     }
 
     #[test]
+    fn heavy_bar_keeps_one_device_width_in_every_column() {
+        for ppp in [1.0, 1.25, 1.5, 2.0] {
+            let expected = Weight::Heavy.px(CELL_W, CELL_H, ppp) * ppp;
+            assert_eq!(expected, expected.round(), "whole device pixels");
+            for col in 0..40u16 {
+                let mut cell = cell('┃');
+                cell.col = col;
+                let mut shapes = Vec::new();
+                paint_row_box_drawing(
+                    &mut shapes,
+                    3.3,
+                    0.0,
+                    CELL_W,
+                    CELL_H,
+                    18.0,
+                    &[&cell],
+                    None,
+                    &TermColors::default(),
+                    ppp,
+                );
+                let width = shapes[0].visual_bounding_rect().width() * ppp;
+                assert!((width - expected).abs() < 1e-3, "col {col} ppp {ppp}: {width}");
+            }
+        }
+    }
+
+    #[test]
     fn heavy_is_thicker_and_blocks_keep_their_fraction() {
         let (w, h) = (8.0, 16.0);
-        assert!(Weight::Heavy.px(w, h) > Weight::Light.px(w, h));
+        assert!(Weight::Heavy.px(w, h, 1.0) > Weight::Light.px(w, h, 1.0));
         assert_eq!(box_arms('│').unwrap().up, Some(Weight::Light));
         assert_eq!(box_arms('┃').unwrap().up, Some(Weight::Heavy));
         let mut shapes = Vec::new();
