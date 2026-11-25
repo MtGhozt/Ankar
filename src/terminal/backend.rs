@@ -153,8 +153,10 @@ impl TerminalSession {
         cwd: Option<PathBuf>,
         scrollback_lines: usize,
     ) -> anyhow::Result<Self> {
-        // Merged into the inherited environment by alacritty_terminal. TERM stays unset on purpose.
+        // Merged into the inherited environment by alacritty_terminal. TUIs (OpenCode) only
+        // enable truecolor and OSC color queries when TERM is a real xterm-style value.
         let env = HashMap::from([
+            ("TERM".to_owned(), "xterm-256color".to_owned()),
             ("COLORTERM".to_owned(), "truecolor".to_owned()),
             ("TERM_PROGRAM".to_owned(), "ankar".to_owned()),
         ]);
