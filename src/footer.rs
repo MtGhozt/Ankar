@@ -9,8 +9,14 @@ use egui::text::LayoutJob;
 use egui::{Color32, CornerRadius, FontFamily, FontId, Pos2, Rect, Sense, Stroke, TextFormat, Ui, Vec2};
 use std::path::{Path, PathBuf};
 
-pub const FOOTER_H: f32 = 26.0;
+const FOOTER_BOTTOM_MARGIN: f32 = 8.0;
+const FOOTER_BLOCK_PAD: f32 = 6.0;
+const FOOTER_BLOCK_BORDER: Color32 = Color32::from_rgb(0x2a, 0x2a, 0x2a);
 const CHIP_H: f32 = 18.0;
+const FOOTER_BLOCK_H: f32 = 1.0 + FOOTER_BLOCK_PAD + CHIP_H + FOOTER_BLOCK_PAD;
+
+/// Bottom panel: margin under the chip block, then the block (top rule + padded chips).
+pub const FOOTER_H: f32 = FOOTER_BOTTOM_MARGIN + FOOTER_BLOCK_H;
 
 #[derive(Default)]
 pub struct ShellFooter {
@@ -51,8 +57,19 @@ fn append(job: &mut LayoutJob, text: &str, color: Color32) {
 impl ShellFooter {
     /// Paints the footer into `rect`; reports a cd from the picker or a click on the changes chip.
     pub fn draw(&mut self, ui: &mut Ui, rect: Rect, cwd: Option<&Path>, git: &GitSnapshot) -> Option<FooterAction> {
+        let block_bottom = rect.bottom() - FOOTER_BOTTOM_MARGIN;
+        let block_top = block_bottom - FOOTER_BLOCK_H;
+        let block = Rect::from_min_max(egui::pos2(rect.left(), block_top), egui::pos2(rect.right(), block_bottom));
+        ui.painter()
+            .hline(block.x_range(), block_top, Stroke::new(1.0, FOOTER_BLOCK_BORDER));
+        let row_top = block_top + 1.0 + FOOTER_BLOCK_PAD;
+        let row = Rect::from_min_max(
+            egui::pos2(block.left() + FOOTER_BLOCK_PAD, row_top),
+            egui::pos2(block.right() - FOOTER_BLOCK_PAD, row_top + CHIP_H),
+        );
+
         let (branch, totals) = (git.branch.clone(), git.totals());
-        let mut x = rect.left() + 10.0;
+        let mut x = row.left();
         let mut action = None;
         if let Some(cwd) = cwd {
             let text = display_cwd(cwd, dirs::home_dir().as_deref());

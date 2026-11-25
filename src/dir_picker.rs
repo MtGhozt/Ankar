@@ -3,7 +3,7 @@
 //! Arrow keys or the mouse move, Enter or a click cds, typing filters, Esc closes.
 
 use crate::ui_theme::{self, Icon};
-use egui::{Align2, Color32, CornerRadius, FontFamily, FontId, Frame, Key, Modifiers, Rect, Sense, Stroke, Vec2};
+use egui::{Align2, Color32, CornerRadius, FontFamily, FontId, Frame, Key, Modifiers, Pos2, Rect, Sense, Stroke, Vec2};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -11,6 +11,18 @@ const WIDTH: f32 = 360.0;
 const ROW_H: f32 = 24.0;
 const MAX_ROWS: usize = 10;
 const SELECTED: Color32 = Color32::from_rgb(0x1E, 0x9F, 0xD6);
+
+/// Upper bound on footer cd popup height (`LEFT_BOTTOM` pivot): search row + divider + scroll cap.
+fn footer_popup_max_height() -> f32 {
+    4.0 * 2.0 + 6.0 * 2.0 + ui_theme::SIZE_UI + 4.0 + 5.0 + ROW_H * MAX_ROWS as f32
+}
+
+/// Keep the footer picker fully on screen when it would cross the top edge.
+fn clamp_footer_popup_anchor(ctx: &egui::Context, anchor: Pos2) -> Pos2 {
+    let top = ctx.content_rect().top();
+    let y = anchor.y.max(top + footer_popup_max_height());
+    Pos2::new(anchor.x, y)
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Entry {
@@ -202,6 +214,11 @@ impl DirPicker {
             (Align2::LEFT_TOP, egui::Id::unique("new_session_dir_picker"))
         } else {
             (Align2::LEFT_BOTTOM, egui::Id::unique("footer_dir_picker"))
+        };
+        let anchor = if self.new_session {
+            anchor
+        } else {
+            clamp_footer_popup_anchor(ctx, anchor)
         };
         let area = egui::Area::new(area_id)
             .order(egui::Order::Foreground)
