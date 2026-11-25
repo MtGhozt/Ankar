@@ -294,8 +294,10 @@ impl TerminalSession {
                             ctx.request_repaint();
                         }
                         Event::ColorRequest(index, format) => {
-                            if let Some(rgb) = query_color(&query_colors, *index) {
-                                pty_notifier.notify(format(rgb).into_bytes());
+                            let reply = query_color(&query_colors, *index).map(|rgb| format(rgb));
+                            log::debug!("osc color query index={index} reply={reply:?}");
+                            if let Some(reply) = reply {
+                                pty_notifier.notify(reply.into_bytes());
                             }
                         }
                         Event::TextAreaSizeRequest(format) => {
@@ -745,6 +747,40 @@ mod tests {
             mouse_sequence(mode, 0, 4, 2, true, false, 16 | 8).unwrap(),
             b"\x1b[<24;5;3M",
             "click with ctrl+alt"
+        );
+    }
+
+    #[test]
+    fn color_queries_get_16_bit_replies_with_the_query_terminator() {
+        use alacritty_terminal::vte::ansi::Processor;
+        let (tx, rx) = mpsc::channel();
+        let mut term = Term::new(
+            term::Config::default(),
+            &TermSize::new(80, 24),
+            EventProxy(tx),
+        );
+        let mut parser: Processor = Processor::new();
+        // OSC 10 / 11 / 12 / 4, with both BEL and ST terminators.
+        parser.advance(&mut term, b"\x1b]10;?\x07\x1b]11;?\x1b\\\x1b]12;?\x07\x1b]4;4;?\x1b\\");
+        let colors = TermColors::default();
+        let replies: Vec<String> = rx
+            .try_iter()
+            .filter_map(|event| match event {
+                Event::ColorRequest(index, format) => {
+                    query_color(&colors, index).map(|rgb| format(rgb))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            replies,
+            [
+                "\x1b]10;rgb:e8e8/e8e8/e8e8\x07",
+                "\x1b]11;rgb:0000/0000/0000\x1b\\",
+                "\x1b]12;rgb:0f0f/8c8c/ecec\x07",
+                "\x1b]4;4;rgb:5a5a/a0a0/f2f2\x1b\\",
+            ],
+            "bytes doubled, same terminator as the query"
         );
     }
 

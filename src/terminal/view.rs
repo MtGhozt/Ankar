@@ -957,7 +957,8 @@ fn cell_colors(
 ) -> (Color32, Color32, f32) {
     let wide = cell.flags.contains(Flags::WIDE_CHAR);
     let inverse = cell.flags.contains(Flags::INVERSE);
-    let dim = cell.flags.intersects(Flags::DIM | Flags::DIM_BOLD);
+    // DIM_BOLD is DIM|BOLD, so `intersects` would dim every bold cell: test DIM alone.
+    let dim = cell.flags.contains(Flags::DIM);
     let point = Point::new(Line(cell.line), Column(cell.col as usize));
     let selected = selection.is_some_and(|r| r.contains(point));
 
@@ -1164,6 +1165,26 @@ mod tests {
             bg: TermColor::Named(NamedColor::Background),
             flags: Flags::empty(),
         }
+    }
+
+    #[test]
+    fn truecolor_is_rendered_as_sent_and_dim_only_on_request() {
+        let colors = TermColors::default();
+        let mut c = cell('┃');
+        let (fg, bg, _) = cell_colors(&c, None, &colors, None);
+        assert_eq!(fg, Color32::from_rgb(118, 153, 254), "SGR 38;2 untouched");
+        assert_eq!(bg, colors.background);
+        c.bg = TermColor::Spec(Rgb { r: 8, g: 8, b: 8 });
+        assert_eq!(cell_colors(&c, None, &colors, None).1, Color32::from_rgb(8, 8, 8));
+        c.flags = Flags::DIM;
+        let dimmed = cell_colors(&c, None, &colors, None).0;
+        assert_ne!(dimmed, Color32::from_rgb(118, 153, 254), "SGR 2 dims");
+        c.flags = Flags::BOLD;
+        assert_eq!(
+            cell_colors(&c, None, &colors, None).0,
+            Color32::from_rgb(118, 153, 254),
+            "bold never brightens or remaps truecolor"
+        );
     }
 
     fn snapshot_with_cursor(shape: CursorShape, color: Option<Rgb>) -> Snapshot {
