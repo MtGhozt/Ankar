@@ -23,8 +23,22 @@ Open work, most important first. Remove items when done (and add them to FEATURE
 - Stats (prompt 08): opens in <100 ms with skeleton; five quick range changes end on the last;
   scroll to bottom — no misdrawn charts; Esc / `esc` chip close; keys while the pane is focused
   stay out of the terminal and return after close; no red egui ID-clash text in debug; agent click
-  filters the whole page; layout vs `docs/design/midterm-spec/ref/midu-stats.jpg` at 1024 px width;
-  RAM open/closed per `docs/ram.md` § Stats page (08).
+  filters the whole page; RAM open/closed per `docs/ram.md` § Stats page (08); layout at full
+  width, ~740 px, and ~450 px (KPI, charts, tables keep width; header and range selector do not
+  overlap; min pane ~420 px; compare `docs/design/midterm-spec/ref/midu-stats.jpg` where useful).
+- Stats AGENTS: one row per tool (OpenCode modes rolled up; no `powershell.exe -nol...` rows, no
+  tab titles); tooltip draws above the rows.
+- Stats AGENT TIME: not `0.0 h` with every row `1m`; sub-minute time shows seconds; Junie tokens
+  from `%USERPROFILE%\.junie\sessions\*\summary.json` when that file exists.
+- Stats MODELS legend: not "Other 100%" for known families (Anthropic, OpenAI, Google, xAI,
+  DeepSeek, Moonshot, Qwen, MiniMax, Mistral, Meta, Z.ai, OpenCode Zen free for `*-free`).
+- Terminal cell row: glyphs centered in the cell (OpenCode "+ New session" pill has equal space
+  above and below); Hack and Cascadia Mono compute to 14 px at 12 px and 15 px at 13 px (line gap
+  0), shorter than the 16–17 px Windows Terminal figure; win metrics would be 16–17 and are not
+  used; log once: `cell metrics:` in ankar-log.txt.
+- ConPTY: closing a tab or quitting does not leave OpenConsole.exe / "Console Window and PTY Host"
+  behind; the in-app "Ankar: N MB private · M console hosts" line was NOT built (Private Bytes
+  needs windows-sys feature `Win32_System_ProcessStatus`, not enabled).
 
 ## Leftovers
 
