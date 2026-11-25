@@ -89,9 +89,11 @@ pub struct AgentFilter {
 }
 
 impl AgentFilter {
-    /// True when no filter is set or it names this agent.
+    /// True when no filter is set or it names this tool (old keys and OpenCode modes count).
     pub fn allows(filter: Option<&AgentFilter>, source: Source, name: &str) -> bool {
-        filter.is_none_or(|f| f.source == source && f.name == name)
+        filter.is_none_or(|f| {
+            f.source == source && canonical_tool(&f.name).name == canonical_tool(name).name
+        })
     }
 }
 
@@ -103,6 +105,58 @@ pub struct AgentRow {
     pub waiting_secs: u64,
     pub tasks: u64,
     pub tokens: Option<Tokens>,
+    /// OpenCode modes seen on this row (`build`, `plan`, …). Empty for other tools.
+    pub modes: String,
+}
+
+struct Tool {
+    id: &'static str,
+    name: &'static str,
+    /// Exact keys only (not substrings): OpenCode's internal modes.
+    aliases: &'static [&'static str],
+}
+
+/// Longest id first so a command line matches `cursor-agent` ahead of any shorter id inside it.
+const TOOLS: &[Tool] = &[
+    Tool { id: "cursor-agent", name: "cursor-agent", aliases: &[] },
+    Tool { id: "antigravity", name: "Antigravity", aliases: &[] },
+    Tool { id: "opencode", name: "OpenCode", aliases: &["build", "general", "plan", "explore"] },
+    Tool { id: "copilot", name: "Copilot", aliases: &[] },
+    Tool { id: "claude", name: "Claude", aliases: &[] },
+    Tool { id: "codex", name: "Codex", aliases: &[] },
+    Tool { id: "junie", name: "Junie", aliases: &[] },
+    Tool { id: "grok", name: "Grok", aliases: &[] },
+];
+
+/// Display name and stable id for a raw stats key, tab command, or agent column.
+fn canonical_tool(raw: &str) -> Tool {
+    let key = raw.trim().to_ascii_lowercase();
+    if let Some(t) = TOOLS.iter().find(|t| t.id == key || t.aliases.iter().any(|a| *a == key)) {
+        return Tool { id: t.id, name: t.name, aliases: t.aliases };
+    }
+    if let Some(t) = TOOLS.iter().find(|t| key.contains(t.id)) {
+        return Tool { id: t.id, name: t.name, aliases: t.aliases };
+    }
+    Tool { id: "shell", name: "Shell", aliases: &[] }
+}
+
+/// Record an OpenCode mode on `modes` (comma-separated, first-seen order).
+fn remember_mode(modes: &mut String, raw: &str) {
+    let key = raw.trim().to_ascii_lowercase();
+    let Some(mode) = TOOLS
+        .iter()
+        .find(|t| t.id == "opencode")
+        .and_then(|t| t.aliases.iter().copied().find(|a| *a == key))
+    else {
+        return;
+    };
+    if modes.split(", ").any(|m| m == mode) {
+        return;
+    }
+    if !modes.is_empty() {
+        modes.push_str(", ");
+    }
+    modes.push_str(mode);
 }
 
 #[derive(Clone, Debug, Default)]

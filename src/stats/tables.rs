@@ -334,7 +334,25 @@ pub(super) fn draw_agents(
         if a.tokens.is_none() {
             tip.push_str("\ncursor-agent and Ankar do not store tokens locally");
         }
-        resp.on_hover_text(tip);
+        if !a.modes.is_empty() {
+            tip.push_str("\nmodes: ");
+            tip.push_str(&a.modes);
+        }
+        // Popup on the tooltip layer: `on_hover_text` is clipped to the row and covers the rows under it.
+        if resp.hovered() {
+            let pos = ui.input(|i| i.pointer.hover_pos()).unwrap_or(resp.rect.min) + egui::vec2(14.0, 18.0);
+            egui::Area::new(resp.id.with("agent_tip"))
+                .order(egui::Order::Tooltip)
+                .fixed_pos(pos)
+                .constrain(true)
+                .interactable(false)
+                .show(ui.ctx(), |tip_ui| {
+                    egui::Frame::popup(tip_ui.style()).show(tip_ui, |tip_ui| {
+                        tip_ui.set_max_width(280.0);
+                        tip_ui.label(tip);
+                    });
+                });
+        }
     }
 }
 
@@ -399,6 +417,7 @@ mod tests {
             waiting_secs: 0,
             tasks: 0,
             tokens: None,
+            modes: String::new(),
         };
         let same = AgentFilter { source: Source::Ankar, name: "codex".into() };
         let other_source = AgentFilter { source: Source::OpenCode, name: "codex".into() };

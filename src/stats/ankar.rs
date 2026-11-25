@@ -83,7 +83,12 @@ impl AnkarStatsStore {
 
         let hour_key = local_hour_key();
         for tab in &workspace.tabs {
-            let Some(key) = launcher_key(&tab.profile_id, &tab.session_name) else {
+            let Some(key) = launcher_key(
+                &tab.profile_id,
+                tab.command.as_deref(),
+                &tab.args,
+                tab.detected.as_deref(),
+            ) else {
                 continue;
             };
             let started = self.seen.insert(tab.id);
@@ -175,9 +180,10 @@ impl AnkarStatsStore {
             if ts_ms < since_ms || ts_ms >= until_ms {
                 continue;
             }
-            for (name, cell) in agents {
-                // The AGENTS table always lists every agent; the rest follows the filter.
-                let e = by_agent.entry(name.clone()).or_default();
+            for (raw, cell) in agents {
+                // The AGENTS table always lists every tool; the rest follows the filter.
+                let name = super::canonical_tool(raw).name;
+                let e = by_agent.entry(name.to_string()).or_default();
                 e.0 = e.0.saturating_add(cell.busy);
                 e.1 = e.1.saturating_add(cell.waiting);
                 e.2 = e.2.saturating_add(cell.starts);
@@ -207,6 +213,7 @@ impl AnkarStatsStore {
 
         let mut agents: Vec<AgentRow> = by_agent
             .into_iter()
+            .filter(|(name, (b, w, t))| visible_agent(name, *b, *w, *t))
             .map(|(name, (b, w, t))| AgentRow {
                 source: Source::Ankar,
                 name,
@@ -214,6 +221,7 @@ impl AnkarStatsStore {
                 waiting_secs: w,
                 tasks: t,
                 tokens: None,
+                modes: String::new(),
             })
             .collect();
         agents.sort_by_key(|a| std::cmp::Reverse(a.busy_secs));
@@ -239,10 +247,53 @@ fn take_whole_secs(pending: &mut f64, dt: f64) -> u64 {
     whole as u64
 }
 
-/// Only launcher tabs (`profile_id == "command"`) count; the key is the launcher name, lowercased.
-fn launcher_key(profile_id: &str, name: &str) -> Option<String> {
-    let name = name.trim();
-    (profile_id == "command" && !name.is_empty()).then(|| name.to_lowercase())
+/// Command tabs count under the tool inside `command`/`args` (or `Shell`). A plain shell counts
+/// only when `detected` is a known tool. Tab titles are not keys.
+fn launcher_key(
+    profile_id: &str,
+    command: Option<&str>,
+    args: &[String],
+    detected: Option<&str>,
+) -> Option<String> {
+    if profile_id == "command" {
+        let mut hay = String::new();
+        if let Some(c) = command {
+            hay.push_str(c);
+        }
+        for a in args {
+            if !hay.is_empty() {
+                hay.push(' ');
+            }
+            hay.push_str(a);
+        }
+        return Some(super::canonical_tool(&hay).name.to_string());
+    }
+    let tool = super::canonical_tool(detected?);
+    (tool.id != "shell").then(|| tool.name.to_string())
+}
+
+/// Shell rows with no busy/waiting time are hidden. Other tools stay if they have tasks or time.
+fn visible_agent(name: &str, busy: u64, waiting: u64, tasks: u64) -> bool {
+    let time = busy > 0 || waiting > 0;
+    if name == "Shell" {
+        time
+    } else {
+        time || tasks > 0
+    }
+}
+
+/// Fold old stats.json keys that name the same tool into one hour bucket.
+fn merge_hours(hours: &mut AnkarHours) {
+    for bucket in hours.values_mut() {
+        let raw = std::mem::take(bucket);
+        for (key, cell) in raw {
+            let name = super::canonical_tool(&key).name.to_string();
+            let dst = bucket.entry(name).or_default();
+            dst.busy = dst.busy.saturating_add(cell.busy);
+            dst.waiting = dst.waiting.saturating_add(cell.waiting);
+            dst.starts = dst.starts.saturating_add(cell.starts);
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -319,7 +370,10 @@ fn load_or_reset(path: &PathBuf) -> StatsFile {
     }
     match fs::read_to_string(path) {
         Ok(text) => match serde_json::from_str::<StatsFile>(&text) {
-            Ok(f) if f.version == VERSION => f,
+            Ok(mut f) if f.version == VERSION => {
+                merge_hours(&mut f.hours);
+                f
+            }
             Ok(_) | Err(_) => {
                 let bad = path.with_extension("json.bad");
                 let _ = fs::rename(path, &bad);
@@ -370,10 +424,39 @@ mod tests {
     }
 
     #[test]
-    fn only_launcher_tabs_count_keyed_by_lowercase_name() {
-        assert_eq!(launcher_key("command", "OpenCode"), Some("opencode".into()));
-        assert_eq!(launcher_key("powershell", "Terminal"), None);
-        assert_eq!(launcher_key("command", " "), None);
+    fn command_tabs_key_by_tool_and_plain_shells_only_when_detected() {
+        let args = Vec::<String>::new();
+        assert_eq!(
+            launcher_key("command", Some("powershell.exe -NoLogo -Command opencode"), &args, None).as_deref(),
+            Some("OpenCode")
+        );
+        assert_eq!(launcher_key("command", Some("matias"), &args, None).as_deref(), Some("Shell"));
+        assert_eq!(launcher_key("powershell", None, &args, None), None);
+        assert_eq!(launcher_key("powershell", None, &args, Some("claude")).as_deref(), Some("Claude"));
+        assert_eq!(launcher_key("powershell", Some("matias"), &args, Some("notepad")), None);
+    }
+
+    #[test]
+    fn old_keys_merge_into_one_tool_bucket() {
+        let cell = |busy, starts| AnkarHourCell { busy, waiting: 0, starts };
+        let mut hours = AnkarHours::new();
+        hours.insert(
+            "2026-01-05T10".into(),
+            HashMap::from([
+                ("build".into(), cell(10, 1)),
+                ("opencode".into(), AnkarHourCell { busy: 4, waiting: 3, starts: 2 }),
+                ("powershell.exe -NoLogo -Command opencode".into(), cell(6, 1)),
+                ("matias".into(), cell(8, 1)),
+            ]),
+        );
+        merge_hours(&mut hours);
+        let bucket = hours.get("2026-01-05T10").unwrap();
+        let oc = bucket.get("OpenCode").unwrap();
+        assert_eq!((oc.busy, oc.waiting, oc.starts), (20, 3, 4));
+        assert_eq!(bucket.get("Shell").unwrap().busy, 8);
+        assert_eq!(bucket.len(), 2);
+        assert_eq!(super::super::canonical_tool("build").name, "OpenCode");
+        assert_eq!(super::super::canonical_tool("matias").name, "Shell");
     }
 
     #[test]

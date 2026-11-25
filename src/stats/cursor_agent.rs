@@ -148,6 +148,7 @@ fn finish(snap: &mut StatsSnapshot, acc: Acc, keep: bool) {
         waiting_secs: 0,
         tasks: chats,
         tokens: None, // cursor-agent does not store tokens locally
+        modes: String::new(),
     });
 
     for (_, d) in days {

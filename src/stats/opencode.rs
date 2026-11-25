@@ -282,12 +282,8 @@ fn aggregate_v2(
             days,
             hours_ms,
         } = &mut accs[i];
-        let agent_name = if row.agent.is_empty() {
-            "opencode".to_string()
-        } else {
-            row.agent.clone()
-        };
-        // The AGENTS table always lists every agent; the rest of the page follows the filter.
+        let agent_name = shown_agent(&row.agent);
+        // The AGENTS table always lists every tool; the rest of the page follows the filter.
         let keep = AgentFilter::allows(filter, Source::OpenCode, &agent_name);
         if keep {
             bump_activity(&mut snap.activity, tz, row.time_created);
@@ -326,7 +322,9 @@ fn aggregate_v2(
             waiting_secs: 0,
             tasks: 0,
             tokens: Some(Tokens::default()),
+            modes: String::new(),
         });
+        super::remember_mode(&mut a.modes, &row.agent);
         a.tasks = a.tasks.saturating_add(1);
         if let Some(t) = a.tokens.as_mut() {
             t.add_assign(&tok);
@@ -475,11 +473,7 @@ fn aggregate_v1(
         }
         let t = t_created.unwrap_or(0);
         let snap = &mut snaps[window_idx(split_ms, t, snaps.len())];
-        let agent_name = if agent.is_empty() {
-            "opencode".to_string()
-        } else {
-            agent
-        };
+        let agent_name = shown_agent(&agent);
         let keep = AgentFilter::allows(filter, Source::OpenCode, &agent_name);
         if keep {
             bump_activity(&mut snap.activity, tz, t);
@@ -506,6 +500,7 @@ fn aggregate_v1(
             if let Some(t) = a.tokens.as_mut() {
                 t.add_assign(&tok);
             }
+            super::remember_mode(&mut a.modes, &agent);
         } else {
             let mut busy = 0u64;
             if let (Some(c), Some(d)) = (t_created, t_completed) {
@@ -517,6 +512,8 @@ fn aggregate_v1(
                     }
                 }
             }
+            let mut modes = String::new();
+            super::remember_mode(&mut modes, &agent);
             snap.agents.push(AgentRow {
                 source: Source::OpenCode,
                 name: agent_name,
@@ -524,6 +521,7 @@ fn aggregate_v1(
                 waiting_secs: 0,
                 tasks: 1,
                 tokens: Some(tok.clone()),
+                modes,
             });
         }
         if !keep {
@@ -604,6 +602,11 @@ fn local_day(tz: &jiff::tz::TimeZone, time_ms: i64) -> String {
     };
     let z = ts.to_zoned_datetime(tz.clone());
     z.strftime("%Y-%m-%d").to_string()
+}
+
+fn shown_agent(agent: &str) -> String {
+    let raw = if agent.is_empty() { "opencode" } else { agent };
+    super::canonical_tool(raw).name.to_string()
 }
 
 fn merge_days(dst: &mut Vec<DayBucket>, src: HashMap<String, DayBucket>) {
@@ -697,13 +700,13 @@ mod tests {
         assert_eq!((build.sessions, build.steps, build.tokens.input), (1, 2, 30));
         assert_eq!(build.days.len(), 1);
         assert!(build.activity.iter().flatten().sum::<u32>() > 0);
-        let plan = run("plan");
+        let plan = run("Junie");
         assert_eq!((plan.sessions, plan.steps, plan.tokens.input), (0, 0, 0));
         assert!(plan.models.is_empty() && plan.days.is_empty());
         assert_eq!(plan.activity.iter().flatten().sum::<u32>(), 0);
-        // The AGENTS table still lists "build" so the user can pick another row.
+        // The AGENTS table still lists OpenCode (every mode) so the user can pick another row.
         assert_eq!(plan.agents.len(), 1);
-        assert_eq!(plan.agents[0].name, "build");
+        assert_eq!(plan.agents[0].name, "OpenCode");
     }
 
     #[test]
