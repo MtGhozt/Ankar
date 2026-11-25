@@ -32,10 +32,14 @@ pub struct DirPicker {
     /// Index into the visible rows.
     selected: usize,
     just_opened: bool,
+    /// Lists folders only (new session in folder); footer still shows greyed files.
+    folders_only: bool,
+    /// Parent and folder rows navigate in the listing; Enter picks the current directory.
+    new_session: bool,
 }
 
 /// Folders first, then files, each sorted case-insensitively; dot entries hidden like Warp.
-fn list(dir: &Path) -> Vec<Entry> {
+fn list(dir: &Path, folders_only: bool) -> Vec<Entry> {
     let mut entries: Vec<Entry> = std::fs::read_dir(dir)
         .map(|it| {
             it.filter_map(Result::ok)
@@ -43,7 +47,7 @@ fn list(dir: &Path) -> Vec<Entry> {
                     name: e.file_name().to_string_lossy().into_owned(),
                     is_dir: e.file_type().is_ok_and(|t| t.is_dir()),
                 })
-                .filter(|e| !e.name.starts_with('.'))
+                .filter(|e| !e.name.starts_with('.') && (!folders_only || e.is_dir))
                 .collect()
         })
         .unwrap_or_default();
@@ -114,9 +118,13 @@ impl DirPicker {
     pub fn toggle(&mut self, cwd: &Path) {
         if self.is_open() {
             self.dir = None;
+            self.new_session = false;
+            self.folders_only = false;
             return;
         }
-        self.entries = list(cwd);
+        self.new_session = false;
+        self.folders_only = false;
+        self.entries = list(cwd, false);
         self.dir = Some(cwd.to_path_buf());
         self.query.clear();
         self.just_opened = true;
@@ -124,15 +132,45 @@ impl DirPicker {
         self.selected = first_selectable(&rows, &self.entries);
     }
 
-    /// Draws the popup with its bottom-left at `anchor`; returns the folder to cd into.
-    /// Stays open across a cd and reloads the listing when `cwd` (the path being shown) changes.
-    pub fn show(&mut self, ctx: &egui::Context, anchor: egui::Pos2, chip: Rect, cwd: &Path) -> Option<PathBuf> {
-        if self.dir.as_deref().is_some_and(|d| d != cwd) {
-            self.entries = list(cwd);
-            self.dir = Some(cwd.to_path_buf());
-            self.query.clear();
-            let rows = visible_rows(&self.entries, cwd.parent().is_some(), "");
-            self.selected = first_selectable(&rows, &self.entries);
+    /// Opens below the sidebar folder button; toggles closed when clicked again.
+    pub fn toggle_new_session(&mut self) {
+        if self.is_open() && self.new_session {
+            self.dir = None;
+            self.new_session = false;
+            self.folders_only = false;
+            return;
+        }
+        self.new_session = true;
+        self.folders_only = true;
+        let start = PathBuf::from(r"C:\");
+        self.entries = list(&start, true);
+        self.dir = Some(start);
+        self.query.clear();
+        self.just_opened = true;
+        let has_parent = self.dir.as_ref().and_then(|d| d.parent()).is_some();
+        let rows = visible_rows(&self.entries, has_parent, "");
+        self.selected = first_selectable(&rows, &self.entries);
+    }
+
+    /// Draws the popup at `anchor` (footer: bottom-left above the chip; new session: top-left below the button).
+    /// Returns a directory to cd into, or for new session mode the folder to start in.
+    pub fn show(
+        &mut self,
+        ctx: &egui::Context,
+        anchor: egui::Pos2,
+        dismiss_rect: Rect,
+        external_cwd: Option<&Path>,
+    ) -> Option<PathBuf> {
+        if !self.new_session {
+            if let Some(cwd) = external_cwd {
+                if self.dir.as_deref().is_some_and(|d| d != cwd) {
+                    self.entries = list(cwd, false);
+                    self.dir = Some(cwd.to_path_buf());
+                    self.query.clear();
+                    let rows = visible_rows(&self.entries, cwd.parent().is_some(), "");
+                    self.selected = first_selectable(&rows, &self.entries);
+                }
+            }
         }
         let dir = self.dir.clone()?;
         let rows = visible_rows(&self.entries, dir.parent().is_some(), &self.query);
@@ -151,13 +189,23 @@ impl DirPicker {
             self.selected = step(&rows, &self.entries, self.selected, 1);
         }
         let mut chosen = None;
+        let mut confirm = None;
         if enter {
-            chosen = rows.get(self.selected).copied().filter(|&r| selectable(r, &self.entries));
+            if self.new_session {
+                confirm = Some(dir.clone());
+            } else {
+                chosen = rows.get(self.selected).copied().filter(|&r| selectable(r, &self.entries));
+            }
         }
 
-        let area = egui::Area::new(egui::Id::unique("dir_picker"))
+        let (pivot, area_id) = if self.new_session {
+            (Align2::LEFT_TOP, egui::Id::unique("new_session_dir_picker"))
+        } else {
+            (Align2::LEFT_BOTTOM, egui::Id::unique("footer_dir_picker"))
+        };
+        let area = egui::Area::new(area_id)
             .order(egui::Order::Foreground)
-            .pivot(Align2::LEFT_BOTTOM)
+            .pivot(pivot)
             .fixed_pos(anchor)
             .show(ctx, |ui| {
                 Frame::NONE
@@ -203,10 +251,33 @@ impl DirPicker {
 
         let clicked_away = ctx.input(|i| {
             i.pointer.any_pressed()
-                && i.pointer.interact_pos().is_some_and(|p| !area.response.rect.contains(p) && !chip.contains(p))
+                && i.pointer.interact_pos().is_some_and(|p| !area.response.rect.contains(p) && !dismiss_rect.contains(p))
         });
         if esc || clicked_away {
             self.dir = None;
+            self.new_session = false;
+            self.folders_only = false;
+        }
+        if let Some(path) = confirm {
+            self.dir = None;
+            self.new_session = false;
+            self.folders_only = false;
+            return Some(path);
+        }
+        if self.new_session {
+            if let Some(row) = chosen {
+                let next = match row {
+                    Row::Parent => dir.parent().unwrap_or(&dir).to_path_buf(),
+                    Row::Entry(i) => dir.join(&self.entries[i].name),
+                };
+                self.entries = list(&next, true);
+                self.dir = Some(next);
+                self.query.clear();
+                let rows = visible_rows(&self.entries, self.dir.as_ref().and_then(|d| d.parent()).is_some(), "");
+                self.selected = first_selectable(&rows, &self.entries);
+                return None;
+            }
+            return None;
         }
         chosen.map(|row| match row {
             Row::Parent => dir.parent().unwrap_or(&dir).to_path_buf(),
@@ -308,7 +379,7 @@ mod tests {
         for f in ["a.txt", ".env"] {
             std::fs::write(dir.join(f), "").unwrap();
         }
-        assert_eq!(list(&dir), vec![e("A", true), e("b", true), e("a.txt", false)]);
+        assert_eq!(list(&dir, false), vec![e("A", true), e("b", true), e("a.txt", false)]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

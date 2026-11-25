@@ -2,7 +2,7 @@ use crate::changes::{self, ChangesAction, ChangesPane, GitWatch};
 use crate::color_check;
 use crate::config::Config;
 use crate::files::{self, FileViewer};
-use crate::folder_pick::{self, PickFor};
+use crate::folder_pick;
 use crate::footer::{self, FooterAction, ShellFooter};
 use crate::inbox::Inbox;
 use crate::window_watch::WindowWatch;
@@ -116,17 +116,6 @@ impl AnkarApp {
             pending_cd: None,
             color_check: None,
         })
-    }
-
-    /// Acts on the folder dialog once it closes: a new session there.
-    fn poll_folder_pick(&mut self, ctx: &Context) {
-        let Some(choice) = self.sidebar.folder_pick.as_ref().and_then(|p| p.poll()) else {
-            return;
-        };
-        let purpose = self.sidebar.folder_pick.take().map(|p| p.purpose);
-        if let (Some(dir), Some(PickFor::NewSession)) = (choice, purpose) {
-            self.workspace.new_session_in(ctx, dir);
-        }
     }
 
     /// The "± +N -N" button / footer chip: closes the changes pane when it shows in this tab,
@@ -600,7 +589,6 @@ impl eframe::App for AnkarApp {
                     }
                 });
         }
-        self.poll_folder_pick(ui.ctx());
 
         egui::CentralPanel::default()
             .frame(Frame::NONE.fill(ui_theme::BG))

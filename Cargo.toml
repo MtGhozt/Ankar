@@ -33,16 +33,11 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 rusqlite = { version = "0.37", features = ["bundled"] }
 jiff = "1"
 
-# Already in the tree (alacritty_terminal, eframe): the Toolhelp32 process snapshot and the
-# native folder dialog (SHBrowseForFolderW).
+# Already in the tree (alacritty_terminal, eframe): the Toolhelp32 process snapshot.
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
-    "Win32_System_Com",
     "Win32_System_Diagnostics_ToolHelp",
-    "Win32_UI_Shell",
-    "Win32_UI_Shell_Common",
-    "Win32_UI_WindowsAndMessaging",
 ] }
 
 [profile.release]

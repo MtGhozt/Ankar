@@ -61,7 +61,10 @@ impl ShellFooter {
             if resp.clicked() {
                 self.picker.toggle(cwd);
             }
-            if let Some(dir) = self.picker.show(ui.ctx(), resp.rect.left_top() - Vec2::new(0.0, 4.0), resp.rect, cwd) {
+            if let Some(dir) = self
+                .picker
+                .show(ui.ctx(), resp.rect.left_top() - Vec2::new(0.0, 4.0), resp.rect, Some(cwd))
+            {
                 action = Some(FooterAction::Cd(dir));
             }
         }

@@ -1,6 +1,6 @@
 use crate::config::Config;
 use crate::files::FileViewer;
-use crate::folder_pick::{FolderPick, PickFor};
+use crate::dir_picker::DirPicker;
 use crate::launchers;
 use crate::layout::{SessionStatus, Workspace};
 use crate::logos::LogoAtlas;
@@ -119,8 +119,7 @@ pub struct SidebarState {
     pub confirm_delete: Option<usize>,
     last_relative_tick: Instant,
     cached_now: Instant,
-    /// Native folder dialog in flight (New session in folder…, footer cd); the app polls it.
-    pub folder_pick: Option<FolderPick>,
+    pub new_session_picker: DirPicker,
 }
 
 impl Default for SidebarState {
@@ -141,7 +140,7 @@ impl Default for SidebarState {
             confirm_delete: None,
             last_relative_tick: now,
             cached_now: now,
-            folder_pick: None,
+            new_session_picker: DirPicker::default(),
         }
     }
 }
@@ -184,7 +183,7 @@ pub fn draw(
     let mut close_idx = None;
     let mut toggle_pin_session = None;
     let mut new_session = false;
-    let mut new_in_folder = false;
+    let mut toggle_session_folder_picker = false;
     let mut restore = None;
     let mut forget = None;
     let mut toggle_group: Option<String> = None;
@@ -263,24 +262,24 @@ pub fn draw(
     let row = ui.available_rect_before_wrap();
     let (actions_rect, _) = ui.allocate_exact_size(Vec2::new(row.width(), 30.0), Sense::hover());
     let side_l = 6.0;
-    let (new_rect, folder_rect) = action_rects(actions_rect);
+    let (new_rect, folder_button_rect) = action_rects(actions_rect);
 
     {
         let folder = ui
-            .interact(folder_rect, search_field_id().with("new_in_folder"), Sense::click())
+            .interact(folder_button_rect, search_field_id().with("new_in_folder"), Sense::click())
             .on_hover_text("New session in folder…");
         let fill = if folder.hovered() { ui_theme::ROW_HOVER } else { ui_theme::BUTTON_BG };
-        painter.rect_filled(folder_rect, CornerRadius::same(ui_theme::RADIUS_ROW), fill);
-        paint_button_top_highlight(&painter, folder_rect, ui_theme::RADIUS_ROW);
+        painter.rect_filled(folder_button_rect, CornerRadius::same(ui_theme::RADIUS_ROW), fill);
+        paint_button_top_highlight(&painter, folder_button_rect, ui_theme::RADIUS_ROW);
         painter.text(
-            folder_rect.center(),
+            folder_button_rect.center(),
             Align2::CENTER_CENTER,
             Icon::FolderPlus.codepoint().to_string(),
             FontId::new(16.0, FontFamily::Name(ui_theme::FONT_ICONS.into())),
             ui_theme::TEXT,
         );
         if folder.clicked() {
-            new_in_folder = true;
+            toggle_session_folder_picker = true;
         }
     }
 
@@ -344,7 +343,7 @@ pub fn draw(
         }
         new_resp.context_menu(|ui| {
             if ui.button("New session in folder…").clicked() {
-                new_in_folder = true;
+                toggle_session_folder_picker = true;
                 ui.close();
             }
         });
@@ -757,9 +756,17 @@ pub fn draw(
     if new_session {
         workspace.new_session(ui.ctx());
     }
-    if new_in_folder && sidebar.folder_pick.is_none() {
-        let start = crate::layout::new_session_cwd(workspace.active_tab().and_then(|t| t.cwd.as_deref()));
-        sidebar.folder_pick = Some(FolderPick::open(ui.ctx(), PickFor::NewSession, "New session in folder", Some(start)));
+    if toggle_session_folder_picker {
+        sidebar.new_session_picker.toggle_new_session();
+    }
+    if sidebar.new_session_picker.is_open() {
+        let anchor = folder_button_rect.left_bottom() + Vec2::new(0.0, 4.0);
+        if let Some(dir) = sidebar
+            .new_session_picker
+            .show(ui.ctx(), anchor, folder_button_rect, None)
+        {
+            workspace.new_session_in(ui.ctx(), dir);
+        }
     }
     if let Some(i) = start_rename {
         if let Some(tab) = workspace.tabs.get(i) {
