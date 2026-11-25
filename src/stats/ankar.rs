@@ -1,6 +1,6 @@
 //! Ankar-owned busy/waiting seconds, aggregated per local hour in `%APPDATA%\ankar\stats.json`.
 
-use super::{AnkarHourCell, DayBucket, Source, AgentRow};
+use super::{AgentFilter, AgentRow, AnkarHourCell, DayBucket, Source};
 use crate::config::Config;
 use crate::layout::{SessionStatus, Workspace};
 use crate::terminal::AgentState;
@@ -159,6 +159,7 @@ impl AnkarStatsStore {
         tz: &jiff::tz::TimeZone,
         since_ms: i64,
         until_ms: i64,
+        filter: Option<&AgentFilter>,
     ) -> AnkarRangeSnap {
         let mut busy = 0u64;
         let mut waiting = 0u64;
@@ -175,13 +176,17 @@ impl AnkarStatsStore {
                 continue;
             }
             for (name, cell) in agents {
-                busy = busy.saturating_add(cell.busy);
-                waiting = waiting.saturating_add(cell.waiting);
-                starts = starts.saturating_add(cell.starts);
+                // The AGENTS table always lists every agent; the rest follows the filter.
                 let e = by_agent.entry(name.clone()).or_default();
                 e.0 = e.0.saturating_add(cell.busy);
                 e.1 = e.1.saturating_add(cell.waiting);
                 e.2 = e.2.saturating_add(cell.starts);
+                if !AgentFilter::allows(filter, Source::Ankar, name) {
+                    continue;
+                }
+                busy = busy.saturating_add(cell.busy);
+                waiting = waiting.saturating_add(cell.waiting);
+                starts = starts.saturating_add(cell.starts);
 
                 let day_e = by_day.entry(day.clone()).or_insert_with(|| DayBucket {
                     day: day.clone(),
@@ -410,6 +415,28 @@ mod tests {
         prune_old(&mut f);
         assert!(f.hours.contains_key("2099-01-01T00"));
         assert!(!f.hours.contains_key("2000-01-01T00"));
+    }
+
+    #[test]
+    fn agent_filter_limits_totals_days_and_heatmap_but_keeps_every_agent_row() {
+        let cell = |busy| AnkarHourCell { busy, waiting: 0, starts: 1 };
+        let mut hours = AnkarHours::new();
+        hours.insert(
+            "2026-01-05T10".into(),
+            HashMap::from([("claude".to_string(), cell(60)), ("codex".to_string(), cell(30))]),
+        );
+        let tz = jiff::tz::TimeZone::UTC;
+        let all = AnkarStatsStore::snapshot_hours(&hours, &tz, 0, i64::MAX, None);
+        assert_eq!((all.0, all.2, all.3.len()), (90, 2, 2));
+        let f = AgentFilter { source: Source::Ankar, name: "codex".into() };
+        let (busy, _, starts, agents, days, activity) =
+            AnkarStatsStore::snapshot_hours(&hours, &tz, 0, i64::MAX, Some(&f));
+        assert_eq!((busy, starts, agents.len()), (30, 1, 2));
+        assert_eq!(days[0].busy_secs, 30);
+        assert_eq!(activity.iter().flatten().sum::<u32>(), 1);
+        let other = AgentFilter { source: Source::OpenCode, name: "codex".into() };
+        let none = AnkarStatsStore::snapshot_hours(&hours, &tz, 0, i64::MAX, Some(&other));
+        assert_eq!((none.0, none.4.len(), none.3.len()), (0, 0, 2));
     }
 
     #[test]

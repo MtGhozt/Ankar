@@ -2,7 +2,7 @@
 
 use super::ankar::AnkarStatsStore;
 use super::format::pct_change;
-use super::{cursor_agent, opencode, StatsSnapshot};
+use super::{cursor_agent, opencode, AgentFilter, StatsSnapshot};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -40,26 +40,29 @@ impl StatsRange {
     }
 }
 
+/// What a snapshot answers: the range and the page-wide agent filter.
+type Req = (StatsRange, Option<AgentFilter>);
+
 struct CacheEntry {
-    range: StatsRange,
+    req: Req,
     snap: StatsSnapshot,
     loaded_at: Instant,
     db_mtime: (Option<u64>, Option<u64>),
 }
 
-/// Request scheduling: one worker at a time, newest requested range wins.
+/// Request scheduling: one worker at a time, newest request wins.
 #[derive(Default)]
 struct Sched {
     generation: u64,
     inflight: bool,
-    pending: Option<StatsRange>,
+    pending: Option<Req>,
 }
 
 impl Sched {
     /// Some(generation) = launch now; None = queued behind the running load.
-    fn submit(&mut self, range: StatsRange) -> Option<u64> {
+    fn submit(&mut self, req: Req) -> Option<u64> {
         if self.inflight {
-            self.pending = Some(range);
+            self.pending = Some(req);
             return None;
         }
         self.inflight = true;
@@ -68,7 +71,7 @@ impl Sched {
     }
 
     /// A result arrived: (keep it?, next load to launch).
-    fn finish(&mut self, generation: u64) -> (bool, Option<(u64, StatsRange)>) {
+    fn finish(&mut self, generation: u64) -> (bool, Option<(u64, Req)>) {
         if generation != self.generation {
             return (false, None);
         }
@@ -114,10 +117,11 @@ impl StatsLoader {
         }
     }
 
-    pub fn request(&mut self, range: StatsRange, force: bool) {
+    pub fn request(&mut self, range: StatsRange, filter: Option<AgentFilter>, force: bool) {
+        let req = (range, filter);
         if !self.sched.inflight && !force {
             if let Some(c) = &self.cache {
-                if c.range == range && c.loaded_at.elapsed() < Duration::from_secs(60) {
+                if c.req == req && c.loaded_at.elapsed() < Duration::from_secs(60) {
                     let mtime = opencode::db_path()
                         .map(|p| opencode::mtime_pair(&p))
                         .unwrap_or((None, None));
@@ -127,28 +131,31 @@ impl StatsLoader {
                 }
             }
         }
-        if let Some(generation) = self.sched.submit(range) {
-            self.spawn(generation, range);
+        if let Some(generation) = self.sched.submit(req.clone()) {
+            self.spawn(generation, req);
         }
     }
 
-    fn spawn(&mut self, generation: u64, range: StatsRange) {
+    fn spawn(&mut self, generation: u64, (range, filter): Req) {
         let Some(tx) = self.tx.clone() else {
             self.sched.abort();
             return;
         };
         let ankar = self.ankar.clone();
+        let thread_filter = filter.clone();
         let spawned = thread::Builder::new()
             .name("ankar-stats".into())
             .spawn(move || {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    compute(range, &ankar)
+                    compute(range, thread_filter.as_ref(), &ankar)
                 }));
                 let snap = match result {
                     Ok(s) => s,
-                    Err(_) => {
-                        warning_snapshot(range, "Stats loader panicked; showing empty snapshot")
-                    }
+                    Err(_) => warning_snapshot(
+                        range,
+                        thread_filter,
+                        "Stats loader panicked; showing empty snapshot",
+                    ),
                 };
                 let _ = tx.send((generation, snap));
             });
@@ -156,6 +163,7 @@ impl StatsLoader {
             self.sched.abort();
             self.failed = Some(warning_snapshot(
                 range,
+                filter,
                 "Stats loader could not start its thread",
             ));
         }
@@ -178,7 +186,7 @@ impl StatsLoader {
                     .map(|p| opencode::mtime_pair(&p))
                     .unwrap_or((None, None));
                 self.cache = Some(CacheEntry {
-                    range: snap.range,
+                    req: (snap.range, snap.filter.clone()),
                     snap: snap.clone(),
                     loaded_at: Instant::now(),
                     db_mtime: mtime,
@@ -210,18 +218,24 @@ impl StatsLoader {
     }
 }
 
-fn warning_snapshot(range: StatsRange, msg: &str) -> StatsSnapshot {
+fn warning_snapshot(range: StatsRange, filter: Option<AgentFilter>, msg: &str) -> StatsSnapshot {
     StatsSnapshot {
         range,
+        filter,
         warnings: vec![msg.into()],
         computed_at: SystemTime::now(),
         ..StatsSnapshot::default()
     }
 }
 
-fn compute(range: StatsRange, ankar: &Arc<Mutex<AnkarStatsStore>>) -> StatsSnapshot {
+fn compute(
+    range: StatsRange,
+    filter: Option<&AgentFilter>,
+    ankar: &Arc<Mutex<AnkarStatsStore>>,
+) -> StatsSnapshot {
     let mut snap = StatsSnapshot {
         range,
+        filter: filter.cloned(),
         computed_at: SystemTime::now(),
         ..StatsSnapshot::default()
     };
@@ -252,15 +266,15 @@ fn compute(range: StatsRange, ankar: &Arc<Mutex<AnkarStatsStore>>) -> StatsSnaps
     let mut windows = [snap, StatsSnapshot::default()];
     let n = if with_prev { 2 } else { 1 };
     let tz = jiff::tz::TimeZone::system();
-    opencode::load_into(&mut windows[..n], &tz, since_ms, scan_since, until_ms);
-    cursor_agent::load_into(&mut windows[..n], &tz, since_ms, scan_since, until_ms);
+    opencode::load_into(&mut windows[..n], &tz, since_ms, scan_since, until_ms, filter);
+    cursor_agent::load_into(&mut windows[..n], &tz, since_ms, scan_since, until_ms, filter);
     let [mut snap, mut prev] = windows;
 
     // Hold the Ankar lock only to copy the hour buckets; the UI waits on it every frame.
     let hours = ankar.lock().ok().map(|store| store.hours_clone());
     if let Some(hours) = &hours {
         let (busy, waiting, starts, agents, days, activity) =
-            AnkarStatsStore::snapshot_hours(hours, &tz, since_ms, until_ms);
+            AnkarStatsStore::snapshot_hours(hours, &tz, since_ms, until_ms, filter);
         snap.ankar_busy_secs = busy;
         snap.ankar_waiting_secs = waiting;
         snap.ankar_starts = starts;
@@ -309,7 +323,7 @@ fn compute(range: StatsRange, ankar: &Arc<Mutex<AnkarStatsStore>>) -> StatsSnaps
     if with_prev {
         if let Some(hours) = &hours {
             let (busy, _, starts, _, _, _) =
-                AnkarStatsStore::snapshot_hours(hours, &tz, prev_since, prev_until);
+                AnkarStatsStore::snapshot_hours(hours, &tz, prev_since, prev_until, filter);
             prev.ankar_busy_secs = busy;
             prev.ankar_starts = starts;
         }
@@ -352,13 +366,13 @@ mod tests {
     #[test]
     fn range_change_while_loading_is_queued_and_stale_dropped() {
         let mut s = Sched::default();
-        let g1 = s.submit(StatsRange::Days30).unwrap();
-        assert!(s.submit(StatsRange::Days7).is_none());
-        assert!(s.submit(StatsRange::Days90).is_none());
+        let g1 = s.submit((StatsRange::Days30, None)).unwrap();
+        assert!(s.submit((StatsRange::Days7, None)).is_none());
+        assert!(s.submit((StatsRange::Days90, None)).is_none());
         let (keep, next) = s.finish(g1);
         assert!(!keep);
         let (g2, r) = next.unwrap();
-        assert_eq!(r, StatsRange::Days90);
+        assert_eq!(r, (StatsRange::Days90, None));
         assert!(s.inflight);
         assert_eq!(s.finish(g1), (false, None));
         assert_eq!(s.finish(g2), (true, None));
@@ -368,10 +382,21 @@ mod tests {
     #[test]
     fn abort_clears_inflight_and_pending() {
         let mut s = Sched::default();
-        s.submit(StatsRange::All);
-        s.submit(StatsRange::Days7);
+        s.submit((StatsRange::All, None));
+        s.submit((StatsRange::Days7, None));
         s.abort();
         assert!(!s.inflight && s.pending.is_none());
-        assert!(s.submit(StatsRange::All).is_some());
+        assert!(s.submit((StatsRange::All, None)).is_some());
+    }
+
+    #[test]
+    fn a_filter_change_is_a_new_request_even_in_the_same_range() {
+        let mut s = Sched::default();
+        let f = AgentFilter { source: super::super::Source::Ankar, name: "claude".into() };
+        let g1 = s.submit((StatsRange::Days30, None)).unwrap();
+        assert!(s.submit((StatsRange::Days30, Some(f.clone()))).is_none());
+        let (keep, next) = s.finish(g1);
+        assert!(!keep);
+        assert_eq!(next.unwrap().1, (StatsRange::Days30, Some(f)));
     }
 }

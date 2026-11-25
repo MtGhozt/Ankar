@@ -97,7 +97,10 @@ What exists today, by theme. Update when behaviour changes; keep it short.
   "Open log folder", "Debug: check colors (log)".
 - Stats panel (Ctrl+Shift+I, tab-bar icon, palette): local usage from read-only metadata. Opens as
   the right split pane (shares the slot with viewer/changes); one page scroll; closes with Esc
-  (first clears the agent filter), the `esc` chip, Ctrl+Shift+I or the icon.
+  (first clears the agent filter), the `esc` chip, Ctrl+Shift+I or the icon. Tokens by day and the
+  7x24 heatmap are painter-only charts (`stats/charts.rs`); MODELS (top 6 + "N more") and AGENTS
+  are `stats/tables.rs`. Clicking an AGENTS row filters the whole page (tokens, days, heatmap,
+  models) by that agent; the loader keys requests and cache by (range, filter).
 
 ## Diagnostics
 

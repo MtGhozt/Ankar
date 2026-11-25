@@ -1,6 +1,6 @@
 //! Read-only OpenCode SQLite (`opencode.db`) — tokens, models, agents, activity.
 
-use super::{window_idx, DayBucket, ModelRow, Source, AgentRow, StatsSnapshot, Tokens};
+use super::{window_idx, AgentFilter, DayBucket, ModelRow, Source, AgentRow, StatsSnapshot, Tokens};
 use rusqlite::{Connection, OpenFlags};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -80,6 +80,7 @@ pub fn load_into(
     split_ms: i64,
     since_ms: i64,
     until_ms: i64,
+    filter: Option<&AgentFilter>,
 ) {
     let Some(path) = db_path() else {
         snaps[0]
@@ -120,14 +121,18 @@ pub fn load_into(
 
     let mut v2_ids: HashMap<String, ()> = HashMap::new();
     if has_v2 {
-        if let Err(e) = aggregate_v2(&conn, snaps, tz, split_ms, since_ms, until_ms, &mut v2_ids) {
+        if let Err(e) =
+            aggregate_v2(&conn, snaps, tz, (split_ms, since_ms, until_ms), filter, &mut v2_ids)
+        {
             snaps[0]
                 .warnings
                 .push(format!("OpenCode v2 query failed: {e}"));
         }
     }
     if has_v1 {
-        if let Err(e) = aggregate_v1(&conn, snaps, tz, split_ms, since_ms, until_ms, &v2_ids) {
+        if let Err(e) =
+            aggregate_v1(&conn, snaps, tz, (split_ms, since_ms, until_ms), filter, &v2_ids)
+        {
             snaps[0]
                 .warnings
                 .push(format!("OpenCode v1 query failed: {e}"));
@@ -189,12 +194,11 @@ fn aggregate_v2(
     conn: &Connection,
     snaps: &mut [StatsSnapshot],
     tz: &jiff::tz::TimeZone,
-    split_ms: i64,
-    since_ms: i64,
-    until_ms: i64,
+    (split_ms, since_ms, until_ms): (i64, i64, i64),
+    filter: Option<&AgentFilter>,
     v2_ids: &mut HashMap<String, ()>,
 ) -> Result<(), rusqlite::Error> {
-    // Session counts.
+    // Session counts (with a filter they come from the kept messages below).
     {
         let mut stmt = conn.prepare(
             "SELECT id, parent_id, time_created FROM session_v2
@@ -211,6 +215,9 @@ fn aggregate_v2(
             let (id, parent, created) = row;
             let snap = &mut snaps[window_idx(split_ms, created, snaps.len())];
             v2_ids.insert(id, ());
+            if filter.is_some() {
+                continue;
+            }
             if parent.is_none() {
                 snap.sessions = snap.sessions.saturating_add(1);
             } else {
@@ -265,6 +272,7 @@ fn aggregate_v2(
         })
     })?;
 
+    let mut seen: std::collections::HashSet<(usize, String)> = std::collections::HashSet::new();
     for row in rows.flatten() {
         let i = window_idx(split_ms, row.time_created, snaps.len());
         let snap = &mut snaps[i];
@@ -274,22 +282,31 @@ fn aggregate_v2(
             days,
             hours_ms,
         } = &mut accs[i];
-        bump_activity(&mut snap.activity, tz, row.time_created);
-        let day = local_day(tz, row.time_created);
-        let day_e = days.entry(day.clone()).or_insert_with(|| DayBucket {
-            day,
-            ..DayBucket::default()
-        });
-
-        if row.msg_type == "user" && row.parent_id.is_none() {
-            snap.prompts = snap.prompts.saturating_add(1);
+        let agent_name = if row.agent.is_empty() {
+            "opencode".to_string()
+        } else {
+            row.agent.clone()
+        };
+        // The AGENTS table always lists every agent; the rest of the page follows the filter.
+        let keep = AgentFilter::allows(filter, Source::OpenCode, &agent_name);
+        if keep {
+            bump_activity(&mut snap.activity, tz, row.time_created);
+            if row.msg_type == "user" && row.parent_id.is_none() {
+                snap.prompts = snap.prompts.saturating_add(1);
+            }
+            if filter.is_some() && seen.insert((i, row.session_id.clone())) {
+                if row.parent_id.is_none() {
+                    snap.sessions = snap.sessions.saturating_add(1);
+                } else {
+                    snap.subagents = snap.subagents.saturating_add(1);
+                }
+            }
         }
 
         if row.msg_type != "assistant" {
             continue;
         }
 
-        snap.steps = snap.steps.saturating_add(1);
         let tok = Tokens {
             input: row.input,
             output: row.output,
@@ -297,12 +314,46 @@ fn aggregate_v2(
             cache_read: row.cache_read,
             cache_write: row.cache_write,
         };
+        let busy_ms = match (row.t_created, row.t_completed) {
+            // Cap at 6h per message.
+            (Some(c), Some(d)) => Some(d.saturating_sub(c)).filter(|d| *d > 0 && *d <= 6 * 60 * 60 * 1000),
+            _ => None,
+        };
+        let a = agents.entry(agent_name.clone()).or_insert_with(|| AgentRow {
+            source: Source::OpenCode,
+            name: agent_name,
+            busy_secs: 0,
+            waiting_secs: 0,
+            tasks: 0,
+            tokens: Some(Tokens::default()),
+        });
+        a.tasks = a.tasks.saturating_add(1);
+        if let Some(t) = a.tokens.as_mut() {
+            t.add_assign(&tok);
+        }
+        if let Some(ms) = busy_ms {
+            a.busy_secs = a.busy_secs.saturating_add(ms as u64 / 1000);
+        }
+        if !keep {
+            continue;
+        }
+
+        snap.steps = snap.steps.saturating_add(1);
         snap.tokens.add_assign(&tok);
         snap.cost += row.cost.max(0.0);
 
+        let day = local_day(tz, row.time_created);
+        let day_e = days.entry(day.clone()).or_insert_with(|| DayBucket {
+            day,
+            ..DayBucket::default()
+        });
         day_e.input = day_e.input.saturating_add(row.input);
         day_e.output = day_e.output.saturating_add(row.output);
         day_e.tasks = day_e.tasks.saturating_add(1);
+        if let Some(ms) = busy_ms {
+            *hours_ms = hours_ms.saturating_add(ms as u64);
+            day_e.busy_secs = day_e.busy_secs.saturating_add(ms as u64 / 1000);
+        }
 
         let provider = if row.provider.is_empty() {
             "unknown".into()
@@ -326,37 +377,6 @@ fn aggregate_v2(
         m.steps = m.steps.saturating_add(1);
         m.tokens.add_assign(&tok);
         m.cost += row.cost.max(0.0);
-
-        let agent_name = if row.agent.is_empty() {
-            "opencode".into()
-        } else {
-            row.agent.clone()
-        };
-        let a = agents.entry(agent_name.clone()).or_insert_with(|| AgentRow {
-            source: Source::OpenCode,
-            name: agent_name,
-            busy_secs: 0,
-            waiting_secs: 0,
-            tasks: 0,
-            tokens: Some(Tokens::default()),
-        });
-        a.tasks = a.tasks.saturating_add(1);
-        if let Some(t) = a.tokens.as_mut() {
-            t.add_assign(&tok);
-        }
-
-        if let (Some(c), Some(d)) = (row.t_created, row.t_completed) {
-            let dur = d.saturating_sub(c);
-            // Cap at 6h per message.
-            if dur > 0 && dur <= 6 * 60 * 60 * 1000 {
-                let secs = (dur as u64) / 1000;
-                *hours_ms = hours_ms.saturating_add(dur as u64);
-                a.busy_secs = a.busy_secs.saturating_add(secs);
-                day_e.busy_secs = day_e.busy_secs.saturating_add(secs);
-            }
-        }
-
-        let _ = row.session_id;
     }
 
     for (snap, acc) in snaps.iter_mut().zip(accs) {
@@ -376,22 +396,6 @@ fn finish_v2(snap: &mut StatsSnapshot, acc: V2Acc) {
 
     let mut model_vec: Vec<ModelRow> = models.into_values().collect();
     model_vec.sort_by_key(|a| std::cmp::Reverse(a.tokens.total()));
-    if model_vec.len() > 8 {
-        let rest = model_vec.split_off(8);
-        let mut other = ModelRow {
-            provider: "other".into(),
-            model: format!("{} more", rest.len()),
-            steps: 0,
-            tokens: Tokens::default(),
-            cost: 0.0,
-        };
-        for r in rest {
-            other.steps = other.steps.saturating_add(r.steps);
-            other.tokens.add_assign(&r.tokens);
-            other.cost += r.cost;
-        }
-        model_vec.push(other);
-    }
     snap.models = model_vec;
 
     let mut agent_vec: Vec<AgentRow> = agents.into_values().collect();
@@ -407,9 +411,8 @@ fn aggregate_v1(
     conn: &Connection,
     snaps: &mut [StatsSnapshot],
     tz: &jiff::tz::TimeZone,
-    split_ms: i64,
-    since_ms: i64,
-    until_ms: i64,
+    (split_ms, since_ms, until_ms): (i64, i64, i64),
+    filter: Option<&AgentFilter>,
     v2_ids: &HashMap<String, ()>,
 ) -> Result<(), rusqlite::Error> {
     // Only sessions not already in v2.
@@ -472,15 +475,24 @@ fn aggregate_v1(
         }
         let t = t_created.unwrap_or(0);
         let snap = &mut snaps[window_idx(split_ms, t, snaps.len())];
-        bump_activity(&mut snap.activity, tz, t);
+        let agent_name = if agent.is_empty() {
+            "opencode".to_string()
+        } else {
+            agent
+        };
+        let keep = AgentFilter::allows(filter, Source::OpenCode, &agent_name);
+        if keep {
+            bump_activity(&mut snap.activity, tz, t);
+        }
         if role == "user" {
-            snap.prompts = snap.prompts.saturating_add(1);
+            if keep {
+                snap.prompts = snap.prompts.saturating_add(1);
+            }
             continue;
         }
         if role != "assistant" {
             continue;
         }
-        snap.steps = snap.steps.saturating_add(1);
         let tok = Tokens {
             input,
             output,
@@ -488,6 +500,36 @@ fn aggregate_v1(
             cache_read,
             cache_write,
         };
+        // The AGENTS table always lists every agent; the rest of the page follows the filter.
+        if let Some(a) = snap.agents.iter_mut().find(|a| a.name == agent_name) {
+            a.tasks = a.tasks.saturating_add(1);
+            if let Some(t) = a.tokens.as_mut() {
+                t.add_assign(&tok);
+            }
+        } else {
+            let mut busy = 0u64;
+            if let (Some(c), Some(d)) = (t_created, t_completed) {
+                let dur = d.saturating_sub(c);
+                if dur > 0 && dur <= 6 * 60 * 60 * 1000 {
+                    busy = (dur as u64) / 1000;
+                    if keep {
+                        snap.opencode_hours += dur as f64 / 3_600_000.0;
+                    }
+                }
+            }
+            snap.agents.push(AgentRow {
+                source: Source::OpenCode,
+                name: agent_name,
+                busy_secs: busy,
+                waiting_secs: 0,
+                tasks: 1,
+                tokens: Some(tok.clone()),
+            });
+        }
+        if !keep {
+            continue;
+        }
+        snap.steps = snap.steps.saturating_add(1);
         snap.tokens.add_assign(&tok);
         snap.cost += cost.max(0.0);
 
@@ -516,35 +558,6 @@ fn aggregate_v1(
                 steps: 1,
                 tokens: tok.clone(),
                 cost: cost.max(0.0),
-            });
-        }
-
-        let agent_name = if agent.is_empty() {
-            "opencode".into()
-        } else {
-            agent
-        };
-        if let Some(a) = snap.agents.iter_mut().find(|a| a.name == agent_name) {
-            a.tasks = a.tasks.saturating_add(1);
-            if let Some(t) = a.tokens.as_mut() {
-                t.add_assign(&tok);
-            }
-        } else {
-            let mut busy = 0u64;
-            if let (Some(c), Some(d)) = (t_created, t_completed) {
-                let dur = d.saturating_sub(c);
-                if dur > 0 && dur <= 6 * 60 * 60 * 1000 {
-                    busy = (dur as u64) / 1000;
-                    snap.opencode_hours += dur as f64 / 3_600_000.0;
-                }
-            }
-            snap.agents.push(AgentRow {
-                source: Source::OpenCode,
-                name: agent_name,
-                busy_secs: busy,
-                waiting_secs: 0,
-                tasks: 1,
-                tokens: Some(tok),
             });
         }
     }
@@ -645,7 +658,8 @@ mod tests {
         let conn = mem_v2();
         let mut snaps = [StatsSnapshot::default()];
         let mut ids = HashMap::new();
-        aggregate_v2(&conn, &mut snaps, &jiff::tz::TimeZone::UTC, 0, 0, 10_000, &mut ids).unwrap();
+        aggregate_v2(&conn, &mut snaps, &jiff::tz::TimeZone::UTC, (0, 0, 10_000), None, &mut ids)
+            .unwrap();
         let snap = &snaps[0];
         assert_eq!(snap.sessions, 1);
         assert_eq!(snap.steps, 2);
@@ -660,11 +674,36 @@ mod tests {
         let conn = mem_v2();
         let mut snaps = [StatsSnapshot::default(), StatsSnapshot::default()];
         let mut ids = HashMap::new();
-        aggregate_v2(&conn, &mut snaps, &jiff::tz::TimeZone::UTC, 1200, 0, 10_000, &mut ids)
+        aggregate_v2(&conn, &mut snaps, &jiff::tz::TimeZone::UTC, (1200, 0, 10_000), None, &mut ids)
             .unwrap();
         assert_eq!((snaps[0].steps, snaps[0].tokens.input), (1, 20));
         assert_eq!((snaps[1].steps, snaps[1].tokens.input), (1, 10));
         assert_eq!((snaps[0].sessions, snaps[1].sessions), (0, 1));
+    }
+
+    #[test]
+    fn agent_filter_limits_everything_but_the_agents_table() {
+        let conn = mem_v2();
+        let tz = jiff::tz::TimeZone::UTC;
+        let run = |name: &str| {
+            let f = AgentFilter { source: Source::OpenCode, name: name.into() };
+            let mut snaps = [StatsSnapshot::default()];
+            aggregate_v2(&conn, &mut snaps, &tz, (0, 0, 10_000), Some(&f), &mut HashMap::new())
+                .unwrap();
+            let [snap] = snaps;
+            snap
+        };
+        let build = run("build");
+        assert_eq!((build.sessions, build.steps, build.tokens.input), (1, 2, 30));
+        assert_eq!(build.days.len(), 1);
+        assert!(build.activity.iter().flatten().sum::<u32>() > 0);
+        let plan = run("plan");
+        assert_eq!((plan.sessions, plan.steps, plan.tokens.input), (0, 0, 0));
+        assert!(plan.models.is_empty() && plan.days.is_empty());
+        assert_eq!(plan.activity.iter().flatten().sum::<u32>(), 0);
+        // The AGENTS table still lists "build" so the user can pick another row.
+        assert_eq!(plan.agents.len(), 1);
+        assert_eq!(plan.agents[0].name, "build");
     }
 
     #[test]

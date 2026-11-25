@@ -8,6 +8,7 @@ mod format;
 mod loader;
 mod opencode;
 mod panel;
+mod tables;
 
 pub use ankar::AnkarStatsStore;
 pub use loader::StatsRange;
@@ -79,6 +80,20 @@ pub enum Source {
     Ankar,
 }
 
+/// Page-wide filter: one row of the AGENTS table (a name alone is ambiguous across sources).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AgentFilter {
+    pub source: Source,
+    pub name: String,
+}
+
+impl AgentFilter {
+    /// True when no filter is set or it names this agent.
+    pub fn allows(filter: Option<&AgentFilter>, source: Source, name: &str) -> bool {
+        filter.is_none_or(|f| f.source == source && f.name == name)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct AgentRow {
     pub source: Source,
@@ -128,6 +143,8 @@ pub struct StatsSnapshot {
     pub warnings: Vec<String>,
     pub computed_at: SystemTime,
     pub range_label: String,
+    /// Agent every number except the AGENTS table was limited to.
+    pub filter: Option<AgentFilter>,
 }
 
 impl Default for StatsSnapshot {
@@ -157,6 +174,7 @@ impl Default for StatsSnapshot {
             warnings: Vec::new(),
             computed_at: SystemTime::UNIX_EPOCH,
             range_label: String::new(),
+            filter: None,
         }
     }
 }

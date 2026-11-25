@@ -68,7 +68,7 @@ UI frame     -> TerminalView::show -> session.resize -> session.sync (snapshot) 
   pane (`files::pane_split`): the file viewer or the changes pane (`changes.rs`).
 - `changes::GitWatch` (owned by the app) follows the active tab's project key and feeds the
   footer, the tab-bar button and the changes pane.
-- Right pane slot (`pane_tab`): viewer, changes or stats panel (`StatsPanel::draw_pane`).
+- Right pane slot (`pane_tab`): viewer, changes or stats panel (`StatsPanel::draw_pane`); `stats/charts.rs` and `stats/tables.rs` draw its sections.
 - Overlays: palette, inbox panel, zoom toast, colour check, 1 px window outline.
 
 ## Persistence and files on disk

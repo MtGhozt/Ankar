@@ -1,6 +1,6 @@
 //! cursor-agent local chats: meta.json timestamps only (no store.db, no auth).
 
-use super::{window_idx, AgentRow, DayBucket, Source, StatsSnapshot};
+use super::{window_idx, AgentFilter, AgentRow, DayBucket, Source, StatsSnapshot};
 use std::fs;
 use std::path::PathBuf;
 
@@ -33,7 +33,9 @@ pub fn load_into(
     split_ms: i64,
     since_ms: i64,
     until_ms: i64,
+    filter: Option<&AgentFilter>,
 ) {
+    let keep = AgentFilter::allows(filter, Source::CursorAgent, AGENT_NAME);
     let Some(root) = chats_root() else {
         snaps[0]
             .warnings
@@ -99,12 +101,15 @@ pub fn load_into(
             let i = window_idx(split_ms, created, snaps.len());
             let acc = &mut accs[i];
             acc.chats = acc.chats.saturating_add(1);
-            bump_activity(&mut snaps[i].activity, tz, created);
 
             let updated = updated.unwrap_or(created).max(created);
             let dur_ms = (updated - created).clamp(0, 6 * 60 * 60 * 1000) as u64;
             let secs = dur_ms / 1000;
             acc.busy_secs = acc.busy_secs.saturating_add(secs);
+            if !keep {
+                continue;
+            }
+            bump_activity(&mut snaps[i].activity, tz, created);
 
             let day = local_day(tz, created);
             let d = acc.days.entry(day.clone()).or_insert_with(|| DayBucket {
@@ -117,22 +122,28 @@ pub fn load_into(
     }
 
     for (snap, acc) in snaps.iter_mut().zip(accs) {
-        finish(snap, acc);
+        finish(snap, acc, keep);
     }
 }
 
-fn finish(snap: &mut StatsSnapshot, acc: Acc) {
+/// The name of the one agent this source reports.
+const AGENT_NAME: &str = "cursor-agent";
+
+/// The AGENTS row is always added; sessions, hours and days only when `keep` (filter).
+fn finish(snap: &mut StatsSnapshot, acc: Acc, keep: bool) {
     let Acc {
         chats,
         busy_secs,
         days,
     } = acc;
-    snap.sessions = snap.sessions.saturating_add(chats);
-    snap.cursor_hours = busy_secs as f64 / 3600.0;
+    if keep {
+        snap.sessions = snap.sessions.saturating_add(chats);
+        snap.cursor_hours = busy_secs as f64 / 3600.0;
+    }
 
     snap.agents.push(AgentRow {
         source: Source::CursorAgent,
-        name: "cursor-agent".into(),
+        name: AGENT_NAME.into(),
         busy_secs,
         waiting_secs: 0,
         tasks: chats,

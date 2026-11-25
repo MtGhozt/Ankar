@@ -703,7 +703,7 @@ impl eframe::App for AnkarApp {
                     ui.painter().vline(divider.center().x, divider.y_range(), Stroke::new(1.0, color));
                 }
                 if self.stats.open {
-                    if self.stats.draw_pane(ui, viewer) {
+                    if self.stats.draw_pane(ui, viewer, &self.config, &mut self.logos) {
                         self.pane_tab = None;
                     }
                 } else if self.changes.open {

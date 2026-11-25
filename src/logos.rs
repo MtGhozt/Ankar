@@ -156,7 +156,21 @@ pub fn agent_visual(tab: &Tab, config: &Config) -> (Icon, Color32, Option<&'stat
     let name = tab.shown_name().to_lowercase();
     let cmd = tab.command.as_deref().unwrap_or("").to_lowercase();
     let hay = format!("{name} {cmd} {}", tab.profile_id);
+    visual_for(&name, &hay, tab.command.is_some() || tab.detected.is_some(), config)
+}
 
+/// `agent_visual` for a bare agent name (stats rows have no tab).
+pub fn agent_visual_named(name: &str, config: &Config) -> (Icon, Color32, Option<&'static str>) {
+    let name = name.to_lowercase();
+    visual_for(&name, &name, true, config)
+}
+
+fn visual_for(
+    name: &str,
+    hay: &str,
+    has_command: bool,
+    config: &Config,
+) -> (Icon, Color32, Option<&'static str>) {
     for launcher in &config.launchers {
         let ln = launcher.name.to_lowercase();
         if hay.contains(&ln) || name == ln {
@@ -188,7 +202,7 @@ pub fn agent_visual(tab: &Tab, config: &Config) -> (Icon, Color32, Option<&'stat
     if hay.contains("copilot") {
         return (Icon::Bot, ui_theme::TEXT, Some("copilot"));
     }
-    if tab.command.is_some() || tab.detected.is_some() {
+    if has_command {
         return (Icon::Bot, ui_theme::TEXT_MUTED, None);
     }
     (Icon::Terminal, ui_theme::TEXT_MUTED, None)

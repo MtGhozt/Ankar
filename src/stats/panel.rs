@@ -3,7 +3,9 @@
 use super::charts;
 use super::format::{format_hours_short, format_pct_delta, format_tokens, format_with_commas};
 use super::loader::{StatsLoader, StatsRange};
-use super::{Source, StatsSnapshot};
+use super::{tables, AgentFilter, StatsSnapshot};
+use crate::config::Config;
+use crate::logos::LogoAtlas;
 use egui::{
     Align2, Color32, CornerRadius, FontId, Frame, Margin, Rect, RichText, Sense, Stroke,
     Ui, Vec2,
@@ -14,7 +16,7 @@ const BG: Color32 = Color32::from_rgb(0x00, 0x00, 0x00);
 const CARD_BG: Color32 = Color32::from_rgb(0x0C, 0x0C, 0x0C);
 pub(super) const CARD_BORDER: Color32 = Color32::from_rgb(0x11, 0x11, 0x11);
 pub(super) const MUTED: Color32 = Color32::from_rgb(0x83, 0x83, 0x83);
-const TEXT: Color32 = Color32::from_rgb(0xE7, 0xE7, 0xE7);
+pub(super) const TEXT: Color32 = Color32::from_rgb(0xE7, 0xE7, 0xE7);
 const SEG_BG: Color32 = Color32::from_rgb(0x10, 0x10, 0x10);
 const SEG_ACTIVE: Color32 = Color32::from_rgb(0x24, 0x24, 0x24);
 const ESC_BG: Color32 = Color32::from_rgb(0x0E, 0x0E, 0x0E);
@@ -26,18 +28,12 @@ const BADGE_NEG_BG: Color32 = Color32::from_rgb(0x2A, 0x0F, 0x0F);
 const SPARK_BAR: Color32 = Color32::from_rgb(0x3A, 0x3A, 0x3A);
 pub(super) const BAR_IN: Color32 = Color32::from_rgb(0x3E, 0x3E, 0x3E);
 pub(super) const BAR_OUT: Color32 = Color32::from_rgb(0x4A, 0x9F, 0xFF);
-const PROVIDER_ANTHROPIC: Color32 = Color32::from_rgb(0xBB, 0x5E, 0x4C);
-const PROVIDER_GOOGLE: Color32 = Color32::from_rgb(0x41, 0x78, 0xD3);
-const PROVIDER_OPENAI: Color32 = Color32::from_rgb(0x30, 0x98, 0x7F);
-const PROVIDER_XAI: Color32 = Color32::from_rgb(0x9A, 0x9A, 0x9A);
-const PROVIDER_OTHER: Color32 = Color32::from_rgb(0x5A, 0x5A, 0x5A);
-
 pub struct StatsPanel {
     pub open: bool,
     pub range: StatsRange,
     loader: StatsLoader,
     snapshot: Option<StatsSnapshot>,
-    filter_agent: Option<String>,
+    filter_agent: Option<AgentFilter>,
     /// Opened this frame: the app moves the pane to the active tab and closes the other panes.
     pub just_opened: bool,
     /// Last click landed in the pane: Esc closes it instead of reaching the terminal.
@@ -64,7 +60,7 @@ impl StatsPanel {
             self.open = true;
             self.just_opened = true;
             self.focused = true;
-            self.loader.request(self.range, false);
+            self.loader.request(self.range, None, false);
         }
     }
 
@@ -81,6 +77,7 @@ impl StatsPanel {
     /// Esc: clears the agent filter first, else closes. Returns true when it closed.
     pub fn esc(&mut self) -> bool {
         if self.filter_agent.take().is_some() {
+            self.loader.request(self.range, None, false);
             return false;
         }
         self.close();
@@ -88,7 +85,13 @@ impl StatsPanel {
     }
 
     /// Draws the pane into `rect`. Returns true when the user closed it (`esc` chip).
-    pub fn draw_pane(&mut self, ui: &mut Ui, rect: Rect) -> bool {
+    pub fn draw_pane(
+        &mut self,
+        ui: &mut Ui,
+        rect: Rect,
+        config: &Config,
+        logos: &mut LogoAtlas,
+    ) -> bool {
         if !self.open {
             return false;
         }
@@ -121,7 +124,7 @@ impl StatsPanel {
             .id_salt("stats_page")
             .auto_shrink([false, false])
             .show(&mut inner, |ui| {
-                close = self.draw_contents(ui);
+                close = self.draw_contents(ui, config, logos);
             });
         if close {
             self.close();
@@ -130,7 +133,7 @@ impl StatsPanel {
     }
 
     /// Page content. Returns true when the `esc` chip was clicked.
-    fn draw_contents(&mut self, ui: &mut Ui) -> bool {
+    fn draw_contents(&mut self, ui: &mut Ui, config: &Config, logos: &mut LogoAtlas) -> bool {
         let snap = self.snapshot.as_ref();
         let mut close = false;
 
@@ -193,7 +196,7 @@ impl StatsPanel {
                                     .interact(Sense::click());
                                 if resp.clicked() && self.range != r {
                                     self.range = r;
-                                    self.loader.request(r, false);
+                                    self.loader.request(r, self.filter_agent.clone(), false);
                                 }
                             }
                         });
@@ -207,7 +210,16 @@ impl StatsPanel {
                     .on_hover_text("Refresh")
                     .clicked()
                 {
-                    self.loader.request(self.range, true);
+                    self.loader.request(self.range, self.filter_agent.clone(), true);
+                }
+                if self.filter_agent.is_some() {
+                    ui.add_space(8.0);
+                    let clear = egui::Button::new(RichText::new("× clear filter").size(11.0).color(MUTED))
+                        .frame(false);
+                    if ui.add(clear).clicked() {
+                        self.filter_agent = None;
+                        self.loader.request(self.range, None, false);
+                    }
                 }
             });
         });
@@ -219,9 +231,9 @@ impl StatsPanel {
         draw_kpi_row(ui, snap, self.range, avail, narrow);
         ui.add_space(14.0);
 
-        let Some(snap) = snap else {
-            return close;
-        };
+        // No data yet: the same boxes, empty (a skeleton, never a blank page).
+        let skeleton = StatsSnapshot { range: self.range, ..StatsSnapshot::default() };
+        let snap = snap.unwrap_or(&skeleton);
 
         // Middle: tokens by day + heatmap
         boxes(
@@ -234,32 +246,31 @@ impl StatsPanel {
 
         ui.add_space(14.0);
 
-        // Bottom: models + agents
+        // Bottom: models + agents. A click on an agent row refilters the whole page.
+        let filter_before = self.filter_agent.clone();
+        let filter = &mut self.filter_agent;
         boxes(
             ui,
             narrow,
             180.0,
-            |ui| draw_models(ui, snap),
-            |ui| draw_agents(ui, snap, &mut self.filter_agent),
+            |ui| tables::draw_models(ui, snap),
+            |ui| tables::draw_agents(ui, snap, filter, config, logos),
         );
+        if self.filter_agent != filter_before {
+            self.loader.request(self.range, self.filter_agent.clone(), false);
+        }
 
         ui.add_space(8.0);
         for w in &snap.warnings {
             ui.label(RichText::new(w).size(11.0).color(MUTED));
         }
-        let ago = snap
-            .computed_at
-            .elapsed()
-            .ok()
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
+        let ago = snap.computed_at.elapsed().map_or(0, |d| d.as_secs());
         ui.label(
-            RichText::new(format!(
-                "Updated {ago}s ago · Everything is read locally. Ankar sends nothing anywhere."
-            ))
-            .size(11.0)
-            .color(MUTED),
-        );
+            RichText::new("Everything is read locally. Ankar sends nothing anywhere.")
+                .size(11.0)
+                .color(MUTED),
+        )
+        .on_hover_text(format!("Updated {ago}s ago"));
         ui.add_space(24.0);
         close
     }
@@ -355,10 +366,11 @@ fn draw_metric(ui: &mut Ui, snap: Option<&StatsSnapshot>, range: StatsRange, i: 
                 format!("{:.1} h", snap.agent_hours)
             },
             snap.delta_hours_pct,
-            format!(
-                "up to {} at once",
-                snap.agents.len().max(1)
-            ),
+            // Concurrency is not tracked, so say only what is known.
+            match snap.agents.len() {
+                1 => "1 agent".to_string(),
+                n => format!("{n} agents"),
+            },
             format!(
                 "Ankar busy {} · OpenCode {:.1} h · cursor-agent {:.1} h",
                 format_hours_short(snap.ankar_busy_secs),
@@ -419,130 +431,6 @@ fn boxed(ui: &mut Ui, outer_w: f32, min_h: f32, add: impl FnOnce(&mut Ui)) {
             ui.set_max_width(w);
             add(ui);
         });
-}
-
-fn draw_agents(ui: &mut Ui, snap: &StatsSnapshot, filter_agent: &mut Option<String>) {
-    {
-        ui.horizontal(|ui| {
-            ui.label(
-                RichText::new("AGENTS")
-                    .size(11.0)
-                    .color(MUTED)
-                    .strong(),
-            );
-            ui.label(
-                RichText::new("click one to see only its usage")
-                    .size(11.0)
-                    .color(MUTED),
-            );
-        });
-        ui.add_space(6.0);
-        ui.horizontal(|ui| {
-            ui.add_space((ui.available_width() - 180.0).max(0.0));
-            ui.label(RichText::new("input").size(10.0).color(MUTED));
-            ui.add_space(28.0);
-            ui.label(RichText::new("output").size(10.0).color(MUTED));
-            ui.add_space(28.0);
-            ui.label(RichText::new("time").size(10.0).color(MUTED));
-        });
-
-        let max_tok = snap
-            .agents
-            .iter()
-            .map(|a| a.tokens.as_ref().map(|t| t.total()).unwrap_or(a.busy_secs))
-            .max()
-            .unwrap_or(1)
-            .max(1);
-
-        {
-            {
-                for a in &snap.agents {
-                    if let Some(f) = filter_agent.as_ref() {
-                        if &a.name != f {
-                            continue;
-                        }
-                    }
-                    let row = ui.horizontal(|ui| {
-                        let color = match a.source {
-                            Source::OpenCode => PROVIDER_ANTHROPIC,
-                            Source::CursorAgent => PROVIDER_OPENAI,
-                            Source::Ankar => PROVIDER_GOOGLE,
-                        };
-                        let (icon_r, _) =
-                            ui.allocate_exact_size(Vec2::splat(14.0), Sense::hover());
-                        ui.painter()
-                            .circle_filled(icon_r.center(), 5.0, color);
-                        let name = truncate(&a.name, 22);
-                        ui.label(RichText::new(name).size(12.0).color(TEXT));
-                        let bar_w = ui.available_width() - 200.0;
-                        let (bar_r, _) =
-                            ui.allocate_exact_size(Vec2::new(bar_w.max(40.0), 8.0), Sense::hover());
-                        ui.painter().rect_filled(
-                            bar_r,
-                            CornerRadius::same(2),
-                            Color32::from_rgb(0x18, 0x18, 0x18),
-                        );
-                        let busy_w = a.busy_secs as f32;
-                        let wait_w = a.waiting_secs as f32;
-                        let total_t = (busy_w + wait_w).max(1.0);
-                        let scale = if a.tokens.as_ref().map(|t| t.total()).unwrap_or(0) > 0 {
-                            a.tokens.as_ref().map(|t| t.total()).unwrap_or(0) as f32 / max_tok as f32
-                        } else {
-                            (a.busy_secs as f32 / max_tok as f32).clamp(0.0, 1.0)
-                        }
-                        .clamp(0.05, 1.0);
-                        let busy_frac = (busy_w / total_t) * scale;
-                        let wait_frac = (wait_w / total_t) * scale;
-                        let busy_r = Rect::from_min_size(
-                            bar_r.min,
-                            Vec2::new(bar_r.width() * busy_frac, bar_r.height()),
-                        );
-                        let wait_r = Rect::from_min_size(
-                            egui::pos2(busy_r.right(), bar_r.top()),
-                            Vec2::new(bar_r.width() * wait_frac, bar_r.height()),
-                        );
-                        ui.painter().rect_filled(busy_r, CornerRadius::same(2), color);
-                        ui.painter().rect_filled(
-                            wait_r,
-                            CornerRadius::same(2),
-                            Color32::from_rgb(0x3A, 0x3A, 0x3A),
-                        );
-
-                        let tin = a
-                            .tokens
-                            .as_ref()
-                            .map(|t| format_tokens(t.input))
-                            .unwrap_or_else(|| "—".into());
-                        let tout = a
-                            .tokens
-                            .as_ref()
-                            .map(|t| format_tokens(t.output))
-                            .unwrap_or_else(|| "—".into());
-                        ui.label(RichText::new(tin).size(11.0).color(MUTED));
-                        ui.add_space(12.0);
-                        ui.label(RichText::new(tout).size(11.0).color(MUTED));
-                        ui.add_space(12.0);
-                        ui.label(
-                            RichText::new(format_hours_short(a.busy_secs))
-                                .size(11.0)
-                                .color(MUTED),
-                        );
-                    });
-                    let resp = row.response.interact(Sense::click());
-                    if resp.clicked() {
-                        if filter_agent.as_deref() == Some(a.name.as_str()) {
-                            *filter_agent = None;
-                        } else {
-                            *filter_agent = Some(a.name.clone());
-                        }
-                    }
-                    if a.tokens.is_none() {
-                        resp.on_hover_text("cursor-agent does not store tokens locally");
-                    }
-                }
-            }
-        }
-    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -710,146 +598,6 @@ fn cache_subtext(snap: &StatsSnapshot) -> String {
     }
     let pct = (snap.tokens.cache_read as f64 / total as f64) * 100.0;
     format!("{:.0}% from cache", pct)
-}
-
-fn draw_models(ui: &mut Ui, snap: &StatsSnapshot) {
-    ui.label(
-        RichText::new("MODELS")
-            .size(11.0)
-            .color(MUTED)
-            .strong(),
-    );
-    ui.add_space(6.0);
-
-    // Provider stacked bar
-    let mut by_prov: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
-    for m in &snap.models {
-        *by_prov.entry(m.provider.clone()).or_default() += m.tokens.total();
-    }
-    let total: u64 = by_prov.values().sum::<u64>().max(1);
-    let (bar, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 10.0), Sense::hover());
-    let mut x = bar.left();
-    let mut parts: Vec<(String, u64)> = by_prov.into_iter().collect();
-    parts.sort_by_key(|a| std::cmp::Reverse(a.1));
-    for (prov, n) in &parts {
-        let w = (*n as f32 / total as f32) * bar.width();
-        let r = Rect::from_min_size(egui::pos2(x, bar.top()), Vec2::new(w.max(1.0), bar.height()));
-        ui.painter()
-            .rect_filled(r, CornerRadius::ZERO, provider_color(prov));
-        x += w;
-    }
-    ui.add_space(4.0);
-    ui.horizontal(|ui| {
-        for (prov, n) in parts.iter().take(4) {
-            let pct = (*n as f64 / total as f64) * 100.0;
-            ui.colored_label(provider_color(prov), "●");
-            ui.label(
-                RichText::new(format!("{prov} {:.0}%", pct))
-                    .size(11.0)
-                    .color(MUTED),
-            );
-            ui.add_space(8.0);
-        }
-    });
-
-    ui.add_space(8.0);
-    ui.horizontal(|ui| {
-        ui.add_space((ui.available_width() - 200.0).max(0.0));
-        ui.label(RichText::new("input").size(10.0).color(MUTED));
-        ui.add_space(28.0);
-        ui.label(RichText::new("output").size(10.0).color(MUTED));
-        ui.add_space(28.0);
-        ui.label(RichText::new("tasks").size(10.0).color(MUTED));
-    });
-
-    let max_tok = snap
-        .models
-        .iter()
-        .map(|m| m.tokens.total())
-        .max()
-        .unwrap_or(1)
-        .max(1);
-
-    {
-        {
-            for m in &snap.models {
-                ui.horizontal(|ui| {
-                    let (dot, _) = ui.allocate_exact_size(Vec2::splat(12.0), Sense::hover());
-                    ui.painter().circle_filled(
-                        dot.center(),
-                        4.0,
-                        provider_color(&m.provider),
-                    );
-                    let label = if m.provider == "other" {
-                        m.model.clone()
-                    } else {
-                        truncate(&m.model, 28)
-                    };
-                    ui.label(RichText::new(label).size(12.0).color(TEXT));
-                    let bar_w = ui.available_width() - 200.0;
-                    let (bar_r, _) =
-                        ui.allocate_exact_size(Vec2::new(bar_w.max(40.0), 8.0), Sense::hover());
-                    ui.painter().rect_filled(
-                        bar_r,
-                        CornerRadius::same(2),
-                        Color32::from_rgb(0x18, 0x18, 0x18),
-                    );
-                    let frac = m.tokens.total() as f32 / max_tok as f32;
-                    let fill = Rect::from_min_size(
-                        bar_r.min,
-                        Vec2::new(bar_r.width() * frac, bar_r.height()),
-                    );
-                    ui.painter().rect_filled(
-                        fill,
-                        CornerRadius::same(2),
-                        provider_color(&m.provider),
-                    );
-                    ui.label(
-                        RichText::new(format_tokens(m.tokens.input))
-                            .size(11.0)
-                            .color(MUTED),
-                    );
-                    ui.add_space(12.0);
-                    ui.label(
-                        RichText::new(format_tokens(m.tokens.output))
-                            .size(11.0)
-                            .color(MUTED),
-                    );
-                    ui.add_space(12.0);
-                    ui.label(
-                        RichText::new(format_with_commas(m.steps))
-                            .size(11.0)
-                            .color(MUTED),
-                    );
-                });
-            }
-        }
-    }
-}
-
-fn provider_color(p: &str) -> Color32 {
-    let l = p.to_lowercase();
-    if l.contains("anthropic") || l.contains("claude") {
-        PROVIDER_ANTHROPIC
-    } else if l.contains("google") || l.contains("gemini") {
-        PROVIDER_GOOGLE
-    } else if l.contains("openai") || l.contains("gpt") {
-        PROVIDER_OPENAI
-    } else if l.contains("xai") || l.contains("grok") {
-        PROVIDER_XAI
-    } else {
-        PROVIDER_OTHER
-    }
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    let count = s.chars().count();
-    if count <= max {
-        return s.to_string();
-    }
-    let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
-    out.push('…');
-    out
 }
 
 pub(super) fn short_day(ymd: &str) -> String {
