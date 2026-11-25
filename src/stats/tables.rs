@@ -13,6 +13,14 @@ const PROVIDER_GOOGLE: Color32 = Color32::from_rgb(0x41, 0x78, 0xD3);
 const PROVIDER_OPENAI: Color32 = Color32::from_rgb(0x30, 0x98, 0x7F);
 const PROVIDER_XAI: Color32 = Color32::from_rgb(0x9A, 0x9A, 0x9A);
 const PROVIDER_OTHER: Color32 = Color32::from_rgb(0x5A, 0x5A, 0x5A);
+const PROVIDER_DEEPSEEK: Color32 = Color32::from_rgb(0x3D, 0x6B, 0x8E);
+const PROVIDER_MOONSHOT: Color32 = Color32::from_rgb(0x6B, 0x5B, 0x8E);
+const PROVIDER_QWEN: Color32 = Color32::from_rgb(0x8E, 0x6B, 0x3D);
+const PROVIDER_MINIMAX: Color32 = Color32::from_rgb(0x5E, 0x7A, 0x6B);
+const PROVIDER_MISTRAL: Color32 = Color32::from_rgb(0x7A, 0x5E, 0x5E);
+const PROVIDER_META: Color32 = Color32::from_rgb(0x4A, 0x6B, 0x9A);
+const PROVIDER_ZAI: Color32 = Color32::from_rgb(0x6E, 0x6E, 0x55);
+const PROVIDER_ZEN_FREE: Color32 = Color32::from_rgb(0x55, 0x6E, 0x6E);
 const SEP: Color32 = Color32::from_rgb(0x19, 0x19, 0x19);
 const HOVER: Color32 = Color32::from_rgb(0x14, 0x14, 0x14);
 const SELECTED: Color32 = Color32::from_rgb(0x1A, 0x1A, 0x1A);
@@ -28,6 +36,14 @@ enum Family {
     Google,
     OpenAi,
     Xai,
+    DeepSeek,
+    Moonshot,
+    Qwen,
+    MiniMax,
+    Mistral,
+    Meta,
+    Zai,
+    OpenCodeZenFree,
     Other,
 }
 
@@ -38,6 +54,14 @@ impl Family {
             Self::Google => "Google",
             Self::OpenAi => "OpenAI",
             Self::Xai => "xAI",
+            Self::DeepSeek => "DeepSeek",
+            Self::Moonshot => "Moonshot",
+            Self::Qwen => "Qwen",
+            Self::MiniMax => "MiniMax",
+            Self::Mistral => "Mistral",
+            Self::Meta => "Meta",
+            Self::Zai => "Z.ai",
+            Self::OpenCodeZenFree => "OpenCode Zen free",
             Self::Other => "Other",
         }
     }
@@ -48,26 +72,93 @@ impl Family {
             Self::Google => PROVIDER_GOOGLE,
             Self::OpenAi => PROVIDER_OPENAI,
             Self::Xai => PROVIDER_XAI,
+            Self::DeepSeek => PROVIDER_DEEPSEEK,
+            Self::Moonshot => PROVIDER_MOONSHOT,
+            Self::Qwen => PROVIDER_QWEN,
+            Self::MiniMax => PROVIDER_MINIMAX,
+            Self::Mistral => PROVIDER_MISTRAL,
+            Self::Meta => PROVIDER_META,
+            Self::Zai => PROVIDER_ZAI,
+            Self::OpenCodeZenFree => PROVIDER_ZEN_FREE,
             Self::Other => PROVIDER_OTHER,
         }
     }
 }
 
+/// Prefix or separated token (`-`, `_`, `/`) match — not bare substring for short ids.
+fn id_has_token(id: &str, token: &str) -> bool {
+    if id == token {
+        return true;
+    }
+    if id.starts_with(&format!("{token}-")) || id.starts_with(&format!("{token}_")) {
+        return true;
+    }
+    id.split(&['/', '-', '_'][..]).any(|seg| seg == token)
+}
+
+fn provider_has_token(provider: &str, token: &str) -> bool {
+    if token.len() <= 3 {
+        id_has_token(provider, token)
+    } else {
+        provider.contains(token) || id_has_token(provider, token)
+    }
+}
+
+fn model_has_token(model: &str, token: &str) -> bool {
+    id_has_token(model, token)
+}
+
+fn openai_o_series(model: &str) -> bool {
+    ["o1", "o3", "o4"]
+        .iter()
+        .any(|p| model == *p || model.starts_with(&format!("{p}-")))
+}
+
+const FAMILY_TOKENS: &[(Family, &[&str])] = &[
+    (Family::Anthropic, &["anthropic", "claude"]),
+    (Family::OpenAi, &["openai", "gpt", "codex"]),
+    (Family::Google, &["google", "gemini"]),
+    (Family::Xai, &["xai", "grok"]),
+    (Family::DeepSeek, &["deepseek"]),
+    (Family::Moonshot, &["moonshot", "kimi"]),
+    (Family::Qwen, &["qwen"]),
+    (Family::MiniMax, &["minimax"]),
+    (Family::Mistral, &["mistral"]),
+    (Family::Meta, &["meta", "llama"]),
+    (Family::Zai, &["zai", "glm"]),
+];
+
+fn family_from_tokens<F>(hay: &str, has_token: F) -> Option<Family>
+where
+    F: Fn(&str, &str) -> bool,
+{
+    for (family, tokens) in FAMILY_TOKENS {
+        if tokens.iter().any(|t| has_token(hay, t)) {
+            return Some(*family);
+        }
+    }
+    None
+}
+
 /// Provider family from the provider id, falling back to hints in the model id
 /// (a router such as `openrouter` serves other companies' models).
 fn family_of(provider: &str, model: &str) -> Family {
-    let h = format!("{provider} {model}").to_lowercase();
-    if h.contains("anthropic") || h.contains("claude") {
-        Family::Anthropic
-    } else if h.contains("google") || h.contains("gemini") {
-        Family::Google
-    } else if h.contains("openai") || h.contains("gpt") || h.contains("codex") {
-        Family::OpenAi
-    } else if h.contains("xai") || h.contains("grok") {
-        Family::Xai
-    } else {
-        Family::Other
+    let p = provider.to_lowercase();
+    let m = model.to_lowercase();
+
+    if m.ends_with("-free") {
+        return Family::OpenCodeZenFree;
     }
+
+    if let Some(f) = family_from_tokens(&p, provider_has_token) {
+        return f;
+    }
+
+    if openai_o_series(&m) {
+        return Family::OpenAi;
+    }
+
+    family_from_tokens(&m, model_has_token).unwrap_or(Family::Other)
 }
 
 /// Models by tokens: the first `n` rows plus one summed `N more` row for the rest.
@@ -387,9 +478,13 @@ mod tests {
     fn families_come_from_the_provider_then_the_model() {
         assert_eq!(family_of("anthropic", "opus"), Family::Anthropic);
         assert_eq!(family_of("openrouter", "google/gemini-3"), Family::Google);
+        assert_eq!(family_of("openrouter", "gemini-2.5-flash"), Family::Google);
         assert_eq!(family_of("github-copilot", "gpt-5"), Family::OpenAi);
+        assert_eq!(family_of("openai", "x"), Family::OpenAi);
         assert_eq!(family_of("opencode", "grok-code"), Family::Xai);
-        assert_eq!(family_of("local", "llama"), Family::Other);
+        assert_eq!(family_of("local", "llama"), Family::Meta);
+        assert_eq!(family_of("opencode", "claude-sonnet-free"), Family::OpenCodeZenFree);
+        assert_eq!(family_of("unknown-vendor", "mystery-model"), Family::Other);
     }
 
     #[test]
