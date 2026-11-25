@@ -356,7 +356,7 @@ waiting_timeout_secs = {waiting_timeout_secs}
 # window and an agent (OpenCode) goes from working to idle after working for over 30 seconds.
 notifications = {notifications}
 
-# Terminal font size (px, Hack); rows are 1.2x the size. Ctrl+= / Ctrl+- / Ctrl+0 zoom.
+# Terminal font size (px, Hack). Row height is the font's own line box. Ctrl+= / Ctrl+- / Ctrl+0 zoom.
 font_size = {font_size}
 
 # One-time migrations already applied (do not edit)

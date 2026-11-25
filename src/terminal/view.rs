@@ -33,7 +33,8 @@ impl TerminalView {
             ui.ctx().copy_text(text);
         }
 
-        // Hack at the configured size; cell metrics scale from the measured reference.
+        // Hack at the configured size. Cell size is the font's advance and line box.
+        ui_theme::sync_cell_metrics(ui.ctx());
         let font_id = FontId::new(ui_theme::term_font_size(), FONT_FAMILY);
         let metrics = CellMetrics {
             width: ui_theme::cell_w(),
@@ -43,7 +44,10 @@ impl TerminalView {
         match session.resize(content.width(), content.height(), metrics) {
             ResizeState::Idle => {}
             ResizeState::Pending => ui.ctx().request_repaint_after(DEBOUNCE),
-            ResizeState::Applied => ui.ctx().request_repaint(),
+            ResizeState::Applied => {
+                ui_theme::log_cell_metrics(Some(session.grid()));
+                ui.ctx().request_repaint();
+            }
         }
 
         // Only take focus on click/drag — never every frame, or sidebar search
@@ -503,6 +507,7 @@ fn paint_grid(
             &mut shapes,
             origin.x,
             y,
+            row_h,
             cells,
             selection,
             &colors,
@@ -1153,6 +1158,7 @@ fn paint_row_text(
     shapes: &mut Vec<Shape>,
     origin_x: f32,
     y: f32,
+    row_h: f32,
     cells: &[&VisibleCell],
     selection: Option<SelectionRange>,
     colors: &super::theme::TermColors,
@@ -1218,7 +1224,7 @@ fn paint_row_text(
         );
 
         let galley = ui.fonts_mut(|f| f.layout_job(job));
-        let top = y + ui_theme::glyph_top_offset(ui_theme::cell_h(), galley.size().y);
+        let top = y + ui_theme::glyph_top_offset(row_h, galley.size().y);
         shapes.push(Shape::galley(Pos2::new(run_x, top), galley, fg0));
     }
 }

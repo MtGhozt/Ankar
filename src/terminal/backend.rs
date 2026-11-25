@@ -455,6 +455,10 @@ impl TerminalSession {
     /// alacritty_terminal only reflows the primary grid (`grid.resize(!ALT_SCREEN, ..)`), so on
     /// the alternate screen a resize just changes the dimensions — no rewrapped rows, no old
     /// frames pushed into scrollback.
+    pub fn grid(&self) -> (u16, u16) {
+        (self.size.num_cols, self.size.num_lines)
+    }
+
     pub fn resize(&mut self, pixel_w: f32, pixel_h: f32, metrics: CellMetrics) -> ResizeState {
         if super::resize::layout_held() {
             return ResizeState::from_pending(self.debounce.is_pending());

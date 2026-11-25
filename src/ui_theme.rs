@@ -6,6 +6,7 @@ use egui::{
 };
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU32, Ordering};
 #[cfg(debug_assertions)]
 use std::sync::atomic::AtomicBool;
@@ -79,11 +80,13 @@ pub const SIZE_TITLE: f32 = SIZE_UI;
 pub const SIZE_SUB: f32 = SIZE_UI_SMALL;
 pub const SIZE_KBD: f32 = SIZE_UI_SMALL;
 
-/// Reference terminal size (Hack) and its cell (logical px); `cell_size` scales them.
+/// Size the terminal starts at, before config is applied. Hack's em.
 pub const TERM_FONT_SIZE: f32 = 14.33;
+/// Box-drawing tests pass these as a cell; the live grid uses [`cell_size_px`].
+#[cfg(test)]
 pub const CELL_W: f32 = 8.627;
 #[cfg(test)]
-pub const CELL_H: f32 = TERM_FONT_SIZE * LINE_HEIGHT;
+pub const CELL_H: f32 = 17.196;
 /// Default `font_size` in config.toml and the zoom limits.
 pub const DEFAULT_TERM_FONT: f32 = 12.0;
 pub const MIN_TERM_FONT: f32 = 8.0;
@@ -92,9 +95,22 @@ pub const MAX_TERM_FONT: f32 = 24.0;
 pub const PANE_PAD_X: f32 = 12.0;
 pub const PANE_PAD_Y: f32 = 12.0;
 
+/// Hack's hhea metrics (USE_TYPO_METRICS is off, so egui uses these). Design units.
+const HACK_UPEM: f32 = 2048.0;
+const HACK_ADVANCE: f32 = 1233.0;
+const HACK_ASCENT: f32 = 1901.0;
+const HACK_DESCENT: f32 = 483.0;
+
 /// Terminal size in use, as f32 bits. Set once per frame from the config; the row/column
 /// helpers below read it so every painter and hit test agrees on the grid.
 static TERM_FONT_BITS: AtomicU32 = AtomicU32::new(TERM_FONT_SIZE.to_bits());
+/// Glyph advance, ascent, descent, line gap, in logical px at the current font size.
+static ADVANCE_BITS: AtomicU32 = AtomicU32::new((HACK_ADVANCE / HACK_UPEM * TERM_FONT_SIZE).to_bits());
+static ASCENT_BITS: AtomicU32 = AtomicU32::new((HACK_ASCENT / HACK_UPEM * TERM_FONT_SIZE).to_bits());
+static DESCENT_BITS: AtomicU32 = AtomicU32::new((HACK_DESCENT / HACK_UPEM * TERM_FONT_SIZE).to_bits());
+static GAP_BITS: AtomicU32 = AtomicU32::new(0.0f32.to_bits());
+static PPP_BITS: AtomicU32 = AtomicU32::new(1.0f32.to_bits());
+static DESIGN: OnceLock<DesignMetrics> = OnceLock::new();
 
 pub fn set_term_font_size(size: f32) {
     TERM_FONT_BITS.store(size.clamp(MIN_TERM_FONT, MAX_TERM_FONT).to_bits(), Ordering::Relaxed);
@@ -104,25 +120,287 @@ pub fn term_font_size() -> f32 {
     f32::from_bits(TERM_FONT_BITS.load(Ordering::Relaxed))
 }
 
-/// Row height per font size: Warp's line height (1.2), not the font's ascent+descent+gap.
-pub const LINE_HEIGHT: f32 = 1.2;
-
-/// Cell (width, height) for a terminal font size: Hack's advance (0.602 em) by `LINE_HEIGHT`.
-pub fn cell_size(font_size: f32) -> (f32, f32) {
-    (CELL_W / TERM_FONT_SIZE * font_size, font_size * LINE_HEIGHT)
+/// Vertical metrics of one face, in font design units. `descent` is positive.
+#[derive(Clone, Copy)]
+struct DesignMetrics {
+    units_per_em: f32,
+    advance: f32,
+    ascent: f32,
+    descent: f32,
+    line_gap: f32,
+    /// egui `FontTweak::scale` (1 for Hack).
+    tweak: f32,
 }
 
-/// How far below the row top a glyph line box of `line_h` starts, so it is centred in the row.
+/// Font line box at the size the terminal is drawing. All fields are logical px
+/// (egui points). `descent` is the distance below the baseline, so it is positive.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FontLineMetrics {
+    pub advance: f32,
+    pub ascent: f32,
+    pub descent: f32,
+    pub line_gap: f32,
+}
+
+/// Cell width and height in logical px.
+///
+/// `metrics` are already in points at the font size (egui does not put DPI into
+/// them). `dpi` (`pixels_per_point`) only snaps the line box onto a physical
+/// pixel; it is not a second scale. Width is the glyph advance, not ceiled.
+pub fn cell_size_px(metrics: FontLineMetrics, dpi: f32) -> (f32, f32) {
+    let dpi = if dpi.is_finite() && dpi > 0.0 { dpi } else { 1.0 };
+    let width = metrics.advance;
+    let line = metrics.ascent + metrics.descent + metrics.line_gap;
+    let height = (line * dpi).round().max(1.0) / dpi;
+    (width, height)
+}
+
+/// How far below the row top the glyph line box starts. Half of any leftover
+/// pixel (the line box rounded up to the pixel grid) so the baseline, one
+/// ascent below that top, stays centred in the filled row.
 pub fn glyph_top_offset(row_h: f32, line_h: f32) -> f32 {
     ((row_h - line_h) * 0.5).max(0.0)
 }
 
+fn load_bits(bits: &AtomicU32) -> f32 {
+    f32::from_bits(bits.load(Ordering::Relaxed))
+}
+
+fn store_bits(bits: &AtomicU32, value: f32) {
+    bits.store(value.to_bits(), Ordering::Relaxed);
+}
+
+fn font_line_metrics() -> FontLineMetrics {
+    FontLineMetrics {
+        advance: load_bits(&ADVANCE_BITS),
+        ascent: load_bits(&ASCENT_BITS),
+        descent: load_bits(&DESCENT_BITS),
+        line_gap: load_bits(&GAP_BITS),
+    }
+}
+
+fn pixels_per_point() -> f32 {
+    load_bits(&PPP_BITS)
+}
+
 pub fn cell_w() -> f32 {
-    cell_size(term_font_size()).0
+    cell_size_px(font_line_metrics(), pixels_per_point()).0
 }
 
 pub fn cell_h() -> f32 {
-    cell_size(term_font_size()).1
+    cell_size_px(font_line_metrics(), pixels_per_point()).1
+}
+
+/// Read the monospace face once and store its line box at the current font size.
+/// Advance comes from egui's glyph width, which is already in points.
+pub fn sync_cell_metrics(ctx: &Context) {
+    let ppp = ctx.pixels_per_point();
+    store_bits(&PPP_BITS, if ppp.is_finite() && ppp > 0.0 { ppp } else { 1.0 });
+    let design = *DESIGN.get_or_init(|| read_primary_mono(ctx));
+    let font_px = term_font_size();
+    // One scale: font size (and the face's tweak) over units-per-em. Not pixels_per_point.
+    let em = font_px * design.tweak / design.units_per_em;
+    let mut metrics = FontLineMetrics {
+        advance: design.advance * em,
+        ascent: design.ascent * em,
+        descent: design.descent * em,
+        line_gap: design.line_gap * em,
+    };
+    // `glyph_width` is in points (the face is asked at pixels_per_point 1). Do not multiply by dpi.
+    let font_id = FontId::new(font_px, FontFamily::Monospace);
+    let measured = ctx.fonts_mut(|fonts| fonts.glyph_width(&font_id, '0'));
+    if measured.is_finite()
+        && measured > 0.0
+        && (metrics.advance <= 0.0 || measured <= metrics.advance + 1.0)
+    {
+        metrics.advance = measured;
+    }
+    store_bits(&ADVANCE_BITS, metrics.advance);
+    store_bits(&ASCENT_BITS, metrics.ascent);
+    store_bits(&DESCENT_BITS, metrics.descent);
+    store_bits(&GAP_BITS, metrics.line_gap);
+}
+
+/// One line: font, DPI, the four font metrics, the cell, and the grid.
+/// `grid` is `None` at startup, before a pane has been laid out.
+pub fn log_cell_metrics(grid: Option<(u16, u16)>) {
+    let m = font_line_metrics();
+    let (w, h) = cell_size_px(m, pixels_per_point());
+    let grid = match grid {
+        Some((cols, rows)) => format!("{cols}x{rows}"),
+        None => "pending".to_owned(),
+    };
+    log::info!(
+        "cell metrics: font {:.2} px, dpi {:.3}, advance {:.3}, ascent {:.3}, descent {:.3}, line gap {:.3}, cell {:.3}x{:.3} px, grid {grid}",
+        term_font_size(),
+        pixels_per_point(),
+        m.advance,
+        m.ascent,
+        m.descent,
+        m.line_gap,
+        w,
+        h
+    );
+}
+
+fn hack_design() -> DesignMetrics {
+    DesignMetrics {
+        units_per_em: HACK_UPEM,
+        advance: HACK_ADVANCE,
+        ascent: HACK_ASCENT,
+        descent: HACK_DESCENT,
+        line_gap: 0.0,
+        tweak: 1.0,
+    }
+}
+
+fn read_primary_mono(ctx: &Context) -> DesignMetrics {
+    ctx.fonts(|fonts| {
+        let defs = fonts.definitions();
+        let Some(name) = defs
+            .families
+            .get(&FontFamily::Monospace)
+            .and_then(|names| names.first())
+        else {
+            return hack_design();
+        };
+        let Some(data) = defs.font_data.get(name) else {
+            return hack_design();
+        };
+        let mut design = read_design(data.bytes()).unwrap_or_else(hack_design);
+        let tweak = data.tweak.scale;
+        if tweak.is_finite() && tweak > 0.0 {
+            design.tweak = tweak;
+        }
+        design
+    })
+}
+
+fn read_design(data: &[u8]) -> Option<DesignMetrics> {
+    let head = table(data, b"head")?;
+    let hhea = table(data, b"hhea")?;
+    let upem = u16_at(head, 18)? as f32;
+    if upem <= 0.0 {
+        return None;
+    }
+    let (mut ascent, mut descent, mut gap) = hhea_line(hhea)?;
+    if let Some(os2) = table(data, b"OS/2") {
+        let use_typo = u16_at(os2, 62).unwrap_or(0) & 0x80 != 0;
+        if use_typo {
+            if let Some(typo) = typo_line(os2) {
+                (ascent, descent, gap) = typo;
+            }
+        } else if ascent == 0.0 && descent == 0.0 {
+            if let Some(typo) = typo_line(os2).filter(|&(a, d, _)| a != 0.0 || d != 0.0) {
+                (ascent, descent, gap) = typo;
+            } else if let Some(win) = win_line(os2) {
+                (ascent, descent, gap) = win;
+            }
+        }
+    }
+    let advance = glyph_advance(data, hhea, 0x30).or_else(|| u16_at(hhea, 10).map(|n| n as f32))?;
+    Some(DesignMetrics {
+        units_per_em: upem,
+        advance,
+        ascent,
+        descent,
+        line_gap: gap,
+        tweak: 1.0,
+    })
+}
+
+/// hhea ascender / descender / lineGap. Descender is stored signed; we return a positive depth.
+fn hhea_line(hhea: &[u8]) -> Option<(f32, f32, f32)> {
+    Some((
+        i16_at(hhea, 4)? as f32,
+        (i16_at(hhea, 6)? as f32).abs(),
+        i16_at(hhea, 8)? as f32,
+    ))
+}
+
+fn typo_line(os2: &[u8]) -> Option<(f32, f32, f32)> {
+    Some((
+        i16_at(os2, 68)? as f32,
+        (i16_at(os2, 70)? as f32).abs(),
+        i16_at(os2, 72)? as f32,
+    ))
+}
+
+fn win_line(os2: &[u8]) -> Option<(f32, f32, f32)> {
+    Some((u16_at(os2, 74)? as f32, u16_at(os2, 76)? as f32, 0.0))
+}
+
+fn glyph_advance(data: &[u8], hhea: &[u8], cp: u16) -> Option<f32> {
+    let cmap = table(data, b"cmap")?;
+    let nenc = u16_at(cmap, 2)? as usize;
+    let mut sub = None;
+    for i in 0..nenc {
+        let o = 4 + i * 8;
+        if u16_at(cmap, o)? == 3 && u16_at(cmap, o + 2)? == 1 {
+            sub = Some(u32_at(cmap, o + 4)? as usize);
+        }
+    }
+    let off = sub?;
+    if u16_at(cmap, off)? != 4 {
+        return None;
+    }
+    let segc = u16_at(cmap, off + 6)? as usize / 2;
+    let end = off + 14;
+    let start = end + 2 * segc + 2;
+    let delta = start + 2 * segc;
+    let range_off = delta + 2 * segc;
+    let mut gid = None;
+    for s in 0..segc {
+        let (e, st) = (u16_at(cmap, end + 2 * s)?, u16_at(cmap, start + 2 * s)?);
+        if (st..=e).contains(&cp) {
+            let ro = u16_at(cmap, range_off + 2 * s)? as usize;
+            gid = Some(if ro == 0 {
+                (cp as i32 + i16_at(cmap, delta + 2 * s)? as i32) as u16
+            } else {
+                u16_at(cmap, range_off + 2 * s + ro + 2 * (cp - st) as usize)?
+            });
+            break;
+        }
+    }
+    let gid = gid? as usize;
+    let hmtx = table(data, b"hmtx")?;
+    let num = u16_at(hhea, 34)? as usize;
+    let at = if gid < num {
+        gid * 4
+    } else if num > 0 {
+        (num - 1) * 4
+    } else {
+        return None;
+    };
+    Some(u16_at(hmtx, at)? as f32)
+}
+
+fn table<'a>(data: &'a [u8], tag: &[u8; 4]) -> Option<&'a [u8]> {
+    let n = u16_at(data, 4)? as usize;
+    if data.len() < 12 + n * 16 {
+        return None;
+    }
+    for i in 0..n {
+        let o = 12 + i * 16;
+        if data.get(o..o + 4)? == tag {
+            let start = u32_at(data, o + 8)? as usize;
+            let len = u32_at(data, o + 12)? as usize;
+            return data.get(start..start.saturating_add(len));
+        }
+    }
+    None
+}
+
+fn u16_at(data: &[u8], o: usize) -> Option<u16> {
+    Some(u16::from_be_bytes(data.get(o..o + 2)?.try_into().ok()?))
+}
+
+fn i16_at(data: &[u8], o: usize) -> Option<i16> {
+    Some(u16_at(data, o)? as i16)
+}
+
+fn u32_at(data: &[u8], o: usize) -> Option<u32> {
+    Some(u32::from_be_bytes(data.get(o..o + 4)?.try_into().ok()?))
 }
 
 /// Round a logical coordinate onto a physical pixel boundary.
@@ -529,14 +807,23 @@ mod tests {
     }
 
     #[test]
-    fn a_12_px_font_gives_a_warp_like_14_4_px_row_and_hack_advance() {
-        let (w, h) = cell_size(12.0);
-        assert!((h - 14.4).abs() < 1e-3, "1.2 x font size, not 1.2375 (14.85): {h}");
-        assert!((w - 7.2246).abs() < 1e-3, "Hack advance 0.602 em: {w}");
-        let (_, h13) = cell_size(13.0);
-        assert!((h13 - 15.6).abs() < 1e-3);
-        // egui's Hack line box at 12 px is 13.97 px: the glyph sits 0.21 px below the row top.
-        assert!((glyph_top_offset(h, 13.97) - 0.215).abs() < 1e-3);
+    fn hack_at_12px_scale_1_uses_the_font_line_not_an_extra_1_2() {
+        // Hack hhea (egui's line metrics): advance 1233, ascent 1901, descent 483, gap 0, upem 2048.
+        let m = FontLineMetrics {
+            advance: 1233.0 * 12.0 / 2048.0,
+            ascent: 1901.0 * 12.0 / 2048.0,
+            descent: 483.0 * 12.0 / 2048.0,
+            line_gap: 0.0,
+        };
+        let (w, h) = cell_size_px(m, 1.0);
+        assert!((w - 7.224_609_4).abs() < 1e-4, "real advance, not ceiled: {w}");
+        assert!(w <= m.advance + 1.0);
+        assert_eq!(h, 14.0, "round(ascent+descent+gap) = 14, not 12*1.2 = 14.4");
+        let (w2, h2) = cell_size_px(m, 2.0);
+        assert_eq!(w2, w, "dpi must not scale an advance already in points");
+        assert_eq!(h2, 14.0);
+        // The rounded cell is one pixel taller than the raw line box; half of that centres the baseline.
+        assert!((glyph_top_offset(h, m.ascent + m.descent + m.line_gap) - 0.015625).abs() < 1e-4);
         assert_eq!(glyph_top_offset(10.0, 12.0), 0.0, "never above the row");
     }
 
