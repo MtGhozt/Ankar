@@ -1218,7 +1218,8 @@ fn paint_row_text(
         );
 
         let galley = ui.fonts_mut(|f| f.layout_job(job));
-        shapes.push(Shape::galley(Pos2::new(run_x, y), galley, fg0));
+        let top = y + ui_theme::glyph_top_offset(ui_theme::cell_h(), galley.size().y);
+        shapes.push(Shape::galley(Pos2::new(run_x, top), galley, fg0));
     }
 }
 

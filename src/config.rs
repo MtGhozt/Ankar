@@ -96,7 +96,13 @@ pub struct Config {
     pub pane_status_bar: bool,
     /// Filter for `ankar-log.txt` (same syntax as `RUST_LOG`, which overrides it).
     pub log_level: String,
+    /// One-time migrations already applied. Missing in old files, so it reads as 0.
+    #[serde(default)]
+    pub config_version: u32,
 }
+
+/// 1: the 13 px font default of earlier builds becomes 12 px.
+const CONFIG_VERSION: u32 = 1;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Launcher {
@@ -132,6 +138,7 @@ impl Default for Config {
             custom_titlebar: false,
             pane_status_bar: false,
             log_level: "info".into(),
+            config_version: CONFIG_VERSION,
         }
     }
 }
@@ -265,6 +272,12 @@ impl Config {
                 Ok(mut cfg) => {
                     cfg.sidebar_width = Self::clamp_sidebar_width(cfg.sidebar_width);
                     cfg.merge_default_launchers();
+                    if cfg.migrate() {
+                        log::info!("config migrated to version {CONFIG_VERSION} (font_size {})", cfg.font_size);
+                        if let Err(e) = cfg.save() {
+                            log::warn!("could not save migrated config: {e}");
+                        }
+                    }
                     Ok((cfg, false))
                 }
                 Err(e) => {
@@ -283,6 +296,18 @@ impl Config {
             cfg.write_default_file(&path)?;
             Ok((cfg, false))
         }
+    }
+
+    /// Applies each migration once; true when something changed and should be saved.
+    fn migrate(&mut self) -> bool {
+        if self.config_version >= CONFIG_VERSION {
+            return false;
+        }
+        if self.font_size == 13.0 {
+            self.font_size = default_font_size();
+        }
+        self.config_version = CONFIG_VERSION;
+        true
     }
 
     /// Append any built-in launchers the user doesn't already have (by name).
@@ -331,8 +356,11 @@ waiting_timeout_secs = {waiting_timeout_secs}
 # window and an agent (OpenCode) goes from working to idle after working for over 30 seconds.
 notifications = {notifications}
 
-# Terminal font size (points) — Hack at 14.33, cell 8.627×17.733
+# Terminal font size (px, Hack); rows are 1.2x the size. Ctrl+= / Ctrl+- / Ctrl+0 zoom.
 font_size = {font_size}
+
+# One-time migrations already applied (do not edit)
+config_version = {config_version}
 
 # Scrollback lines per terminal (default 2000; hard cap 50000)
 scrollback_lines = {scrollback_lines}
@@ -378,6 +406,7 @@ color = "#8A8A8A"
             sidebar_width = self.sidebar_width,
             dim_inactive_panes = self.dim_inactive_panes,
             log_level = self.log_level,
+            config_version = self.config_version,
         );
         fs::write(path, body)?;
         Ok(())
@@ -393,6 +422,22 @@ mod tests {
         assert_eq!(Config::clamp_sidebar_width(50.0), 180.0);
         assert_eq!(Config::clamp_sidebar_width(300.0), 300.0);
         assert_eq!(Config::clamp_sidebar_width(900.0), 420.0);
+    }
+
+    #[test]
+    fn an_old_13_px_font_becomes_12_once_and_later_zooms_stick() {
+        let mut old: Config = toml::from_str("font_size = 13.0\n").unwrap();
+        assert_eq!(old.config_version, 0, "a file without the field is unmigrated");
+        assert!(old.migrate());
+        assert_eq!(old.font_size, 12.0);
+        old.font_size = 13.0; // Matias zooms back up afterwards
+        let mut reread: Config = toml::from_str(&toml::to_string(&old).unwrap()).unwrap();
+        assert!(!reread.migrate(), "only once");
+        assert_eq!(reread.font_size, 13.0);
+        let mut custom: Config = toml::from_str("font_size = 15.0\n").unwrap();
+        assert!(custom.migrate());
+        assert_eq!(custom.font_size, 15.0, "other sizes are the user's choice");
+        assert!(!Config::default().migrate(), "new configs start migrated");
     }
 
     #[test]

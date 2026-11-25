@@ -73,11 +73,11 @@ pub const SIZE_TITLE: f32 = SIZE_UI;
 pub const SIZE_SUB: f32 = SIZE_UI_SMALL;
 pub const SIZE_KBD: f32 = SIZE_UI_SMALL;
 
-/// Reference terminal size (Hack) and the cell metrics measured for it (logical px). Other
-/// sizes scale these linearly: `cell_w` / `cell_h`.
+/// Reference terminal size (Hack) and its cell (logical px); `cell_size` scales them.
 pub const TERM_FONT_SIZE: f32 = 14.33;
 pub const CELL_W: f32 = 8.627;
-pub const CELL_H: f32 = 17.733;
+#[cfg(test)]
+pub const CELL_H: f32 = TERM_FONT_SIZE * LINE_HEIGHT;
 /// Default `font_size` in config.toml and the zoom limits.
 pub const DEFAULT_TERM_FONT: f32 = 12.0;
 pub const MIN_TERM_FONT: f32 = 8.0;
@@ -98,12 +98,25 @@ pub fn term_font_size() -> f32 {
     f32::from_bits(TERM_FONT_BITS.load(Ordering::Relaxed))
 }
 
+/// Row height per font size: Warp's line height (1.2), not the font's ascent+descent+gap.
+pub const LINE_HEIGHT: f32 = 1.2;
+
+/// Cell (width, height) for a terminal font size: Hack's advance (0.602 em) by `LINE_HEIGHT`.
+pub fn cell_size(font_size: f32) -> (f32, f32) {
+    (CELL_W / TERM_FONT_SIZE * font_size, font_size * LINE_HEIGHT)
+}
+
+/// How far below the row top a glyph line box of `line_h` starts, so it is centred in the row.
+pub fn glyph_top_offset(row_h: f32, line_h: f32) -> f32 {
+    ((row_h - line_h) * 0.5).max(0.0)
+}
+
 pub fn cell_w() -> f32 {
-    CELL_W * term_font_size() / TERM_FONT_SIZE
+    cell_size(term_font_size()).0
 }
 
 pub fn cell_h() -> f32 {
-    CELL_H * term_font_size() / TERM_FONT_SIZE
+    cell_size(term_font_size()).1
 }
 
 /// Round a logical coordinate onto a physical pixel boundary.
@@ -507,6 +520,18 @@ mod tests {
                 _ => false,
             }
         })
+    }
+
+    #[test]
+    fn a_12_px_font_gives_a_warp_like_14_4_px_row_and_hack_advance() {
+        let (w, h) = cell_size(12.0);
+        assert!((h - 14.4).abs() < 1e-3, "1.2 x font size, not 1.2375 (14.85): {h}");
+        assert!((w - 7.2246).abs() < 1e-3, "Hack advance 0.602 em: {w}");
+        let (_, h13) = cell_size(13.0);
+        assert!((h13 - 15.6).abs() < 1e-3);
+        // egui's Hack line box at 12 px is 13.97 px: the glyph sits 0.21 px below the row top.
+        assert!((glyph_top_offset(h, 13.97) - 0.215).abs() < 1e-3);
+        assert_eq!(glyph_top_offset(10.0, 12.0), 0.0, "never above the row");
     }
 
     #[test]
