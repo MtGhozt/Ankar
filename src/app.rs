@@ -461,6 +461,10 @@ fn flush_pty_resizes(workspace: &mut Workspace) {
 }
 
 const TAB_WIDTH: f32 = 224.0;
+/// Tabs shrink down to this when the bar is crowded; beyond that they are clipped.
+const MIN_TAB_WIDTH: f32 = 96.0;
+/// Fixed slot at the right edge for the stats + files icons (2 × 22 px hit targets).
+const RIGHT_ICONS_W: f32 = 44.0;
 const TAB_BAR_H: f32 = 38.0;
 
 fn draw_tab_bar(
@@ -489,7 +493,26 @@ fn draw_tab_bar(
     let mut open_stats = false;
     let active = workspace.active_tab;
 
-    ui.horizontal(|ui| {
+    // The right icons get their own slot; tabs shrink and are clipped to what is left, so
+    // they can never slide under the icons and steal their hover.
+    let right_rect = egui::Rect::from_min_max(
+        egui::pos2(bar_rect.right() - RIGHT_ICONS_W, bar_rect.top()),
+        bar_rect.max,
+    );
+    let left_rect = egui::Rect::from_min_max(
+        bar_rect.min,
+        egui::pos2(right_rect.left(), bar_rect.bottom()),
+    );
+    let fixed_left = 13.0 + 28.0 + if sidebar.show { 0.0 } else { 28.0 };
+    let tab_w = ((left_rect.width() - fixed_left) / workspace.tabs.len().max(1) as f32)
+        .clamp(MIN_TAB_WIDTH, TAB_WIDTH);
+
+    ui.scope_builder(
+        egui::UiBuilder::new()
+            .max_rect(left_rect)
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+        |ui| {
+        ui.set_clip_rect(left_rect.intersect(ui.clip_rect()));
         ui.set_min_height(TAB_BAR_H);
         ui.spacing_mut().item_spacing.x = 0.0;
 
@@ -510,7 +533,7 @@ fn draw_tab_bar(
             };
 
             let (rect, resp) =
-                ui.allocate_exact_size(Vec2::new(TAB_WIDTH, TAB_BAR_H), Sense::click());
+                ui.allocate_exact_size(Vec2::new(tab_w, TAB_BAR_H), Sense::click());
             ui.painter()
                 .rect_filled(rect, CornerRadius::ZERO, fill);
 
@@ -552,12 +575,14 @@ fn draw_tab_bar(
                     .rect_filled(rect, CornerRadius::ZERO, ui_theme::HOVER);
             }
 
-            // Close on hover only (midterm); middle-click closes.
+            // The X is painted on hover only (midterm), but its slot is always reserved:
+            // titles stop before `close_rect`, so the X never lands on top of text.
             let show_close = tab_hovered;
             let close_rect = egui::Rect::from_center_size(
                 egui::pos2(rect.right() - 14.0, rect.center().y),
                 Vec2::splat(18.0),
             );
+            let title_right = close_rect.left() - 4.0;
 
             let title = if tab.session_name.is_empty() {
                 tab.title.clone()
@@ -580,11 +605,6 @@ fn draw_tab_bar(
                 );
                 let title_x = rect.left() + 26.7;
                 let title_baseline = rect.top() + 25.33;
-                let title_right = if show_close {
-                    close_rect.left() - 4.0
-                } else {
-                    rect.right() - 8.0
-                };
                 paint_tab_title_fade(
                     ui,
                     &title,
@@ -600,7 +620,14 @@ fn draw_tab_bar(
                     f.layout_no_wrap(title.clone(), font.clone(), ui_theme::TEXT_MUTED)
                 });
                 let content_w = 16.0 + 1.0 + galley.size().x;
-                let start_x = rect.center().x - content_w * 0.5;
+                // A title that does not fit between the left edge and the X slot is
+                // left-aligned and faded out instead of centered under the X.
+                let fits = content_w <= title_right - (rect.left() + 8.0);
+                let start_x = if fits {
+                    rect.center().x - content_w * 0.5
+                } else {
+                    rect.left() + 8.0
+                };
                 paint_tab_icon(
                     ui,
                     logo_tex.as_ref(),
@@ -610,11 +637,23 @@ fn draw_tab_bar(
                     16.0,
                     tab.status,
                 );
-                ui.painter().galley(
-                    egui::pos2(start_x + 17.0, title_baseline_center(rect, &galley)),
-                    galley,
-                    ui_theme::TEXT_MUTED,
-                );
+                if fits {
+                    ui.painter().galley(
+                        egui::pos2(start_x + 17.0, title_baseline_center(rect, &galley)),
+                        galley,
+                        ui_theme::TEXT_MUTED,
+                    );
+                } else {
+                    let fade_to = if tab_hovered { ui_theme::HOVER } else { ui_theme::SURFACE_1 };
+                    paint_tab_title_fade(
+                        ui,
+                        &title,
+                        egui::pos2(start_x + 17.0, rect.top() + 25.33),
+                        title_right - (start_x + 17.0),
+                        ui_theme::TEXT_MUTED,
+                        fade_to,
+                    );
+                }
             }
 
             let close_id = ui.scope_id().with("tab_close").with(tab.id);
@@ -656,7 +695,15 @@ fn draw_tab_bar(
         if plus.secondary_clicked() {
             *show_menu = !*show_menu;
         }
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        },
+    );
+
+    ui.scope_builder(
+        egui::UiBuilder::new()
+            .max_rect(right_rect)
+            .layout(egui::Layout::right_to_left(egui::Align::Center)),
+        |ui| {
+            ui.spacing_mut().item_spacing.x = 0.0;
             // Midterm right icons: 18px activity + files (RTL paints files first).
             if tab_bar_right_icon(ui, Icon::Folder, "Files (Ctrl+Shift+F)").clicked() {
                 files.show = !files.show;
@@ -665,8 +712,8 @@ fn draw_tab_bar(
             {
                 open_stats = true;
             }
-        });
-    });
+        },
+    );
 
     if let Some(i) = switch_to {
         workspace.active_tab = i;
