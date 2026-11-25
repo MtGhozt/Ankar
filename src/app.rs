@@ -1,8 +1,8 @@
 use crate::color_check;
 use crate::config::Config;
 use crate::files::{self, FileViewer};
-use crate::folder_pick::{self, FolderPick, PickFor};
-use crate::footer::{self, ShellFooter};
+use crate::folder_pick::{self, PickFor};
+use crate::footer::{self, FooterAction, ShellFooter};
 use crate::launchers;
 use crate::layout::{LayoutNode, SessionStatus, SplitDir, Workspace};
 use crate::logos::LogoAtlas;
@@ -101,26 +101,24 @@ impl AnkarApp {
         })
     }
 
-    /// Acts on the folder dialog once it closes: a new session there, or `cd` the active shell.
+    /// Acts on the folder dialog once it closes: a new session there.
     fn poll_folder_pick(&mut self, ctx: &Context) {
         let Some(choice) = self.sidebar.folder_pick.as_ref().and_then(|p| p.poll()) else {
             return;
         };
         let purpose = self.sidebar.folder_pick.take().map(|p| p.purpose);
-        let Some(dir) = choice else {
-            return;
-        };
-        match purpose {
-            Some(PickFor::NewSession) => self.workspace.new_session_in(ctx, dir),
-            Some(PickFor::Cd) => {
-                if let Some(tab) = self.workspace.active_tab_mut() {
-                    let pane = tab.focused_pane;
-                    if let Some(session) = tab.sessions.get_mut(&pane) {
-                        session.write(folder_pick::cd_command(&dir).into_bytes());
-                    }
-                }
+        if let (Some(dir), Some(PickFor::NewSession)) = (choice, purpose) {
+            self.workspace.new_session_in(ctx, dir);
+        }
+    }
+
+    /// Types `cd "<dir>"` into the active tab's focused shell (footer picker).
+    fn cd_active_shell(&mut self, dir: &std::path::Path) {
+        if let Some(tab) = self.workspace.active_tab_mut() {
+            let pane = tab.focused_pane;
+            if let Some(session) = tab.sessions.get_mut(&pane) {
+                session.write(folder_pick::cd_command(dir).into_bytes());
             }
-            None => {}
         }
     }
 
@@ -492,10 +490,9 @@ impl eframe::App for AnkarApp {
                 .show_separator_line(false)
                 .show(ui, |ui| {
                     let rect = ui.max_rect();
-                    let pick = self.footer.draw(ui, rect, cwd.as_deref(), &project_key);
-                    if pick && self.sidebar.folder_pick.is_none() {
-                        self.sidebar.folder_pick =
-                            Some(FolderPick::open(ui.ctx(), PickFor::Cd, "Change directory", cwd.clone()));
+                    match self.footer.draw(ui, rect, cwd.as_deref(), &project_key) {
+                        Some(FooterAction::Cd(dir)) => self.cd_active_shell(&dir),
+                        Some(FooterAction::OpenChanges) | None => {}
                     }
                 });
         }

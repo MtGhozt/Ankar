@@ -42,6 +42,9 @@ pub const DIVIDER_ACTIVE: Color32 = Color32::from_gray(0x3A);
 pub const BUTTON_HIGHLIGHT: Color32 = Color32::from_rgb(0x1E, 0x1E, 0x1E);
 pub const KBD_BG: Color32 = INPUT_BORDER;
 pub const KBD_BORDER: Color32 = BUTTON_HIGHLIGHT;
+/// Footer chips and popups over them (Warp look).
+pub const CHIP_BG: Color32 = Color32::from_gray(0x1A);
+pub const CHIP_BORDER: Color32 = Color32::from_gray(0x33);
 
 // --- Text ---
 pub const TEXT: Color32 = Color32::from_rgb(0xE7, 0xE7, 0xE7);
@@ -58,6 +61,9 @@ pub const WORKING_RING_DIM: Color32 = Color32::from_rgb(0x90, 0x90, 0x90);
 pub const LAUNCHER_BADGE: Color32 = Color32::from_rgb(0x65, 0xB1, 0x77);
 pub const ERROR: Color32 = Color32::from_rgb(0xE5, 0x69, 0x5B);
 pub const ACCENT: Color32 = Color32::from_rgb(0x0F, 0x8C, 0xEC);
+/// Lines added / removed in diff counts.
+pub const DIFF_ADD: Color32 = STATUS_DOT_OK;
+pub const DIFF_DEL: Color32 = ERROR;
 /// Cursor when the app set no OSC 12 colour: the Ankar accent blue.
 pub const CURSOR: Color32 = Color32::from_rgb(0x76, 0x99, 0xFE);
 /// Default terminal foreground (`#D4D4D4`).

@@ -6,6 +6,7 @@ mod files;
 mod launchers;
 mod layout;
 mod color_check;
+mod dir_picker;
 mod folder_pick;
 mod footer;
 mod gitinfo;

@@ -7,8 +7,6 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PickFor {
     NewSession,
-    /// `cd` the active shell there (footer cwd chip).
-    Cd,
 }
 
 pub struct FolderPick {
