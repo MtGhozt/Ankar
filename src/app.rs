@@ -316,6 +316,25 @@ impl eframe::App for AnkarApp {
             &mut self.stats,
         );
 
+        // Our own title bar, full width above the sidebar (Warp layout): the OS frame is gone.
+        egui::Panel::top("tab_bar")
+            .exact_size(TAB_BAR_H)
+            .frame(Frame::NONE.fill(ui_theme::BG))
+            .show_separator_line(false)
+            .show(ui, |ui| {
+                let open_stats = draw_tab_bar(
+                    ui,
+                    &mut self.workspace,
+                    &mut self.sidebar,
+                    &mut self.show_profile_menu,
+                    &self.config,
+                    &mut self.logos,
+                );
+                if open_stats {
+                    self.stats.toggle();
+                }
+            });
+
         // Manual panel widths — egui's built-in SidePanel resize fought PanelState
         // and bounced on release. We own the width via exact_size + drag handles.
         if self.sidebar.show {
@@ -356,25 +375,6 @@ impl eframe::App for AnkarApp {
                 }
             }
         }
-
-        // Our own title bar, right of the sidebar column: the OS frame is gone (chromeless window).
-        egui::Panel::top("tab_bar")
-            .exact_size(TAB_BAR_H)
-            .frame(Frame::NONE.fill(ui_theme::BG))
-            .show_separator_line(false)
-            .show(ui, |ui| {
-                let open_stats = draw_tab_bar(
-                    ui,
-                    &mut self.workspace,
-                    &mut self.sidebar,
-                    &mut self.show_profile_menu,
-                    &self.config,
-                    &mut self.logos,
-                );
-                if open_stats {
-                    self.stats.toggle();
-                }
-            });
 
         // The tree is dropped (caches, highlighter) while the sidebar is not showing it.
         if !(self.sidebar.show && self.sidebar.view == SidebarView::Files) {
@@ -584,6 +584,7 @@ impl eframe::App for AnkarApp {
         }
 
         self.stats.draw(ui);
+        paint_window_outline(&ctx);
         window_edge_resize(ui.ctx());
         paint_zoom_toast(&ctx, &mut self.zoom_toast);
         self.run_color_check(&ctx);
@@ -675,18 +676,20 @@ fn draw_tab_bar(
     let mut open_stats = false;
     let active = workspace.active_tab;
 
+    let slots = strip_slots(bar_rect);
+    let content = slots.content;
     // The right icons get their own slot; tabs shrink and are clipped to what is left, so
     // they can never slide under the icons and steal their hover.
     let right_rect = egui::Rect::from_min_max(
-        egui::pos2(bar_rect.right() - RIGHT_ICONS_W, bar_rect.top()),
-        bar_rect.max,
+        egui::pos2(content.right() - RIGHT_ICONS_W, content.top()),
+        content.max,
     );
     let left_rect = egui::Rect::from_min_max(
-        bar_rect.min,
-        egui::pos2(right_rect.left(), bar_rect.bottom()),
+        content.min,
+        egui::pos2(right_rect.left(), content.bottom()),
     );
-    // The "+" slot, plus the toggle while the sidebar is hidden.
-    let fixed_left = 13.0 + 28.0 + if sidebar.show { 8.0 } else { 36.0 };
+    // Toggle and gap before the first tab, then the "+" slot after the last one.
+    let fixed_left = slots.tabs_left - content.left() + 13.0 + 28.0;
     let tab_w = ((left_rect.width() - fixed_left) / workspace.tabs.len().max(1) as f32)
         .clamp(MIN_TAB_WIDTH, TAB_WIDTH);
 
@@ -696,17 +699,14 @@ fn draw_tab_bar(
             .layout(egui::Layout::left_to_right(egui::Align::Center)),
         |ui| {
         ui.set_clip_rect(left_rect.intersect(ui.clip_rect()));
-        ui.set_min_height(TAB_BAR_H);
+        ui.set_min_height(content.height());
         ui.spacing_mut().item_spacing.x = 0.0;
 
-        // Sidebar shown: its own header holds the toggle. Hidden: it moves to this bar's edge.
-        ui.add_space(8.0);
-        if !sidebar.show {
-            let (slot, _) = ui.allocate_exact_size(Vec2::splat(28.0), Sense::hover());
-            if crate::sidebar::sidebar_toggle(ui, slot, false).clicked() {
-                sidebar.show = true;
-            }
+        // The toggle always sits at the window's top-left; the sidebar hangs below the bar.
+        if crate::sidebar::sidebar_toggle(ui, slots.toggle, sidebar.show).clicked() {
+            sidebar.show = !sidebar.show;
         }
+        ui.add_space(slots.tabs_left - content.left());
 
         for (i, tab) in workspace.tabs.iter().enumerate() {
             let selected = i == active;
@@ -718,10 +718,10 @@ fn draw_tab_bar(
                 ui_theme::BG
             };
 
+            // `content` stops above the divider, which runs unbroken under every tab.
             let (rect, resp) =
-                ui.allocate_exact_size(Vec2::new(tab_w, TAB_BAR_H), Sense::click());
-            // Fills stop above the divider, which runs unbroken under every tab.
-            let body = egui::Rect::from_min_max(rect.min, egui::pos2(rect.right(), rect.bottom() - 1.0));
+                ui.allocate_exact_size(Vec2::new(tab_w, content.height()), Sense::click());
+            let body = rect;
             ui.painter().rect_filled(body, CornerRadius::ZERO, fill);
 
             // Separator only between two inactive tabs.
@@ -772,11 +772,10 @@ fn draw_tab_bar(
                     tab.status,
                 );
                 let title_x = rect.left() + 26.7;
-                let title_baseline = rect.center().y + 6.33;
                 paint_tab_title_fade(
                     ui,
                     &title,
-                    egui::pos2(title_x, title_baseline),
+                    egui::pos2(title_x, rect.center().y),
                     title_right - title_x,
                     ui_theme::TEXT,
                     ui_theme::ROW_SELECTED,
@@ -816,7 +815,7 @@ fn draw_tab_bar(
                     paint_tab_title_fade(
                         ui,
                         &title,
-                        egui::pos2(start_x + 17.0, rect.center().y + 6.33),
+                        egui::pos2(start_x + 17.0, rect.center().y),
                         title_right - (start_x + 17.0),
                         ui_theme::TEXT_MUTED,
                         fade_to,
@@ -912,6 +911,38 @@ fn draw_tab_bar(
     open_stats
 }
 
+/// Where the tab bar's left controls go.
+struct StripSlots {
+    /// The bar above its 1 px bottom divider: everything centres on this.
+    content: egui::Rect,
+    toggle: egui::Rect,
+    /// x where the first tab starts.
+    tabs_left: f32,
+}
+
+fn strip_slots(bar: egui::Rect) -> StripSlots {
+    let content = egui::Rect::from_min_max(bar.min, egui::pos2(bar.right(), bar.bottom() - 1.0));
+    let toggle = egui::Rect::from_center_size(
+        egui::pos2(content.left() + 10.0 + 14.0, content.center().y),
+        Vec2::splat(28.0),
+    );
+    StripSlots { content, toggle, tabs_left: toggle.right() + 6.0 }
+}
+
+/// 1 px outline around the chromeless window, the same gray as the dividers it meets.
+fn paint_window_outline(ctx: &Context) {
+    if ctx.input(|i| i.viewport().maximized.unwrap_or(false) || i.viewport().fullscreen.unwrap_or(false)) {
+        return;
+    }
+    let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::unique("window_outline")));
+    painter.rect_stroke(
+        ctx.content_rect(),
+        CornerRadius::ZERO,
+        Stroke::new(1.0, ui_theme::CHROME_DIVIDER),
+        egui::StrokeKind::Inside,
+    );
+}
+
 fn title_baseline_center(rect: egui::Rect, galley: &egui::Galley) -> f32 {
     rect.center().y - galley.size().y * 0.5
 }
@@ -971,11 +1002,11 @@ fn paint_tab_icon(
     }
 }
 
-/// Paint title with a transparent→bg fade over the last 20% (no ellipsis).
+/// Paint title with a transparent→bg fade over the last 20% (no ellipsis), centred on `left_center.y`.
 fn paint_tab_title_fade(
     ui: &egui::Ui,
     title: &str,
-    baseline_left: egui::Pos2,
+    left_center: egui::Pos2,
     max_w: f32,
     color: Color32,
     fade_to: Color32,
@@ -985,8 +1016,8 @@ fn paint_tab_title_fade(
     }
     let font = egui::FontId::proportional(ui_theme::SIZE_UI);
     let galley = ui.fonts_mut(|f| f.layout_no_wrap(title.to_owned(), font, color));
-    let pos = egui::pos2(baseline_left.x, baseline_left.y - galley.size().y * 0.8);
-    let clip = egui::Rect::from_min_size(pos, Vec2::new(max_w, galley.size().y + 4.0));
+    let pos = egui::pos2(left_center.x, left_center.y - galley.size().y * 0.5);
+    let clip = egui::Rect::from_min_size(pos, Vec2::new(max_w, galley.size().y));
     let painter = ui.painter().with_clip_rect(clip);
     painter.galley(pos, galley, color);
     let fade_w = (max_w * 0.20).max(8.0);
@@ -1115,7 +1146,7 @@ enum WinButton {
 
 /// A 46 px caption button with a hairline glyph; close turns red on hover.
 fn window_button(ui: &mut egui::Ui, kind: WinButton, tip: &str) -> egui::Response {
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(WIN_BTN_W, TAB_BAR_H), Sense::click());
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(WIN_BTN_W, TAB_BAR_H - 1.0), Sense::click());
     let close = kind == WinButton::Close;
     let hot = resp.hovered();
     if hot {
@@ -1658,6 +1689,18 @@ mod tests {
         assert_eq!(zoomed_font(24.0, 1.0), 24.0, "zoom stops at 24 px");
         assert_eq!(zoomed_font(8.0, -1.0), 8.0, "and at 8 px");
         assert_eq!(zoom_toast_text(12.0), "12 px");
+    }
+
+    #[test]
+    fn toggle_sits_top_left_centred_above_the_divider_and_tabs_follow_it() {
+        let bar = egui::Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(1100.0, TAB_BAR_H));
+        let s = strip_slots(bar);
+        assert!((36.0..=38.0).contains(&TAB_BAR_H), "Warp-like strip height");
+        assert_eq!(s.content.bottom(), TAB_BAR_H - 1.0, "1 px divider below the content");
+        assert_eq!(s.toggle.center().y, s.content.center().y);
+        assert_eq!(s.toggle.top() - s.content.top(), s.content.bottom() - s.toggle.bottom());
+        assert!(s.toggle.left() >= 8.0 && s.toggle.left() <= 12.0, "away from the window edge");
+        assert!(s.tabs_left > s.toggle.right() && s.tabs_left - s.toggle.right() <= 8.0, "first tab right after it");
     }
 
     #[test]

@@ -34,9 +34,7 @@ pub enum SidebarView {
     Files,
 }
 
-/// Header row height: the same as the tab bar next to it.
-const VIEW_BAR_H: f32 = ui_theme::BAR_H;
-/// Sessions | Files icon row under the header.
+/// Sessions | Files icon row at the top of the sidebar.
 const SWITCH_ROW_H: f32 = 34.0;
 const ROW_H: f32 = 40.0;
 /// Session row: the relative time ends this far from the row's right edge (296 at the default width).
@@ -73,10 +71,6 @@ fn row_layout(row: Rect, time_w: f32) -> RowLayout {
         pin_x: archive_x - 20.0,
     }
 }
-const TOGGLE_SIZE: f32 = 28.0;
-/// Left inset of the toggle, a bit further right than the edge like Warp.
-const TOGGLE_LEFT: f32 = 14.0;
-
 /// The sidebar toggle: 28 px hit area, white icon, a subtle box while the sidebar is open.
 pub fn sidebar_toggle(ui: &mut Ui, rect: Rect, open: bool) -> egui::Response {
     let resp = ui.interact(rect, ui.scope_id().with("sidebar_toggle"), Sense::click());
@@ -168,7 +162,7 @@ pub fn draw(
     // midterm footer: launchers y 951–974, archived baseline 1016 in 1033 window → ~92 / ~46 from bottom.
     let divider_launcher_y = sidebar_rect.bottom() - 92.0;
     let divider_archived_y = sidebar_rect.bottom() - 46.0;
-    let filter_bottom_y = sidebar_rect.top() + VIEW_BAR_H + SWITCH_ROW_H + 113.33;
+    let filter_bottom_y = sidebar_rect.top() + SWITCH_ROW_H + 113.33;
     let archived_list_h = if sidebar.show_archived {
         (sidebar.archived.len() as f32 * 28.0).min(160.0) + 8.0
     } else {
@@ -186,22 +180,7 @@ pub fn draw(
     let mut toggle_group: Option<String> = None;
     let mut start_rename: Option<usize> = None;
 
-    // --- Header: its own column top (Warp layout), black like the tab bar; only the toggle ---
-    let (bar, _) = ui.allocate_exact_size(Vec2::new(sidebar_rect.width(), VIEW_BAR_H), Sense::hover());
-    painter.rect_filled(bar, CornerRadius::ZERO, ui_theme::BG);
-    // Registered before the controls, so they win the pointer; the rest drags the window.
-    crate::app::window_drag_handle(ui, bar, ui.scope_id().with("header_drag"));
-    let toggle = Rect::from_min_size(
-        egui::pos2(bar.left() + TOGGLE_LEFT, bar.center().y - TOGGLE_SIZE / 2.0),
-        Vec2::splat(TOGGLE_SIZE),
-    );
-    if sidebar_toggle(ui, toggle, true).clicked() {
-        sidebar.show = false;
-    }
-    // Same y as the tab bar's divider: one line across the window.
-    painter.hline(bar.x_range(), bar.bottom() - 0.5, Stroke::new(1.0, ui_theme::CHROME_DIVIDER));
-
-    // --- Sessions | Files icon switch, under the header ---
+    // --- Sessions | Files icon switch, at the top (the toggle lives in the tab bar above) ---
     let (row, _) = ui.allocate_exact_size(Vec2::new(sidebar_rect.width(), SWITCH_ROW_H), Sense::hover());
     let views = [
         (SidebarView::Sessions, Icon::Terminal, "Sessions"),
@@ -1532,13 +1511,13 @@ mod tests {
     }
 
     #[test]
-    fn files_close_hides_the_whole_sidebar_and_the_switch_sits_under_the_header() {
+    fn files_close_hides_the_whole_sidebar_and_the_switch_sits_at_the_top() {
         let ctx = egui::Context::default();
         let mut sidebar = SidebarState::default();
         frame(&ctx, &mut sidebar, Vec::new());
         assert_eq!(sidebar.view, SidebarView::Sessions);
-        // Files icon: second slot of the switch row under the toggle-only header.
-        let row_mid = VIEW_BAR_H + SWITCH_ROW_H / 2.0;
+        // Files icon: second slot of the switch row, the sidebar's first row.
+        let row_mid = SWITCH_ROW_H / 2.0;
         click(&ctx, &mut sidebar, egui::pos2(8.0 + 30.0 + 14.0, row_mid));
         assert!(sidebar.show && sidebar.view == SidebarView::Files);
         click(&ctx, &mut sidebar, egui::pos2(360.0 - 18.0, row_mid));
