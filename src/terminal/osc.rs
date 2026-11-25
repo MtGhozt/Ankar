@@ -478,6 +478,19 @@ mod tests {
         }
     }
 
+    #[cfg(windows)]
+    struct ConptyReap {
+        before: Vec<u32>,
+        shell: Option<u32>,
+    }
+
+    #[cfg(windows)]
+    impl Drop for ConptyReap {
+        fn drop(&mut self) {
+            crate::terminal::release_conpty(self.shell, &self.before);
+        }
+    }
+
     /// Inbox Windows ConPTY swallows OSC 10/11 and DA queries, so TUIs (Junie) never learn the
     /// background and fall back to a light theme. Passes only when a current conpty.dll +
     /// OpenConsole.exe sit beside the test binary or on PATH.
@@ -495,7 +508,10 @@ mod tests {
             ..tty::Options::default()
         };
         let size = WindowSize { num_lines: 24, num_cols: 80, cell_width: 8, cell_height: 16 };
+        let before = crate::terminal::console_host_pids();
         let mut pty = tty::new(&opts, size, 0).expect("conpty");
+        let shell = pty.child_watcher().pid().map(|p| p.get());
+        let _reap = ConptyReap { before, shell };
         let (mut out, mut buf) = (Vec::new(), [0u8; 4096]);
         let deadline = Instant::now() + std::time::Duration::from_secs(15);
         while Instant::now() < deadline && !out.windows(4).any(|w| w == b"QEND") {

@@ -15,7 +15,7 @@ use alacritty_terminal::vte::ansi::{Color, CursorShape, CursorStyle, NamedColor,
 use egui::Context;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -141,6 +141,11 @@ impl Default for Snapshot {
     }
 }
 
+type PtyThread = std::thread::JoinHandle<(
+    EventLoop<OscTap<tty::Pty>, EventProxy>,
+    alacritty_terminal::event_loop::State,
+)>;
+
 pub struct TerminalSession {
     term: Arc<FairMutex<Term<EventProxy>>>,
     size: TerminalSize,
@@ -172,6 +177,12 @@ pub struct TerminalSession {
     last_motion: Option<(u16, u16, u8)>,
     /// Process id of the shell (ConPTY child), root of the tree `procs` walks.
     shell_pid: Option<u32>,
+    /// OpenConsole / conhost pids created for this session.
+    host_pids: Vec<u32>,
+    /// Shell process handle. alacritty's watcher never closes it.
+    child_handle: isize,
+    id: u64,
+    pty_thread: Option<PtyThread>,
     /// When the user last sent Enter: work starts with a submitted command or prompt.
     last_submit: Option<Instant>,
     pub colors: TermColors,
@@ -214,16 +225,24 @@ impl TerminalSession {
             ..term::Config::default()
         };
         let terminal_size = TerminalSize::default();
+        let hosts_before = console_host_pids();
         let pty = tty::new(&pty_config, terminal_size.into(), id)
             .map_err(|e| anyhow::anyhow!("failed to open PTY for {program}: {e}"))?;
+        let host_pids: Vec<u32> = console_host_pids()
+            .into_iter()
+            .filter(|pid| !hosts_before.contains(pid))
+            .collect();
 
         let agent = Arc::new(Mutex::new(AgentInfo::default()));
         let cwd_state = Arc::new(Mutex::new(cwd.clone()));
         let cwd_flag = cwd_state.clone();
         #[cfg(windows)]
-        let shell_pid = pty.child_watcher().pid().map(|p| p.get());
+        let (shell_pid, child_handle) = {
+            let watcher = pty.child_watcher();
+            (watcher.pid().map(|p| p.get()), watcher.raw_handle() as isize)
+        };
         #[cfg(not(windows))]
-        let shell_pid = None;
+        let (shell_pid, child_handle) = (None, 0isize);
         let (event_sender, event_receiver) = mpsc::channel();
         // Queries alacritty_terminal ignores are answered from the raw-byte scanner, through
         // the same PtyWrite path as its own replies.
@@ -245,7 +264,7 @@ impl TerminalSession {
             .map_err(|e| anyhow::anyhow!("failed to create PTY event loop: {e}"))?;
         let notifier = Notifier(event_loop.channel());
         let pty_notifier = Notifier(event_loop.channel());
-        let _loop_thread = event_loop.spawn();
+        let pty_thread = event_loop.spawn();
 
         let exited = Arc::new(AtomicBool::new(false));
         let exited_flag = exited.clone();
@@ -265,7 +284,7 @@ impl TerminalSession {
         let clipboard_flag = clipboard.clone();
         let colors = TermColors::default();
         let query_colors = colors.clone();
-        std::thread::Builder::new()
+        let reader = std::thread::Builder::new()
             .name(format!("ankar-pty-{id}"))
             .spawn(move || {
                 while let Ok(event) = event_receiver.recv() {
@@ -353,8 +372,17 @@ impl TerminalSession {
                         }
                     }
                 }
-            })?;
+            });
+        if let Err(e) = reader {
+            release_hosts(shell_pid, &host_pids);
+            let _ = notifier.0.send(Msg::Shutdown);
+            let _ = pty_thread.join();
+            close_child_handle(child_handle);
+            return Err(e.into());
+        }
 
+        let live = LIVE_CONPTY.fetch_add(1, Ordering::Relaxed) + 1;
+        log::debug!("conpty spawn id={id} live={live}");
         Ok(Self {
             term,
             size: terminal_size,
@@ -375,6 +403,10 @@ impl TerminalSession {
             clipboard,
             last_motion: None,
             shell_pid,
+            host_pids,
+            child_handle,
+            id,
+            pty_thread: Some(pty_thread),
             last_submit: None,
             colors,
         })
@@ -654,7 +686,116 @@ impl TerminalSession {
 
 impl Drop for TerminalSession {
     fn drop(&mut self) {
+        // A detached PTY thread is killed on process exit before ClosePseudoConsole, and that
+        // call deadlocks unless the host is already gone (it waits for a reader to drain).
+        release_hosts(self.shell_pid.take(), &std::mem::take(&mut self.host_pids));
         let _ = self.notifier.0.send(Msg::Shutdown);
+        if let Some(thread) = self.pty_thread.take() {
+            let _ = thread.join();
+        }
+        close_child_handle(self.child_handle);
+        let live = LIVE_CONPTY.fetch_sub(1, Ordering::Relaxed).saturating_sub(1);
+        log::debug!("conpty drop id={} live={live}", self.id);
+    }
+}
+
+static LIVE_CONPTY: AtomicUsize = AtomicUsize::new(0);
+
+pub(crate) fn console_host_pids() -> Vec<u32> {
+    let me = std::process::id();
+    crate::procs::snapshot()
+        .into_iter()
+        .filter(|p| p.ppid == me && is_console_host(&p.exe))
+        .map(|p| p.pid)
+        .collect()
+}
+
+fn is_console_host(exe: &str) -> bool {
+    exe.eq_ignore_ascii_case("OpenConsole.exe") || exe.eq_ignore_ascii_case("conhost.exe")
+}
+
+#[cfg(test)]
+pub(crate) fn release_conpty(shell: Option<u32>, before: &[u32]) {
+    let hosts: Vec<u32> = console_host_pids()
+        .into_iter()
+        .filter(|pid| !before.contains(pid))
+        .collect();
+    release_hosts(shell, &hosts);
+}
+
+fn release_hosts(shell: Option<u32>, hosts: &[u32]) {
+    if let Some(pid) = shell {
+        terminate_tree(pid);
+    }
+    for &pid in hosts {
+        terminate_tree(pid);
+    }
+}
+
+fn kill_order(root: u32, edges: &[(u32, u32)]) -> Vec<u32> {
+    let mut order = Vec::new();
+    let mut stack = vec![root];
+    let mut seen = vec![root];
+    while let Some(pid) = stack.pop() {
+        order.push(pid);
+        for &(child, parent) in edges {
+            if parent == pid && !seen.contains(&child) {
+                seen.push(child);
+                stack.push(child);
+            }
+        }
+    }
+    order.reverse();
+    order
+}
+
+fn terminate_tree(root: u32) {
+    if root == 0 {
+        return;
+    }
+    let edges: Vec<(u32, u32)> = crate::procs::snapshot()
+        .into_iter()
+        .map(|p| (p.pid, p.ppid))
+        .collect();
+    for pid in kill_order(root, &edges) {
+        terminate_pid(pid);
+    }
+}
+
+// shortcut: 2s wait and the pid is not rechecked, if TerminateProcess is ignored or a pid was reused use a job object.
+fn terminate_pid(pid: u32) {
+    #[cfg(windows)]
+    unsafe {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, TerminateProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE,
+        };
+        let handle = OpenProcess(PROCESS_TERMINATE | PROCESS_SYNCHRONIZE, 0, pid);
+        if handle.is_null() {
+            return;
+        }
+        TerminateProcess(handle, 1);
+        WaitForSingleObject(handle, 2000);
+        CloseHandle(handle);
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = pid;
+    }
+}
+
+fn close_child_handle(handle: isize) {
+    #[cfg(windows)]
+    unsafe {
+        use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+        let handle = handle as HANDLE;
+        if !handle.is_null() {
+            CloseHandle(handle);
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = handle;
     }
 }
 
@@ -797,6 +938,16 @@ impl EventListener for EventProxy {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn kill_order_finishes_children_before_the_host() {
+        // (pid, ppid): host 1 → shell 2 and conhost 3, shell → command 4.
+        let order = kill_order(1, &[(2, 1), (3, 1), (4, 2)]);
+        assert_eq!(order.last().copied(), Some(1), "host dies last");
+        let pos = |pid| order.iter().position(|p| *p == pid).unwrap();
+        assert!(pos(4) < pos(2), "command before shell");
+        assert!(pos(2) < pos(1) && pos(3) < pos(1), "children before host");
+    }
 
     #[test]
     fn sgr_reports_motion_release_wheel_and_modifiers() {
