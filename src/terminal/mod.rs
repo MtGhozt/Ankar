@@ -5,4 +5,5 @@ mod theme;
 mod view;
 
 pub use backend::TerminalSession;
+pub use osc::AgentState;
 pub use view::TerminalView;

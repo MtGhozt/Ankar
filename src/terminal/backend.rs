@@ -341,7 +341,6 @@ impl TerminalSession {
         self.activity.lock().ok().and_then(|g| g.clone())
     }
 
-    #[allow(dead_code)] // read by the status tracker in the next commit
     pub fn agent(&self) -> AgentInfo {
         self.agent.lock().map(|g| g.clone()).unwrap_or_default()
     }
