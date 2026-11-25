@@ -27,9 +27,13 @@ pub const PRESSED: Color32 = Color32::from_rgb(0x1A, 0x1A, 0x1A);
 
 // --- Lines ---
 pub const BORDER: Color32 = Color32::from_rgb(0x1C, 0x1C, 0x1C);
-pub const SIDEBAR_BORDER: Color32 = BORDER;
+/// The one gray line under the tab bar and at the sidebar's right edge.
+pub const CHROME_DIVIDER: Color32 = Color32::from_gray(0x2E);
+/// Box behind the sidebar toggle while the sidebar is open.
+pub const TOGGLE_OPEN_BG: Color32 = Color32::from_rgb(0x1C, 0x1C, 0x1C);
+/// Height of the caption bar and of the sidebar header beside it.
+pub const BAR_H: f32 = 32.0;
 pub const TAB_SEP: Color32 = Color32::from_rgb(0x15, 0x15, 0x15);
-pub const TAB_ACTIVE_EDGE: Color32 = Color32::from_rgb(0x1D, 0x1D, 0x1D);
 pub const INPUT_BORDER: Color32 = Color32::from_rgb(0x14, 0x14, 0x14);
 pub const DIVIDER: Color32 = Color32::from_rgb(0x19, 0x19, 0x19);
 pub const SIDEBAR_DIVIDER: Color32 = DIVIDER;

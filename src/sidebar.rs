@@ -33,8 +33,32 @@ pub enum SidebarView {
     Files,
 }
 
-/// Height of the Sessions | Files icon row at the top of the sidebar.
-const VIEW_BAR_H: f32 = 34.0;
+/// Header row height: the same as the tab bar next to it.
+const VIEW_BAR_H: f32 = ui_theme::BAR_H;
+const TOGGLE_SIZE: f32 = 28.0;
+/// Left inset of the toggle, a bit further right than the edge like Warp.
+const TOGGLE_LEFT: f32 = 14.0;
+
+/// The sidebar toggle: 28 px hit area, white icon, a subtle box while the sidebar is open.
+pub fn sidebar_toggle(ui: &mut Ui, rect: Rect, open: bool) -> egui::Response {
+    let resp = ui.interact(rect, ui.scope_id().with("sidebar_toggle"), Sense::click());
+    let fill = if open {
+        ui_theme::TOGGLE_OPEN_BG
+    } else if resp.hovered() {
+        ui_theme::HOVER
+    } else {
+        Color32::TRANSPARENT
+    };
+    ui.painter().rect_filled(rect, CornerRadius::same(ui_theme::RADIUS_ROW), fill);
+    ui.painter().text(
+        rect.center(),
+        Align2::CENTER_CENTER,
+        Icon::PanelLeft.codepoint().to_string(),
+        FontId::new(15.0, FontFamily::Name(ui_theme::FONT_ICONS.into())),
+        Color32::WHITE,
+    );
+    resp.on_hover_text(if open { "Hide sidebar (Ctrl+Shift+B)" } else { "Show sidebar (Ctrl+Shift+B)" })
+}
 
 pub struct SidebarState {
     pub archived: Vec<ArchivedSession>,
@@ -121,19 +145,29 @@ pub fn draw(
     let mut toggle_group: Option<String> = None;
     let mut start_rename: Option<usize> = None;
 
-    // --- Sessions | Files icon switch (like Warp's left panel tabs) ---
+    // --- Header: its own column top (Warp layout), black like the tab bar, no divider below ---
     let (bar, _) = ui.allocate_exact_size(Vec2::new(sidebar_rect.width(), VIEW_BAR_H), Sense::hover());
+    painter.rect_filled(bar, CornerRadius::ZERO, ui_theme::BG);
+    // Registered before the controls, so they win the pointer; the rest drags the window.
+    crate::app::window_drag_handle(ui, bar, ui.scope_id().with("header_drag"));
+    let toggle = Rect::from_min_size(
+        egui::pos2(bar.left() + TOGGLE_LEFT, bar.center().y - TOGGLE_SIZE / 2.0),
+        Vec2::splat(TOGGLE_SIZE),
+    );
+    if sidebar_toggle(ui, toggle, true).clicked() {
+        sidebar.show = false;
+    }
     let views = [
         (SidebarView::Sessions, Icon::Terminal, "Sessions"),
         (SidebarView::Files, Icon::File, "Files (Ctrl+Shift+F)"),
     ];
     for (i, (view, icon, tip)) in views.into_iter().enumerate() {
         let rect = Rect::from_min_size(
-            egui::pos2(bar.left() + 8.0 + i as f32 * 30.0, bar.center().y - 12.0),
+            egui::pos2(toggle.right() + 8.0 + i as f32 * 30.0, bar.center().y - 12.0),
             Vec2::new(28.0, 24.0),
         );
         let resp = ui
-            .interact(rect, search_field_id().with(("view", i)), Sense::click())
+            .interact(rect, ui.scope_id().with(("view", i)), Sense::click())
             .on_hover_text(tip);
         let on = sidebar.view == view;
         if on || resp.hovered() {
@@ -151,11 +185,29 @@ pub fn draw(
             sidebar.view = view;
         }
     }
-    painter.hline(
-        bar.x_range(),
-        bar.bottom() - 0.5,
-        Stroke::new(1.0, ui_theme::SIDEBAR_DIVIDER),
-    );
+    // Files view: the close X sits in this row, at the right edge.
+    if sidebar.view == SidebarView::Files {
+        let close_rect = Rect::from_center_size(
+            egui::pos2(bar.right() - 18.0, bar.center().y),
+            Vec2::splat(22.0),
+        );
+        let close = ui
+            .interact(close_rect, ui.scope_id().with("files_close"), Sense::click())
+            .on_hover_text("Close files");
+        if close.hovered() {
+            painter.rect_filled(close_rect, CornerRadius::same(ui_theme::RADIUS_KBD), ui_theme::HOVER);
+        }
+        painter.text(
+            close_rect.center(),
+            Align2::CENTER_CENTER,
+            Icon::X.codepoint().to_string(),
+            FontId::new(12.0, FontFamily::Name(ui_theme::FONT_ICONS.into())),
+            ui_theme::TEXT_MUTED,
+        );
+        if close.clicked() {
+            sidebar.view = SidebarView::Sessions;
+        }
+    }
 
     if sidebar.view == SidebarView::Files {
         let area = Rect::from_min_max(
@@ -165,16 +217,11 @@ pub fn draw(
         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(area));
         child.set_clip_rect(area);
         child.spacing_mut().item_spacing = ui.ctx().global_style().spacing.item_spacing;
-        let (new_tab, closed) = files.draw(&mut child);
-        if let Some(cwd) = new_tab {
+        if let Some(cwd) = files.draw(&mut child) {
             let _ = workspace.open_tab(ui.ctx(), &crate::shell::default_profile(), Some(cwd));
-        }
-        if closed {
-            sidebar.view = SidebarView::Sessions;
         }
         return;
     }
-
     // --- Top actions: New session 260×30 + folder 30×30 (mockup x 6 / 273.33) ---
     ui.add_space(7.33);
     let row = ui.available_rect_before_wrap();

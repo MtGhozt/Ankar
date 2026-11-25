@@ -209,25 +209,6 @@ impl eframe::App for AnkarApp {
             &mut self.stats,
         );
 
-        // Our own title bar, full width: the OS frame is gone (chromeless window).
-        egui::Panel::top("tab_bar")
-            .exact_size(TAB_BAR_H)
-            .frame(Frame::NONE.fill(ui_theme::SURFACE_1))
-            .show_separator_line(false)
-            .show(ui, |ui| {
-                let open_stats = draw_tab_bar(
-                    ui,
-                    &mut self.workspace,
-                    &mut self.sidebar,
-                    &mut self.show_profile_menu,
-                    &self.config,
-                    &mut self.logos,
-                );
-                if open_stats {
-                    self.stats.toggle();
-                }
-            });
-
         // Manual panel widths — egui's built-in SidePanel resize fought PanelState
         // and bounced on release. We own the width via exact_size + drag handles.
         let window_w = ui
@@ -274,6 +255,25 @@ impl eframe::App for AnkarApp {
                 }
             }
         }
+
+        // Our own title bar, right of the sidebar column: the OS frame is gone (chromeless window).
+        egui::Panel::top("tab_bar")
+            .exact_size(TAB_BAR_H)
+            .frame(Frame::NONE.fill(ui_theme::BG))
+            .show_separator_line(false)
+            .show(ui, |ui| {
+                let open_stats = draw_tab_bar(
+                    ui,
+                    &mut self.workspace,
+                    &mut self.sidebar,
+                    &mut self.show_profile_menu,
+                    &self.config,
+                    &mut self.logos,
+                );
+                if open_stats {
+                    self.stats.toggle();
+                }
+            });
 
         // The tree is dropped (caches, highlighter) while the sidebar is not showing it.
         if !(self.sidebar.show && self.sidebar.view == SidebarView::Files) {
@@ -460,7 +460,7 @@ const MIN_TAB_WIDTH: f32 = 96.0;
 const WIN_BTN_W: f32 = 46.0;
 /// Fixed slot at the right edge: stats icon (22 px), gap, 3 caption buttons.
 const RIGHT_ICONS_W: f32 = 22.0 + 6.0 + 3.0 * WIN_BTN_W;
-const TAB_BAR_H: f32 = 32.0;
+const TAB_BAR_H: f32 = ui_theme::BAR_H;
 /// Caption-button hover for close, as in Windows.
 const CLOSE_RED: Color32 = Color32::from_rgb(0xE8, 0x11, 0x23);
 /// Invisible grab zones on the window edges (the OS frame is gone).
@@ -478,19 +478,14 @@ fn draw_tab_bar(
     let bar_rect = ui.max_rect();
     // Registered first, so every control added later wins the pointer; what is left of the
     // bar is the window's drag handle (double click toggles maximize).
-    let drag = ui.interact(bar_rect, ui.scope_id().with("bar_drag"), Sense::click_and_drag());
+    window_drag_handle(ui, bar_rect, ui.scope_id().with("bar_drag"));
     let maximized = ui.input(|i| i.viewport().maximized).unwrap_or(false);
-    if drag.double_clicked() {
-        ui.ctx().send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
-    } else if drag.drag_started_by(egui::PointerButton::Primary) {
-        ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
-    }
     let painter = ui.painter();
-    // Bottom border (erased under the active tab later).
+    // One continuous divider under the whole bar: nothing erases it under the active tab.
     painter.hline(
         bar_rect.x_range(),
         bar_rect.bottom() - 0.5,
-        Stroke::new(1.0, ui_theme::BORDER),
+        Stroke::new(1.0, ui_theme::CHROME_DIVIDER),
     );
 
     ui.set_min_height(TAB_BAR_H);
@@ -511,7 +506,8 @@ fn draw_tab_bar(
         bar_rect.min,
         egui::pos2(right_rect.left(), bar_rect.bottom()),
     );
-    let fixed_left = 13.0 + 28.0;
+    // The "+" slot, plus the toggle while the sidebar is hidden.
+    let fixed_left = 13.0 + 28.0 + if sidebar.show { 8.0 } else { 36.0 };
     let tab_w = ((left_rect.width() - fixed_left) / workspace.tabs.len().max(1) as f32)
         .clamp(MIN_TAB_WIDTH, TAB_WIDTH);
 
@@ -524,14 +520,13 @@ fn draw_tab_bar(
         ui.set_min_height(TAB_BAR_H);
         ui.spacing_mut().item_spacing.x = 0.0;
 
-        // One control in both states: same slot, size and hover as the right-side icons.
-        let sidebar_tip = if sidebar.show {
-            "Hide sidebar (Ctrl+Shift+B)"
-        } else {
-            "Show sidebar (Ctrl+Shift+B)"
-        };
-        if icon_square(ui, Icon::PanelLeft, sidebar_tip).clicked() {
-            sidebar.show = !sidebar.show;
+        // Sidebar shown: its own header holds the toggle. Hidden: it moves to this bar's edge.
+        ui.add_space(8.0);
+        if !sidebar.show {
+            let (slot, _) = ui.allocate_exact_size(Vec2::splat(28.0), Sense::hover());
+            if crate::sidebar::sidebar_toggle(ui, slot, false).clicked() {
+                sidebar.show = true;
+            }
         }
 
         for (i, tab) in workspace.tabs.iter().enumerate() {
@@ -539,15 +534,16 @@ fn draw_tab_bar(
             let (icon, color, logo_key) = crate::logos::agent_visual(tab, config);
             let logo_tex = logo_key.and_then(|k| logos.get(ui.ctx(), k, 16.0));
             let fill = if selected {
-                ui_theme::BG
+                ui_theme::ROW_SELECTED
             } else {
-                ui_theme::SURFACE_1
+                ui_theme::BG
             };
 
             let (rect, resp) =
                 ui.allocate_exact_size(Vec2::new(tab_w, TAB_BAR_H), Sense::click());
-            ui.painter()
-                .rect_filled(rect, CornerRadius::ZERO, fill);
+            // Fills stop above the divider, which runs unbroken under every tab.
+            let body = egui::Rect::from_min_max(rect.min, egui::pos2(rect.right(), rect.bottom() - 1.0));
+            ui.painter().rect_filled(body, CornerRadius::ZERO, fill);
 
             // Separator only between two inactive tabs.
             if i > 0 {
@@ -562,29 +558,10 @@ fn draw_tab_bar(
                 }
             }
 
-            if selected {
-                // Right edge of active tab.
-                ui.painter().vline(
-                    rect.right() - 0.5,
-                    rect.y_range(),
-                    Stroke::new(1.0, ui_theme::TAB_ACTIVE_EDGE),
-                );
-                // Erase bottom border under active tab (merge with terminal).
-                ui.painter().rect_filled(
-                    egui::Rect::from_min_max(
-                        egui::pos2(rect.left(), rect.bottom() - 2.0),
-                        egui::pos2(rect.right(), rect.bottom() + 1.0),
-                    ),
-                    CornerRadius::ZERO,
-                    ui_theme::BG,
-                );
-            }
-
             // Not `resp.hovered()`: that turns false while the pointer is on the close button.
             let tab_hovered = ui.rect_contains_pointer(rect);
             if tab_hovered && !selected {
-                ui.painter()
-                    .rect_filled(rect, CornerRadius::ZERO, ui_theme::HOVER);
+                ui.painter().rect_filled(body, CornerRadius::ZERO, ui_theme::HOVER);
             }
 
             // The X is painted on hover only (midterm), but its slot is always reserved:
@@ -623,7 +600,7 @@ fn draw_tab_bar(
                     egui::pos2(title_x, title_baseline),
                     title_right - title_x,
                     ui_theme::TEXT,
-                    ui_theme::BG,
+                    ui_theme::ROW_SELECTED,
                 );
             } else {
                 // Centered: icon + 1px gap + title.
@@ -656,7 +633,7 @@ fn draw_tab_bar(
                         ui_theme::TEXT_MUTED,
                     );
                 } else {
-                    let fade_to = if tab_hovered { ui_theme::HOVER } else { ui_theme::SURFACE_1 };
+                    let fade_to = if tab_hovered { ui_theme::HOVER } else { ui_theme::BG };
                     paint_tab_title_fade(
                         ui,
                         &title,
@@ -799,7 +776,7 @@ fn paint_tab_icon(
         SessionStatus::Active => {
             let time = ui.input(|i| i.time) as f32;
             ui.painter()
-                .circle_filled(badge, 4.5, ui_theme::SURFACE_1);
+                .circle_filled(badge, 4.5, ui_theme::BG);
             const N: u32 = 8;
             let rot = time * 1.8;
             for i in 0..N {
@@ -864,10 +841,22 @@ fn drag_resize_edge(
         ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
         ui.style().visuals.widgets.hovered.fg_stroke
     } else {
-        Stroke::new(1.0, ui_theme::SIDEBAR_BORDER)
+        Stroke::new(1.0, ui_theme::CHROME_DIVIDER)
     };
     ui.painter().vline(edge_x, y_range, stroke);
     resp
+}
+
+/// Empty bar space is the window's handle: drag moves it, double click toggles maximize.
+/// Register before the controls on top of it so they win the pointer.
+pub(crate) fn window_drag_handle(ui: &egui::Ui, rect: egui::Rect, id: egui::Id) {
+    let resp = ui.interact(rect, id, Sense::click_and_drag());
+    let maximized = ui.input(|i| i.viewport().maximized).unwrap_or(false);
+    if resp.double_clicked() {
+        ui.ctx().send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
+    } else if resp.drag_started_by(egui::PointerButton::Primary) {
+        ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+    }
 }
 
 fn icon_square(ui: &mut egui::Ui, kind: Icon, tip: &str) -> egui::Response {

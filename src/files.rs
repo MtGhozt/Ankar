@@ -186,9 +186,8 @@ impl FileViewer {
         self.set_root(dirs::home_dir());
     }
 
-    /// Draw the tree. Returns a folder that asked for a new tab ("New tab here") and whether
-    /// the X was pressed (the sidebar then goes back to Sessions).
-    pub fn draw(&mut self, ui: &mut Ui) -> (Option<PathBuf>, bool) {
+    /// Draw the tree. Returns a folder that asked for a new tab ("New tab here").
+    pub fn draw(&mut self, ui: &mut Ui) -> Option<PathBuf> {
         self.poll_load();
         if matches!(self.content, FileContent::Empty) && self.load_rx.is_none() {
             if let Some(path) = self.open_file.clone() {
@@ -196,20 +195,12 @@ impl FileViewer {
             }
         }
 
-        // The X keeps its own slot; the (possibly long) path is truncated into what is left.
+        // Just the path, truncated; the close X lives in the sidebar's header row.
         let (header, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 28.0), Sense::hover());
-        let close_rect = egui::Rect::from_center_size(
-            egui::pos2(header.right() - 14.0, header.center().y),
-            Vec2::splat(20.0),
-        );
         if let Some(root) = &self.root {
-            let path_rect = egui::Rect::from_min_max(
-                header.min,
-                egui::pos2(close_rect.left() - 6.0, header.max.y),
-            );
             ui.scope_builder(
                 egui::UiBuilder::new()
-                    .max_rect(path_rect)
+                    .max_rect(header)
                     .layout(egui::Layout::left_to_right(egui::Align::Center)),
                 |ui| {
                     ui.add(
@@ -219,22 +210,6 @@ impl FileViewer {
                 },
             );
         }
-        let close = ui.interact(close_rect, ui.scope_id().with("files_close"), Sense::click());
-        if close.hovered() {
-            ui.painter().rect_filled(
-                close_rect,
-                egui::CornerRadius::same(ui_theme::RADIUS_KBD),
-                ui_theme::HOVER,
-            );
-        }
-        ui.painter().text(
-            close_rect.center(),
-            egui::Align2::CENTER_CENTER,
-            Icon::X.codepoint().to_string(),
-            FontId::new(12.0, egui::FontFamily::Name(ui_theme::FONT_ICONS.into())),
-            ui_theme::TEXT_MUTED,
-        );
-        let closed = close.clicked();
         let (sep, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 1.0), Sense::hover());
         ui.painter().rect_filled(sep, 0.0, ui_theme::BORDER);
         ui.add_space(4.0);
@@ -244,7 +219,7 @@ impl FileViewer {
         }
         let Some(root) = self.root.clone() else {
             ui.label(ui_theme::text_sub("No home folder."));
-            return (None, closed);
+            return None;
         };
 
         ui.horizontal(|ui| {
@@ -353,7 +328,7 @@ impl FileViewer {
                 }
             }
         }
-        (new_tab, closed)
+        new_tab
     }
 }
 
