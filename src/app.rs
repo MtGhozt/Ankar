@@ -38,6 +38,8 @@ pub struct AnkarApp {
     stats: StatsPanel,
     ankar_stats: Arc<Mutex<AnkarStatsStore>>,
     footer: ShellFooter,
+    /// Font size and when it was set, for the "12 px" toast.
+    zoom_toast: Option<(f32, std::time::Instant)>,
     /// Tab the file viewer pane was opened in; it shows only there.
     pane_tab: Option<u64>,
     /// (pane shown, maximized) last frame: opening/closing it is a discrete layout jump.
@@ -91,6 +93,7 @@ impl AnkarApp {
             stats: StatsPanel::new(ankar_stats.clone()),
             ankar_stats,
             footer: ShellFooter::default(),
+            zoom_toast: None,
             pane_tab: None,
             last_pane_layout: (false, false),
             last_footer_shown: false,
@@ -225,6 +228,12 @@ impl AnkarApp {
 }
 
 impl eframe::App for AnkarApp {
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        if log::log_enabled!(log::Level::Info) {
+            log_ctrl_events(&raw_input.events, ctx.memory(|m| m.focused()));
+        }
+    }
+
     /// eframe's default is translucent #0C0C0C, which shows through unpainted gaps.
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
         [0.0, 0.0, 0.0, 1.0]
@@ -290,6 +299,7 @@ impl eframe::App for AnkarApp {
 
         if let Some(size) = ui.input_mut(|i| zoom_request(i, self.config.font_size)) {
             self.config.font_size = size;
+            self.zoom_toast = Some((size, std::time::Instant::now()));
             resize_now(&mut self.workspace);
             if !self.config_load_failed {
                 let _ = self.config.save();
@@ -575,6 +585,7 @@ impl eframe::App for AnkarApp {
 
         self.stats.draw(ui);
         window_edge_resize(ui.ctx());
+        paint_zoom_toast(&ctx, &mut self.zoom_toast);
         self.run_color_check(&ctx);
     }
 
@@ -1213,16 +1224,48 @@ fn zoomed_font(current: f32, step: f32) -> f32 {
     (current + step).clamp(ui_theme::MIN_TERM_FONT, ui_theme::MAX_TERM_FONT)
 }
 
-/// Debug aid for "my shortcut does nothing": every key event that arrives with Ctrl+Shift down,
-/// before any shortcut consumes it, plus who owns the keyboard focus.
-fn log_chord_events(events: &[egui::Event], focused: Option<egui::Id>) {
+fn zoom_toast_text(size: f32) -> String {
+    format!("{size} px")
+}
+
+const ZOOM_TOAST: Duration = Duration::from_secs(1);
+
+/// "12 px" centred over the terminal area for a second after a zoom.
+fn paint_zoom_toast(ctx: &Context, toast: &mut Option<(f32, std::time::Instant)>) {
+    let Some((size, at)) = *toast else {
+        return;
+    };
+    let left = ZOOM_TOAST.saturating_sub(at.elapsed());
+    if left.is_zero() {
+        *toast = None;
+        return;
+    }
+    let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::unique("zoom_toast")));
+    let galley = painter.layout_no_wrap(
+        zoom_toast_text(size),
+        egui::FontId::proportional(ui_theme::SIZE_UI + 2.0),
+        ui_theme::TEXT,
+    );
+    let rect = egui::Rect::from_center_size(ctx.content_rect().center(), galley.size() + Vec2::new(24.0, 12.0));
+    painter.rect(rect, CornerRadius::same(6), ui_theme::BUTTON_BG, Stroke::new(1.0, ui_theme::CHROME_DIVIDER), egui::StrokeKind::Inside);
+    painter.galley(rect.center() - galley.size() / 2.0, galley, ui_theme::TEXT);
+    ctx.request_repaint_after(left);
+}
+
+/// Debug aid for "my shortcut does nothing": every key event eframe delivers while Ctrl is down,
+/// before egui or any shortcut sees it. Ctrl+Shift chords at info (they are rare), the rest at
+/// debug. Nothing logged for a chord means the OS or another app took it first.
+fn log_ctrl_events(events: &[egui::Event], focused: Option<egui::Id>) {
     for e in events {
         if let egui::Event::Key { key, physical_key, pressed, repeat, modifiers } = e {
-            if modifiers.command && modifiers.shift {
-                log::debug!(
-                    "ctrl+shift key: {key:?} physical={physical_key:?} pressed={pressed} repeat={repeat} focus={focused:?}"
-                );
+            if !modifiers.ctrl {
+                continue;
             }
+            let level = if modifiers.shift && *pressed { log::Level::Info } else { log::Level::Debug };
+            log::log!(
+                level,
+                "key with ctrl: logical={key:?} physical={physical_key:?} mods={modifiers:?} pressed={pressed} repeat={repeat} focus={focused:?}"
+            );
         }
     }
 }
@@ -1239,11 +1282,6 @@ fn handle_shortcuts(
     let cs = Modifiers::COMMAND | Modifiers::SHIFT;
     let cmd = Modifiers::COMMAND;
     let alt = Modifiers::ALT;
-
-    if log::log_enabled!(log::Level::Debug) {
-        let focused = ctx.memory(|m| m.focused());
-        ui.input(|i| log_chord_events(&i.events, focused));
-    }
 
     ui.input_mut(|i| {
         if consume_chord(i, cs, Key::I) {
@@ -1617,8 +1655,9 @@ mod tests {
         assert_eq!(press(Key::Minus, ctrl), Some(11.0));
         assert_eq!(press(Key::Num0, ctrl), Some(ui_theme::DEFAULT_TERM_FONT));
         assert_eq!(press(Key::Equals, Modifiers::NONE), None);
-        assert_eq!(zoomed_font(ui_theme::MAX_TERM_FONT, 1.0), ui_theme::MAX_TERM_FONT);
-        assert_eq!(zoomed_font(ui_theme::MIN_TERM_FONT, -1.0), ui_theme::MIN_TERM_FONT);
+        assert_eq!(zoomed_font(24.0, 1.0), 24.0, "zoom stops at 24 px");
+        assert_eq!(zoomed_font(8.0, -1.0), 8.0, "and at 8 px");
+        assert_eq!(zoom_toast_text(12.0), "12 px");
     }
 
     #[test]

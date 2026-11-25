@@ -81,7 +81,7 @@ pub const CELL_H: f32 = 17.733;
 /// Default `font_size` in config.toml and the zoom limits.
 pub const DEFAULT_TERM_FONT: f32 = 12.0;
 pub const MIN_TERM_FONT: f32 = 8.0;
-pub const MAX_TERM_FONT: f32 = 32.0;
+pub const MAX_TERM_FONT: f32 = 24.0;
 /// Padding inside each pane before col 0 / row 0.
 pub const PANE_PAD_X: f32 = 12.0;
 pub const PANE_PAD_Y: f32 = 12.0;
