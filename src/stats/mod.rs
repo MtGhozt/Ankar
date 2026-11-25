@@ -81,7 +81,7 @@ pub enum Source {
     Ankar,
 }
 
-/// Page-wide filter: one row of the AGENTS table (a name alone is ambiguous across sources).
+/// Page-wide filter: one AGENTS row. `source` is what the click stored; matching is the tool name.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AgentFilter {
     pub source: Source,
@@ -89,12 +89,37 @@ pub struct AgentFilter {
 }
 
 impl AgentFilter {
-    /// True when no filter is set or it names this tool (old keys and OpenCode modes count).
-    pub fn allows(filter: Option<&AgentFilter>, source: Source, name: &str) -> bool {
-        filter.is_none_or(|f| {
-            f.source == source && canonical_tool(&f.name).name == canonical_tool(name).name
-        })
+    /// True when no filter is set or it names this tool, whatever source recorded it.
+    pub fn allows(filter: Option<&AgentFilter>, _source: Source, name: &str) -> bool {
+        filter.is_none_or(|f| canonical_tool(&f.name).name == canonical_tool(name).name)
     }
+}
+
+/// One row per canonical tool name. Later rows add their time, tasks, and tokens.
+fn fold_agent_rows(rows: Vec<AgentRow>) -> Vec<AgentRow> {
+    let mut out: Vec<AgentRow> = Vec::new();
+    for mut row in rows {
+        let name = canonical_tool(&row.name).name;
+        if let Some(dst) = out.iter_mut().find(|r| r.name == name) {
+            dst.busy_secs = dst.busy_secs.saturating_add(row.busy_secs);
+            dst.waiting_secs = dst.waiting_secs.saturating_add(row.waiting_secs);
+            dst.tasks = dst.tasks.saturating_add(row.tasks);
+            match (&mut dst.tokens, row.tokens.take()) {
+                (Some(have), Some(extra)) => have.add_assign(&extra),
+                (slot @ None, Some(extra)) => *slot = Some(extra),
+                _ => {}
+            }
+            if !row.modes.is_empty() {
+                for mode in row.modes.split(", ") {
+                    remember_mode(&mut dst.modes, mode);
+                }
+            }
+        } else {
+            row.name = name.to_string();
+            out.push(row);
+        }
+    }
+    out
 }
 
 #[derive(Clone, Debug)]

@@ -309,6 +309,9 @@ fn compute(
         snap.cursor_hours
     };
 
+    // One row per tool after OpenCode, cursor-agent, and Ankar have each appended theirs.
+    snap.agents = super::fold_agent_rows(std::mem::take(&mut snap.agents));
+
     // Sort days & agents.
     snap.days.sort_by(|a, b| a.day.cmp(&b.day));
     snap.agents.sort_by(|a, b| {

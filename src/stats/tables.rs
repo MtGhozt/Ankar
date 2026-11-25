@@ -409,7 +409,7 @@ mod tests {
     }
 
     #[test]
-    fn a_row_is_selected_only_for_its_own_source_and_name() {
+    fn a_row_is_selected_for_the_same_tool_from_either_source() {
         let row = AgentRow {
             source: Source::Ankar,
             name: "codex".into(),
@@ -421,8 +421,10 @@ mod tests {
         };
         let same = AgentFilter { source: Source::Ankar, name: "codex".into() };
         let other_source = AgentFilter { source: Source::OpenCode, name: "codex".into() };
+        let other_tool = AgentFilter { source: Source::OpenCode, name: "Junie".into() };
         assert!(is_selected(Some(&same), &row));
-        assert!(!is_selected(Some(&other_source), &row));
+        assert!(is_selected(Some(&other_source), &row));
+        assert!(!is_selected(Some(&other_tool), &row));
         assert!(!is_selected(None, &row));
     }
 }

@@ -457,6 +457,26 @@ mod tests {
         assert_eq!(bucket.len(), 2);
         assert_eq!(super::super::canonical_tool("build").name, "OpenCode");
         assert_eq!(super::super::canonical_tool("matias").name, "Shell");
+
+        let row = |source, name, busy, tasks, tokens| AgentRow {
+            source,
+            name,
+            busy_secs: busy,
+            waiting_secs: 0,
+            tasks,
+            tokens,
+            modes: String::new(),
+        };
+        let folded = super::super::fold_agent_rows(vec![
+            row(Source::Ankar, "OpenCode".into(), 20, 4, None),
+            row(Source::OpenCode, "build".into(), 5, 2, Some(super::super::Tokens { input: 10, ..Default::default() })),
+            row(Source::Ankar, "Junie".into(), 1, 1, None),
+        ]);
+        assert_eq!(folded.len(), 2);
+        let open = folded.iter().find(|r| r.name == "OpenCode").unwrap();
+        assert_eq!((open.busy_secs, open.tasks), (25, 6));
+        assert_eq!(open.tokens.as_ref().map(|t| t.input), Some(10));
+        assert_eq!(folded.iter().find(|r| r.name == "Junie").unwrap().busy_secs, 1);
     }
 
     #[test]
@@ -517,8 +537,12 @@ mod tests {
         assert_eq!((busy, starts, agents.len()), (30, 1, 2));
         assert_eq!(days[0].busy_secs, 30);
         assert_eq!(activity.iter().flatten().sum::<u32>(), 1);
+        // Same tool name counts even when the click stored the other source.
         let other = AgentFilter { source: Source::OpenCode, name: "codex".into() };
-        let none = AnkarStatsStore::snapshot_hours(&hours, &tz, 0, i64::MAX, Some(&other));
+        let same = AnkarStatsStore::snapshot_hours(&hours, &tz, 0, i64::MAX, Some(&other));
+        assert_eq!((same.0, same.4.len(), same.3.len()), (30, 1, 2));
+        let junie = AgentFilter { source: Source::Ankar, name: "Junie".into() };
+        let none = AnkarStatsStore::snapshot_hours(&hours, &tz, 0, i64::MAX, Some(&junie));
         assert_eq!((none.0, none.4.len(), none.3.len()), (0, 0, 2));
     }
 
