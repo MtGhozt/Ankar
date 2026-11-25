@@ -1,3 +1,4 @@
+use crate::changes::{self, ChangesAction, ChangesPane, GitWatch};
 use crate::color_check;
 use crate::config::Config;
 use crate::files::{self, FileViewer};
@@ -38,6 +39,9 @@ pub struct AnkarApp {
     stats: StatsPanel,
     ankar_stats: Arc<Mutex<AnkarStatsStore>>,
     footer: ShellFooter,
+    /// Git facts for the active tab's repo (footer chips, "± +N -N" button, changes pane).
+    git: GitWatch,
+    changes: ChangesPane,
     /// Font size and when it was set, for the "12 px" toast.
     zoom_toast: Option<(f32, std::time::Instant)>,
     /// Tab the file viewer pane was opened in; it shows only there.
@@ -93,6 +97,8 @@ impl AnkarApp {
             stats: StatsPanel::new(ankar_stats.clone()),
             ankar_stats,
             footer: ShellFooter::default(),
+            git: GitWatch::default(),
+            changes: ChangesPane::default(),
             zoom_toast: None,
             pane_tab: None,
             last_pane_layout: (false, false),
@@ -110,6 +116,20 @@ impl AnkarApp {
         if let (Some(dir), Some(PickFor::NewSession)) = (choice, purpose) {
             self.workspace.new_session_in(ctx, dir);
         }
+    }
+
+    /// The "± +N -N" button / footer chip: closes the changes pane when it shows in this tab,
+    /// else opens it here.
+    fn toggle_changes(&mut self, shown_here: bool) {
+        if shown_here {
+            self.changes.close();
+            self.pane_tab = None;
+            return;
+        }
+        if !self.files.pane_open && !self.changes.open {
+            self.files.pane_ratio = 0.5;
+        }
+        self.changes.open_here();
     }
 
     /// Types `cd "<dir>"` into the active tab's focused shell (footer picker).
@@ -314,22 +334,33 @@ impl eframe::App for AnkarApp {
             &mut self.stats,
         );
 
+        let project_key = self.workspace.active_tab().map(|t| t.project_key.clone());
+        self.git.refresh(ui.ctx(), project_key.as_deref());
+        let git = self.git.snapshot();
+        let active_id = self.workspace.active_tab().map(|t| t.id);
+        let changes_shown = self.changes.open && self.pane_tab.is_some() && self.pane_tab == active_id;
+
         // Our own title bar, full width above the sidebar (Warp layout): the OS frame is gone.
         egui::Panel::top("tab_bar")
             .exact_size(TAB_BAR_H)
             .frame(Frame::NONE.fill(ui_theme::BG))
             .show_separator_line(false)
             .show(ui, |ui| {
-                let open_stats = draw_tab_bar(
+                let changes = git.root.as_ref().map(|_| git.totals().map_or((0, 0), |t| (t.1, t.2)));
+                let clicks = draw_tab_bar(
                     ui,
                     &mut self.workspace,
                     &mut self.sidebar,
                     &mut self.show_profile_menu,
                     &self.config,
                     &mut self.logos,
+                    changes.map(|c| (c, changes_shown)),
                 );
-                if open_stats {
+                if clicks.stats {
                     self.stats.toggle();
+                }
+                if clicks.changes {
+                    self.toggle_changes(changes_shown);
                 }
             });
 
@@ -478,21 +509,22 @@ impl eframe::App for AnkarApp {
             .workspace
             .active_tab()
             .filter(|t| t.command.is_none() && t.detected.is_none())
-            .map(|t| (t.cwd.clone(), t.project_key.clone()));
+            .map(|t| t.cwd.clone());
         if shell_tab.is_some() != self.last_footer_shown {
             self.last_footer_shown = shell_tab.is_some();
             resize_now(&mut self.workspace);
         }
-        if let Some((cwd, project_key)) = shell_tab {
+        if let Some(cwd) = shell_tab {
             egui::Panel::bottom("shell_footer")
                 .exact_size(footer::FOOTER_H)
                 .frame(Frame::NONE.fill(ui_theme::BG))
                 .show_separator_line(false)
                 .show(ui, |ui| {
                     let rect = ui.max_rect();
-                    match self.footer.draw(ui, rect, cwd.as_deref(), &project_key) {
+                    match self.footer.draw(ui, rect, cwd.as_deref(), &git) {
                         Some(FooterAction::Cd(dir)) => self.cd_active_shell(&dir),
-                        Some(FooterAction::OpenChanges) | None => {}
+                        Some(FooterAction::OpenChanges) => self.toggle_changes(changes_shown),
+                        None => {}
                     }
                 });
         }
@@ -513,7 +545,13 @@ impl eframe::App for AnkarApp {
                 let font_size = self.config.font_size;
                 let dim = self.config.dim_inactive_panes;
                 let active_id = self.workspace.tabs[active].id;
+                // The viewer and the changes pane share the right-hand slot: opening one closes the other.
                 if std::mem::take(&mut self.files.just_opened) {
+                    self.changes.close();
+                    self.pane_tab = Some(active_id);
+                }
+                if std::mem::take(&mut self.changes.just_opened) {
+                    self.files.close_pane();
                     self.pane_tab = Some(active_id);
                 }
                 let pane_esc = self.files.pane_open
@@ -522,17 +560,19 @@ impl eframe::App for AnkarApp {
                     && ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape));
                 if pane_esc || self.pane_tab.is_some_and(|id| !self.workspace.tabs.iter().any(|t| t.id == id)) {
                     self.files.close_pane();
+                    self.changes.close();
                     self.pane_tab = None;
                 }
-                let pane = self.files.pane_open && self.pane_tab == Some(active_id);
-                let pane_layout = (pane, pane && self.files.maximized);
+                let pane = (self.files.pane_open || self.changes.open) && self.pane_tab == Some(active_id);
+                let maximized = if self.changes.open { self.changes.maximized } else { self.files.maximized };
+                let pane_layout = (pane, pane && maximized);
                 if pane_layout != self.last_pane_layout {
                     self.last_pane_layout = pane_layout;
                     resize_now(&mut self.workspace);
                 }
                 let area = ui.available_rect_before_wrap();
                 let (term_rect, divider, viewer) = if pane {
-                    files::pane_split(area, self.files.pane_ratio, self.files.maximized)
+                    files::pane_split(area, self.files.pane_ratio, maximized)
                 } else {
                     (Some(area), egui::Rect::NOTHING, egui::Rect::NOTHING)
                 };
@@ -564,7 +604,16 @@ impl eframe::App for AnkarApp {
                     let color = if resp.hovered() || resp.dragged() { ui_theme::DIVIDER_ACTIVE } else { ui_theme::BORDER };
                     ui.painter().vline(divider.center().x, divider.y_range(), Stroke::new(1.0, color));
                 }
-                if self.files.draw_pane(ui, viewer) == files::PaneAction::Close {
+                if self.changes.open {
+                    match self.changes.draw(ui, viewer, &git, &self.git) {
+                        Some(ChangesAction::Close) => {
+                            self.changes.close();
+                            self.pane_tab = None;
+                        }
+                        Some(ChangesAction::OpenFile(path)) => self.files.open_in_pane(ui.ctx(), path),
+                        None => {}
+                    }
+                } else if self.files.draw_pane(ui, viewer) == files::PaneAction::Close {
                     self.files.close_pane();
                     self.pane_tab = None;
                 }
@@ -651,7 +700,8 @@ fn draw_tab_bar(
     show_menu: &mut bool,
     config: &Config,
     logos: &mut LogoAtlas,
-) -> bool {
+    changes: Option<((u32, u32), bool)>,
+) -> BarClicks {
     let bar_rect = ui.max_rect();
     // Registered first, so every control added later wins the pointer; what is left of the
     // bar is the window's drag handle (double click toggles maximize).
@@ -670,15 +720,17 @@ fn draw_tab_bar(
 
     let mut switch_to = None;
     let mut close_idx = None;
-    let mut open_stats = false;
+    let mut clicks = BarClicks::default();
     let active = workspace.active_tab;
 
     let slots = strip_slots(bar_rect);
     let content = slots.content;
+    let changes_label = changes.map(|((added, removed), open)| (changes::bar_label(ui, added, removed), open));
+    let changes_w = changes_label.as_ref().map_or(0.0, |(g, _)| g.size().x + 32.0 + 6.0);
     // The right icons get their own slot; tabs shrink and are clipped to what is left, so
     // they can never slide under the icons and steal their hover.
     let right_rect = egui::Rect::from_min_max(
-        egui::pos2(content.right() - RIGHT_ICONS_W, content.top()),
+        egui::pos2(content.right() - RIGHT_ICONS_W - changes_w, content.top()),
         content.max,
     );
     let left_rect = egui::Rect::from_min_max(
@@ -886,7 +938,11 @@ fn draw_tab_bar(
             // Midterm right icon: 18px activity.
             if tab_bar_right_icon(ui, Icon::ChartColumn, "Agent usage (Ctrl+Shift+I)").clicked()
             {
-                open_stats = true;
+                clicks.stats = true;
+            }
+            if let Some((galley, open)) = changes_label {
+                ui.add_space(6.0);
+                clicks.changes = changes::bar_button(ui, galley, open).clicked();
             }
         },
     );
@@ -905,7 +961,14 @@ fn draw_tab_bar(
             workspace.mark_dirty();
         }
     }
-    open_stats
+    clicks
+}
+
+/// Right-hand tab-bar buttons clicked this frame.
+#[derive(Default)]
+struct BarClicks {
+    stats: bool,
+    changes: bool,
 }
 
 /// Where the tab bar's left controls go.

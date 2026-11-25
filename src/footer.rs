@@ -1,32 +1,19 @@
 //! Footer under a plain shell (Warp look): a cwd chip that opens the in-app "cd" picker, a git
-//! branch chip, and a changed-files chip with +N/-N lines that opens the changes pane. Git runs
-//! off the UI thread, at most every few seconds.
+//! branch chip, and a changed-files chip with +N/-N lines that opens the changes pane. The git
+//! facts come from the app's [`crate::changes::GitWatch`].
 
+use crate::changes::GitSnapshot;
 use crate::dir_picker::DirPicker;
-use crate::gitinfo::{self, FileChange};
 use crate::ui_theme::{self, Icon};
 use egui::text::LayoutJob;
 use egui::{Color32, CornerRadius, FontFamily, FontId, Pos2, Rect, Sense, Stroke, TextFormat, Ui, Vec2};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
 
 pub const FOOTER_H: f32 = 26.0;
-const GIT_EVERY: Duration = Duration::from_secs(5);
 const CHIP_H: f32 = 18.0;
 
 #[derive(Default)]
-struct GitState {
-    root: Option<PathBuf>,
-    branch: Option<String>,
-    changes: Option<Vec<FileChange>>,
-    checked: Option<Instant>,
-    running: bool,
-}
-
-#[derive(Default)]
 pub struct ShellFooter {
-    git: Arc<Mutex<GitState>>,
     picker: DirPicker,
 }
 
@@ -63,15 +50,8 @@ fn append(job: &mut LayoutJob, text: &str, color: Color32) {
 
 impl ShellFooter {
     /// Paints the footer into `rect`; reports a cd from the picker or a click on the changes chip.
-    pub fn draw(&mut self, ui: &mut Ui, rect: Rect, cwd: Option<&Path>, project_key: &str) -> Option<FooterAction> {
-        let root = Some(PathBuf::from(project_key)).filter(|r| r.join(".git").exists());
-        self.refresh(ui.ctx(), root);
-        let (branch, totals) = self
-            .git
-            .lock()
-            .map(|g| (g.branch.clone(), g.changes.as_deref().map(gitinfo::totals)))
-            .unwrap_or((None, None));
-
+    pub fn draw(&mut self, ui: &mut Ui, rect: Rect, cwd: Option<&Path>, git: &GitSnapshot) -> Option<FooterAction> {
+        let (branch, totals) = (git.branch.clone(), git.totals());
         let mut x = rect.left() + 10.0;
         let mut action = None;
         if let Some(cwd) = cwd {
@@ -106,40 +86,6 @@ impl ShellFooter {
             }
         }
         action
-    }
-
-    fn refresh(&mut self, ctx: &egui::Context, root: Option<PathBuf>) {
-        let Ok(mut g) = self.git.lock() else {
-            return;
-        };
-        let stale = g.root != root || g.checked.is_none_or(|t| t.elapsed() >= GIT_EVERY);
-        if !stale || g.running {
-            return;
-        }
-        if g.root != root {
-            *g = GitState { root: root.clone(), ..GitState::default() };
-        }
-        g.checked = Some(Instant::now());
-        let Some(root) = root else {
-            return;
-        };
-        g.running = true;
-        let (state, ctx) = (self.git.clone(), ctx.clone());
-        let spawned = std::thread::Builder::new().name("ankar-git".into()).spawn(move || {
-            let branch = gitinfo::branch(&root);
-            let changes = gitinfo::changes(&root);
-            if let Ok(mut g) = state.lock() {
-                if g.root.as_deref() == Some(root.as_path()) {
-                    g.branch = branch;
-                    g.changes = changes;
-                }
-                g.running = false;
-            }
-            ctx.request_repaint();
-        });
-        if spawned.is_err() {
-            g.running = false;
-        }
     }
 }
 

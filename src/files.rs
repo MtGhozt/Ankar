@@ -290,14 +290,19 @@ impl FileViewer {
             });
 
         if let Some(path) = clicked {
-            if !self.pane_open {
-                self.pane_ratio = 0.5;
-            }
-            self.pane_open = true;
-            self.just_opened = true;
-            self.open_path(ui.ctx(), path);
+            self.open_in_pane(ui.ctx(), path);
         }
         new_tab
+    }
+
+    /// Shows `path` in the viewer pane (tree click, or "Open in viewer" from the changes pane).
+    pub fn open_in_pane(&mut self, ctx: &egui::Context, path: PathBuf) {
+        if !self.pane_open {
+            self.pane_ratio = 0.5;
+        }
+        self.pane_open = true;
+        self.just_opened = true;
+        self.open_path(ctx, path);
     }
 
     /// The read-only viewer pane: header (path, ⋮ menu, X) over line-numbered, highlighted text.
