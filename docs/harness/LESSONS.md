@@ -161,15 +161,16 @@ Fix: Drop ends the shell tree and the OpenConsole/conhost pids captured at spawn
 thread so the pseudoconsole closes, and closes the shell handle (aa631a9).
 Guard: spawn/drop log a live ConPTY count. Not verified in Task Manager.
 
-## 2026-11-25 — Wide stats layout
-Symptom: at full width, TOKENS BY DAY / WHEN THEY WORK / MODELS / AGENTS collapsed to empty
-bars with overlapping text; at ~450 px the header and range selector overlapped.
-Root cause: chart/table code called `ui.available_width()` inside an egui horizontal layout,
-which reports ~0, so `allocate_exact_size` collapsed.
-Fix: pass the computed column width; content max ~1100 px centered; breakpoints 900 (4 KPI
-columns, pairs side by side) / 600 (2 columns, stacked) / below that 1 column; header wraps
-under 600; stats split cannot go under ~420 px (3f3b741).
-Guard: do not call `available_width()` inside `ui.horizontal` for these charts. Not verified by eye.
+## 2026-11-25 — Stats panel rows sized from the wrong ui
+Symptom: ~680 px had a tall empty block above the KPI cards and one card per row; ~1000 px
+drew all four KPIs in one squeezed card, pushed TOKENS BY DAY to the right edge, left MODELS
+empty with "3 models" centered, and dropped AGENTS; medium width clipped the agents' number columns.
+Root cause: `ui.horizontal` is cross-aligned Center, so each row grew to the remaining viewport
+height and could widen the scroll content. The next row then measured that grown width.
+Fix: measure `available_width()` once, cap content at 1100 px, and place every row at an explicit
+width (`stats_layout`: 900 → 4 columns, 600 → 2, else 1; no card under 180 px at the tested widths).
+Number columns stay a fixed width on the right. Not verified by eye.
+Guard: `stats::panel::tests::layout_breakpoints_keep_cards_at_least_180`. Do not use `ui.horizontal` around stats cards.
 
 ## 2026-11-25 — TerminalSession drop blocked the UI thread
 `TerminalSession` drop waited on OpenConsole (`WaitForSingleObject` and `ClosePseudoConsole`) on the UI thread, so a stuck host froze the window; `ad64658` moves teardown to a background thread and joins workers only after `eframe::run_native` returns.

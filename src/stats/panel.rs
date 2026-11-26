@@ -177,133 +177,40 @@ impl StatsPanel {
 
     /// Page content. Returns true when the `esc` chip was clicked.
     fn draw_contents(&mut self, ui: &mut Ui, config: &Config, logos: &mut LogoAtlas) -> bool {
-        let snap = self.snapshot.as_ref();
         let mut close = false;
 
-        let outer_w = ui.available_width();
-        let content_w = outer_w.min(CONTENT_MAX_W);
-        let tier = layout_tier(content_w);
-        let stack_header = content_w < BREAK_MEDIUM;
-
-        // Header
-        let mut draw_header_controls = |ui: &mut Ui| {
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let (esc_rect, esc_resp) =
-                    ui.allocate_exact_size(Vec2::new(29.0, 17.0), Sense::click());
-                let painter = ui.painter();
-                painter.rect_filled(esc_rect, CornerRadius::same(4), ESC_BG);
-                painter.rect_stroke(
-                    esc_rect,
-                    CornerRadius::same(4),
-                    Stroke::new(1.0, ESC_BORDER),
-                    egui::StrokeKind::Inside,
-                );
-                painter.text(
-                    esc_rect.center(),
-                    Align2::CENTER_CENTER,
-                    "esc",
-                    FontId::proportional(11.0),
-                    MUTED,
-                );
-                close = esc_resp.clicked();
-                if esc_resp.hovered() {
-                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-                }
-                ui.add_space(18.0);
-                Frame::NONE
-                    .fill(SEG_BG)
-                    .corner_radius(CornerRadius::same(6))
-                    .inner_margin(Margin::symmetric(2, 2))
-                    .show(ui, |ui| {
-                        ui.set_min_height(22.0);
-                        ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing.x = 0.0;
-                            for r in StatsRange::all().into_iter().rev() {
-                                let active = self.range == r;
-                                let resp = Frame::NONE
-                                    .fill(if active {
-                                        SEG_ACTIVE
-                                    } else {
-                                        Color32::TRANSPARENT
-                                    })
-                                    .corner_radius(CornerRadius::same(4))
-                                    .inner_margin(Margin::symmetric(8, 2))
-                                    .show(ui, |ui| {
-                                        ui.label(
-                                            RichText::new(r.label())
-                                                .size(12.0)
-                                                .color(if active { TEXT } else { MUTED }),
-                                        );
-                                    })
-                                    .response
-                                    .interact(Sense::click());
-                                if resp.clicked() && self.range != r {
-                                    self.range = r;
-                                    self.loader.request(r, self.filter_agent.clone(), false);
-                                }
-                            }
-                        });
-                    });
-                ui.add_space(6.0);
-                if ui
-                    .add(
-                        egui::Button::new(RichText::new("↻").size(14.0).color(MUTED))
-                            .frame(false),
-                    )
-                    .on_hover_text("Refresh")
-                    .clicked()
-                {
-                    self.loader.request(self.range, self.filter_agent.clone(), true);
-                }
-                if self.filter_agent.is_some() {
-                    ui.add_space(8.0);
-                    let clear = egui::Button::new(RichText::new("× clear filter").size(11.0).color(MUTED))
-                        .frame(false);
-                    if ui.add(clear).clicked() {
-                        self.filter_agent = None;
-                        self.loader.request(self.range, None, false);
-                    }
-                }
-            });
-        };
-        if stack_header {
-            ui.vertical(|ui| {
-                ui.label(RichText::new("Agent usage").size(14.0).color(TEXT));
-                let sub = snap.map(|s| s.range_label.as_str()).unwrap_or("…");
-                ui.label(RichText::new(sub).size(12.0).color(MUTED));
-                ui.add_space(6.0);
-                draw_header_controls(ui);
-            });
-        } else {
-            ui.horizontal(|ui| {
-                ui.vertical(|ui| {
-                    ui.label(RichText::new("Agent usage").size(14.0).color(TEXT));
-                    let sub = snap.map(|s| s.range_label.as_str()).unwrap_or("…");
-                    ui.label(RichText::new(sub).size(12.0).color(MUTED));
-                });
-                draw_header_controls(ui);
-            });
+        // One width for the whole page. A non-finite value would center content at infinity.
+        let mut outer_w = ui.available_width();
+        if !outer_w.is_finite() || outer_w < 0.0 {
+            outer_w = CONTENT_MAX_W;
         }
-
-        ui.add_space(12.0);
+        let plan = stats_layout(outer_w);
+        let content_w = plan.content_w;
+        let stack_header = plan.tier == LayoutTier::Narrow;
+        let leaf_spacing = ui.spacing().item_spacing;
 
         let mut draw_page = |ui: &mut Ui| {
-            draw_kpi_row(ui, snap, self.range, content_w, tier);
+            let missing = self.snapshot.is_none();
+            let range = self.range;
+            let snap = self.snapshot.clone().unwrap_or(StatsSnapshot {
+                range,
+                ..StatsSnapshot::default()
+            });
+            let sub = if missing { "…" } else { snap.range_label.as_str() };
+            close = draw_header(self, ui, content_w, stack_header, leaf_spacing, sub);
+            ui.add_space(12.0);
+            draw_kpi_row(ui, if missing { None } else { Some(&snap) }, range, plan, leaf_spacing);
             ui.add_space(14.0);
 
-            // No data yet: the same boxes, empty (a skeleton, never a blank page).
-            let skeleton = StatsSnapshot { range: self.range, ..StatsSnapshot::default() };
-            let snap = snap.unwrap_or(&skeleton);
-
-            let side_by_side = tier == LayoutTier::Wide;
-            // Middle: tokens by day + heatmap
+            // No snapshot yet: `snap` is an empty skeleton, never a blank page.
             boxes(
                 ui,
-                side_by_side,
                 200.0,
-                content_w,
-                |ui, w| charts::draw_tokens_by_day(ui, snap, w),
-                |ui, w| charts::draw_heatmap(ui, snap, w),
+                plan.columns,
+                20,
+                leaf_spacing,
+                |ui, w| charts::draw_tokens_by_day(ui, &snap, w),
+                |ui, w| charts::draw_heatmap(ui, &snap, w),
             );
 
             ui.add_space(14.0);
@@ -313,11 +220,12 @@ impl StatsPanel {
             let filter = &mut self.filter_agent;
             boxes(
                 ui,
-                side_by_side,
                 180.0,
-                content_w,
-                |ui, w| tables::draw_models(ui, snap, w),
-                |ui, w| tables::draw_agents(ui, snap, filter, config, logos, w),
+                plan.columns,
+                21,
+                leaf_spacing,
+                |ui, w| tables::draw_models(ui, &snap, w),
+                |ui, w| tables::draw_agents(ui, &snap, filter, config, logos, w),
             );
             if self.filter_agent != filter_before {
                 self.loader.request(self.range, self.filter_agent.clone(), false);
@@ -345,19 +253,28 @@ impl StatsPanel {
             ui.add_space(24.0);
         };
 
-        if outer_w > content_w + 1.0 {
-            let side = (outer_w - content_w) * 0.5;
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 0.0;
-                ui.add_space(side);
-                ui.vertical(|ui| {
-                    ui.set_width(content_w);
-                    draw_page(ui);
-                });
-            });
-        } else {
-            draw_page(ui);
-        }
+        // Pin the scroll content to this viewport width, then draw in a centered column.
+        // Adopting a child's min_rect that grew past `outer_w` is what clipped AGENTS.
+        ui.spacing_mut().item_spacing = Vec2::ZERO;
+        ui.allocate_exact_size(Vec2::new(outer_w, 0.0), Sense::hover());
+        let origin = ui.cursor().min;
+        let side = ((outer_w - content_w) * 0.5).max(0.0);
+        let col_rect = Rect::from_min_size(
+            egui::pos2(origin.x + side, origin.y),
+            Vec2::new(content_w, 100_000.0),
+        );
+        ui.scope_builder(
+            egui::UiBuilder::new()
+                .id_salt("stats_col")
+                .max_rect(col_rect)
+                .layout(egui::Layout::top_down(egui::Align::Min)),
+            |ui| {
+                ui.set_width(content_w);
+                ui.spacing_mut().item_spacing = Vec2::ZERO;
+                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
+                draw_page(ui);
+            },
+        );
         close
     }
 }
@@ -371,11 +288,55 @@ const BREAK_MEDIUM: f32 = 600.0;
 /// Minimum stats pane width when dragging the split (see `app.rs`).
 pub(crate) const STATS_PANE_MIN_W: f32 = 420.0;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum LayoutTier {
     Wide,
     Medium,
     Narrow,
+}
+
+/// Breakpoint and the widths of the KPI cards and the two lower cards.
+#[derive(Clone, Copy, Debug)]
+struct StatsLayout {
+    tier: LayoutTier,
+    content_w: f32,
+    cols: usize,
+    card_w: f32,
+    /// Lower cards: side by side on Wide, each full `content_w` when stacked.
+    columns: [f32; 2],
+}
+
+fn stats_layout(outer_w: f32) -> StatsLayout {
+    let outer_w = if outer_w.is_finite() {
+        outer_w.max(0.0)
+    } else {
+        CONTENT_MAX_W
+    };
+    let content_w = outer_w.min(CONTENT_MAX_W);
+    let tier = layout_tier(content_w);
+    let cols = match tier {
+        LayoutTier::Wide => 4,
+        LayoutTier::Medium => 2,
+        LayoutTier::Narrow => 1,
+    };
+    let card_w = if cols == 1 {
+        content_w
+    } else {
+        (content_w - KPI_GAP * (cols - 1) as f32) / cols as f32
+    };
+    let columns = if tier == LayoutTier::Wide {
+        let left = (content_w - GAP) * 0.58;
+        [left, content_w - GAP - left]
+    } else {
+        [content_w, content_w]
+    };
+    StatsLayout {
+        tier,
+        content_w,
+        cols,
+        card_w,
+        columns,
+    }
 }
 
 fn layout_tier(content_w: f32) -> LayoutTier {
@@ -393,31 +354,211 @@ const KPI_H: f32 = 105.0;
 /// Inner margin (2 x 12) plus the 1 px stroke on both sides of a box.
 const BOX_PAD: f32 = 26.0;
 
+/// Title on the left, `right` on the right, inside `width`. Does not use `ui.horizontal`.
+pub(super) fn title_row(ui: &mut Ui, width: f32, title: &str, right: &str) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(width.max(0.0), 16.0), Sense::hover());
+    let font = FontId::proportional(11.0);
+    ui.painter().text(
+        rect.left_center(),
+        Align2::LEFT_CENTER,
+        title,
+        font.clone(),
+        MUTED,
+    );
+    ui.painter().text(rect.right_center(), Align2::RIGHT_CENTER, right, font, MUTED);
+}
+
+/// One row of fixed-width cells. `left_to_right(Min)` so the row stays as tall as its
+/// contents — `ui.horizontal` is centered and would grow to the viewport height.
+fn place_row(
+    ui: &mut Ui,
+    salt: usize,
+    widths: &[f32],
+    gap: f32,
+    leaf_spacing: Vec2,
+    mut add: impl FnMut(&mut Ui, f32, usize),
+) {
+    if widths.is_empty() {
+        return;
+    }
+    let total = widths.iter().sum::<f32>() + gap * (widths.len() - 1) as f32;
+    let max_rect = Rect::from_min_size(ui.cursor().min, Vec2::new(total.max(0.0), 100_000.0));
+    ui.scope_builder(
+        egui::UiBuilder::new()
+            .id_salt(("stats_row", salt))
+            .max_rect(max_rect)
+            .layout(egui::Layout::left_to_right(egui::Align::Min)),
+        |ui| {
+            ui.spacing_mut().item_spacing = Vec2::ZERO;
+            for (i, w) in widths.iter().copied().enumerate() {
+                if i > 0 {
+                    ui.add_space(gap);
+                }
+                ui.scope_builder(
+                    egui::UiBuilder::new()
+                        .id_salt(("stats_cell", salt, i))
+                        .layout(egui::Layout::top_down(egui::Align::Min)),
+                    |ui| {
+                        ui.set_width(w);
+                        ui.spacing_mut().item_spacing = leaf_spacing;
+                        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
+                        add(ui, w, i);
+                    },
+                );
+            }
+        },
+    );
+}
+
+fn header_controls(panel: &mut StatsPanel, ui: &mut Ui) -> bool {
+    let mut close = false;
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        let (esc_rect, esc_resp) = ui.allocate_exact_size(Vec2::new(29.0, 17.0), Sense::click());
+        let painter = ui.painter();
+        painter.rect_filled(esc_rect, CornerRadius::same(4), ESC_BG);
+        painter.rect_stroke(
+            esc_rect,
+            CornerRadius::same(4),
+            Stroke::new(1.0, ESC_BORDER),
+            egui::StrokeKind::Inside,
+        );
+        painter.text(
+            esc_rect.center(),
+            Align2::CENTER_CENTER,
+            "esc",
+            FontId::proportional(11.0),
+            MUTED,
+        );
+        close = esc_resp.clicked();
+        if esc_resp.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+        ui.add_space(18.0);
+        Frame::NONE
+            .fill(SEG_BG)
+            .corner_radius(CornerRadius::same(6))
+            .inner_margin(Margin::symmetric(2, 2))
+            .show(ui, |ui| {
+                ui.set_min_height(22.0);
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Min), |ui| {
+                    ui.spacing_mut().item_spacing.x = 0.0;
+                    for r in StatsRange::all().into_iter().rev() {
+                        let active = panel.range == r;
+                        let resp = Frame::NONE
+                            .fill(if active { SEG_ACTIVE } else { Color32::TRANSPARENT })
+                            .corner_radius(CornerRadius::same(4))
+                            .inner_margin(Margin::symmetric(8, 2))
+                            .show(ui, |ui| {
+                                ui.label(
+                                    RichText::new(r.label())
+                                        .size(12.0)
+                                        .color(if active { TEXT } else { MUTED }),
+                                );
+                            })
+                            .response
+                            .interact(Sense::click());
+                        if resp.clicked() && panel.range != r {
+                            panel.range = r;
+                            panel.loader.request(r, panel.filter_agent.clone(), false);
+                        }
+                    }
+                });
+            });
+        ui.add_space(6.0);
+        if ui
+            .add(egui::Button::new(RichText::new("↻").size(14.0).color(MUTED)).frame(false))
+            .on_hover_text("Refresh")
+            .clicked()
+        {
+            panel.loader.request(panel.range, panel.filter_agent.clone(), true);
+        }
+        if panel.filter_agent.is_some() {
+            ui.add_space(8.0);
+            let clear = egui::Button::new(RichText::new("× clear filter").size(11.0).color(MUTED)).frame(false);
+            if ui.add(clear).clicked() {
+                panel.filter_agent = None;
+                panel.loader.request(panel.range, None, false);
+            }
+        }
+    });
+    close
+}
+
+fn draw_header(
+    panel: &mut StatsPanel,
+    ui: &mut Ui,
+    width: f32,
+    stack: bool,
+    leaf_spacing: Vec2,
+    sub: &str,
+) -> bool {
+    let header_h = if stack { 76.0 } else { 44.0 };
+    let header_rect = Rect::from_min_size(ui.cursor().min, Vec2::new(width, header_h));
+    let mut close = false;
+    ui.scope_builder(
+        egui::UiBuilder::new()
+            .id_salt("stats_header")
+            .max_rect(header_rect)
+            .layout(if stack {
+                egui::Layout::top_down(egui::Align::Min)
+            } else {
+                egui::Layout::left_to_right(egui::Align::Min)
+            }),
+        |ui| {
+            ui.spacing_mut().item_spacing = leaf_spacing;
+            let titles = |ui: &mut Ui| {
+                ui.label(RichText::new("Agent usage").size(14.0).color(TEXT));
+                ui.label(RichText::new(sub).size(12.0).color(MUTED));
+            };
+            if stack {
+                ui.set_width(width);
+                titles(ui);
+                ui.add_space(6.0);
+                let ctrl = Rect::from_min_size(ui.cursor().min, Vec2::new(width, 30.0));
+                ui.scope_builder(
+                    egui::UiBuilder::new()
+                        .id_salt("stats_controls")
+                        .max_rect(ctrl)
+                        .layout(egui::Layout::right_to_left(egui::Align::Center)),
+                    |ui| close = header_controls(panel, ui),
+                );
+            } else {
+                ui.scope_builder(
+                    egui::UiBuilder::new()
+                        .id_salt("stats_title")
+                        .layout(egui::Layout::top_down(egui::Align::Min)),
+                    |ui| {
+                        ui.set_max_width((width * 0.46).max(120.0));
+                        titles(ui);
+                    },
+                );
+                ui.scope_builder(
+                    egui::UiBuilder::new()
+                        .id_salt("stats_controls")
+                        .layout(egui::Layout::right_to_left(egui::Align::Center)),
+                    |ui| close = header_controls(panel, ui),
+                );
+            }
+        },
+    );
+    close
+}
+
 fn draw_kpi_row(
     ui: &mut Ui,
     snap: Option<&StatsSnapshot>,
     range: StatsRange,
-    avail: f32,
-    tier: LayoutTier,
+    plan: StatsLayout,
+    leaf_spacing: Vec2,
 ) {
-    let cols = match tier {
-        LayoutTier::Wide => 4,
-        LayoutTier::Medium => 2,
-        LayoutTier::Narrow => 1,
-    };
-    let card_w = ((avail - KPI_GAP * (cols - 1) as f32) / cols as f32).max(80.0);
+    let cols = plan.cols;
+    let widths = [plan.card_w; 4];
     for row in 0..4 / cols {
         if row > 0 {
             ui.add_space(KPI_GAP);
         }
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 0.0;
-            for i in row * cols..(row + 1) * cols {
-                if i % cols > 0 {
-                    ui.add_space(KPI_GAP);
-                }
-                draw_metric(ui, snap, range, i, card_w);
-            }
+        place_row(ui, row, &widths[..cols], KPI_GAP, leaf_spacing, |ui, w, i| {
+            draw_metric(ui, snap, range, row * cols + i, w);
         });
     }
 }
@@ -512,29 +653,33 @@ fn draw_metric(ui: &mut Ui, snap: Option<&StatsSnapshot>, range: StatsRange, i: 
     metric_card(ui, w, &value, delta, &sub, &spark, title, &tip);
 }
 
-/// Two bordered boxes: side by side (58/42) or stacked when not `side_by_side`.
+/// Two bordered boxes. Equal `columns` stack; unequal columns sit on one row.
 fn boxes(
     ui: &mut Ui,
-    side_by_side: bool,
     min_h: f32,
-    content_w: f32,
+    columns: [f32; 2],
+    salt: usize,
+    leaf_spacing: Vec2,
     left: impl FnOnce(&mut Ui, f32),
     right: impl FnOnce(&mut Ui, f32),
 ) {
-    if side_by_side {
-        let left_outer = (content_w - GAP) * 0.58;
-        let right_outer = content_w - GAP - left_outer;
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 0.0;
-            boxed(ui, left_outer, min_h, |ui, inner| left(ui, inner));
-            ui.add_space(GAP);
-            boxed(ui, right_outer, min_h, |ui, inner| right(ui, inner));
+    if columns[0] != columns[1] {
+        let mut left = Some(left);
+        let mut right = Some(right);
+        place_row(ui, salt, &columns, GAP, leaf_spacing, |ui, w, i| {
+            if i == 0 {
+                if let Some(add) = left.take() {
+                    boxed(ui, w, min_h, add);
+                }
+            } else if let Some(add) = right.take() {
+                boxed(ui, w, min_h, add);
+            }
         });
         return;
     }
-    boxed(ui, content_w, min_h, |ui, inner| left(ui, inner));
+    boxed(ui, columns[0], min_h, left);
     ui.add_space(GAP);
-    boxed(ui, content_w, min_h, |ui, inner| right(ui, inner));
+    boxed(ui, columns[1], min_h, right);
 }
 
 /// A bordered box `outer_w` wide in total; `add` receives the inner content width.
@@ -768,6 +913,28 @@ mod tests {
             Some((BADGE_NEG_BG, BADGE_NEG_FG))
         );
         assert_eq!(delta_badge_colors(None), None);
+    }
+
+    #[test]
+    fn layout_breakpoints_keep_cards_at_least_180() {
+        for w in [450.0_f32, 740.0, 1000.0, 1400.0] {
+            let layout = stats_layout(w);
+            println!(
+                "w={w:.0} tier={:?} cols={} card={:.1} columns={:.1}/{:.1} content={:.1}",
+                layout.tier,
+                layout.cols,
+                layout.card_w,
+                layout.columns[0],
+                layout.columns[1],
+                layout.content_w
+            );
+            assert!(layout.card_w >= 180.0, "{w} card {}", layout.card_w);
+            assert!(
+                layout.columns[0] >= 180.0 && layout.columns[1] >= 180.0,
+                "{w} columns {:?}",
+                layout.columns
+            );
+        }
     }
 
     #[test]

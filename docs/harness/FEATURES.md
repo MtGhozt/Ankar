@@ -98,7 +98,8 @@ What exists today, by theme. Update when behaviour changes; keep it short.
 - Stats panel (Ctrl+Shift+I, tab-bar icon, palette): read-only local usage. Opens in the right
   split pane (same slot as file viewer / changes); ranges 7 / 30 / 90 / All; one scrollable page.
   Esc clears an agent filter first, then closes; clickable `esc` chip; Ctrl+Shift+I or the icon
-  toggles. Charts (`stats/charts.rs`): tokens by day, 7×24 heatmap; tables (`stats/tables.rs`):
+  toggles. The page measures its width once and caps at 1100 px: under 600 px one KPI column,
+  under 900 two, otherwise four side by side with the charts. Charts (`stats/charts.rs`): tokens by day, 7×24 heatmap; tables (`stats/tables.rs`):
   MODELS (top 6 + "N more"), AGENTS. Agent row click filters the whole page. Ankar "agent time"
   counts launcher tabs only, keyed by launcher name, using OSC 7501 state when the shell reports it.
 

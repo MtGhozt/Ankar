@@ -6,7 +6,7 @@ use super::{AgentFilter, AgentRow, ModelRow, Source, StatsSnapshot, Tokens};
 use crate::config::Config;
 use crate::logos::{self, LogoAtlas};
 use crate::ui_theme;
-use egui::{pos2, Align2, Color32, CornerRadius, FontFamily, FontId, Rect, RichText, Sense, Ui, Vec2};
+use egui::{pos2, Align2, Color32, CornerRadius, FontFamily, FontId, Rect, Sense, Ui, Vec2};
 
 const PROVIDER_ANTHROPIC: Color32 = Color32::from_rgb(0xBB, 0x5E, 0x4C);
 const PROVIDER_GOOGLE: Color32 = Color32::from_rgb(0x41, 0x78, 0xD3);
@@ -213,12 +213,7 @@ fn is_selected(filter: Option<&AgentFilter>, a: &AgentRow) -> bool {
 
 /// Section title, `right` muted at the far end, then a #191919 line.
 fn table_title(ui: &mut Ui, title: &str, right: &str, width: f32) {
-    ui.horizontal(|ui| {
-        ui.label(RichText::new(title).size(11.0).color(MUTED).strong());
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.label(RichText::new(right).size(11.0).color(MUTED));
-        });
-    });
+    super::panel::title_row(ui, width, title, right);
     ui.add_space(4.0);
     let (line, _) = ui.allocate_exact_size(Vec2::new(width, 1.0), Sense::hover());
     ui.painter().rect_filled(line, CornerRadius::ZERO, SEP);
@@ -233,17 +228,20 @@ struct Cols {
     x: [f32; 3],
 }
 
+/// Input / output / time stay a fixed width on the right. Name and bar share the rest.
 fn cols(rect: Rect) -> Cols {
-    let last = rect.right() - 4.0;
-    let x = [last - 2.0 * COL_W, last - COL_W, last];
-    let name_w = (rect.width() - 18.0 - 3.0 * COL_W - 100.0).clamp(60.0, 132.0);
-    let bar_l = rect.left() + 18.0 + name_w + 8.0;
-    Cols {
-        name_x: rect.left() + 18.0,
-        bar_l,
-        bar_r: (x[0] - 44.0).max(bar_l + 8.0),
-        x,
-    }
+    let right = rect.right() - 2.0;
+    let x = [right - 2.0 * COL_W, right - COL_W, right];
+    let name_x = rect.left() + 18.0;
+    let num_left = x[0] - 8.0;
+    let room = (num_left - name_x).max(0.0);
+    let bar_l = if room >= 80.0 {
+        name_x + (room * 0.45).clamp(40.0, 132.0) + 8.0
+    } else {
+        num_left
+    };
+    let bar_r = if bar_l + 12.0 < num_left { num_left } else { bar_l };
+    Cols { name_x, bar_l, bar_r, x }
 }
 
 fn header_row(ui: &mut Ui, labels: [&str; 3], width: f32) {
@@ -261,7 +259,11 @@ fn header_row(ui: &mut Ui, labels: [&str; 3], width: f32) {
 }
 
 fn paint_bar(ui: &Ui, c: &Cols, y: f32, frac: f32, color: Color32) {
-    let w = (frac.clamp(0.0, 1.0) * (c.bar_r - c.bar_l)).max(4.0);
+    let span = c.bar_r - c.bar_l;
+    if span < 8.0 {
+        return;
+    }
+    let w = (frac.clamp(0.0, 1.0) * span).clamp(4.0, span);
     let r = Rect::from_min_size(pos2(c.bar_l, y - 3.0), Vec2::new(w, 6.0));
     ui.painter().rect_filled(r, CornerRadius::same(3), color);
 }
@@ -296,15 +298,25 @@ pub(super) fn draw_models(ui: &mut Ui, snap: &StatsSnapshot, width: f32) {
         x += w;
     }
     ui.add_space(4.0);
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 4.0;
-        for (fam, n) in shares.iter().take(4) {
-            let pct = *n as f64 / total.max(1) as f64 * 100.0;
-            ui.label(RichText::new("●").size(10.0).color(fam.color()));
-            ui.label(RichText::new(format!("{} {pct:.0}%", fam.label())).size(11.0).color(MUTED));
-            ui.add_space(8.0);
+    let (legend, _) = ui.allocate_exact_size(Vec2::new(width, 16.0), Sense::hover());
+    let mut x = legend.left();
+    for (fam, n) in shares.iter().take(4) {
+        let pct = *n as f64 / total.max(1) as f64 * 100.0;
+        let label = format!("{} {pct:.0}%", fam.label());
+        let need = 12.0 + label.chars().count() as f32 * 6.2 + 10.0;
+        if x > legend.left() && x + need > legend.right() {
+            break;
         }
-    });
+        ui.painter().circle_filled(pos2(x + 4.0, legend.center().y), 3.5, fam.color());
+        ui.painter().text(
+            pos2(x + 12.0, legend.center().y),
+            Align2::LEFT_CENTER,
+            label,
+            FontId::proportional(11.0),
+            MUTED,
+        );
+        x += need;
+    }
     ui.add_space(6.0);
 
     header_row(ui, ["input", "output", "tasks"], width);

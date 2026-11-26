@@ -3,7 +3,7 @@
 use super::format::format_tokens;
 use super::panel::{ordered_range_days, BAR_IN, BAR_OUT, CARD_BORDER, MUTED};
 use super::{DayBucket, StatsSnapshot};
-use egui::{pos2, Align2, Color32, CornerRadius, FontId, Rect, RichText, Sense, Stroke, Ui, Vec2};
+use egui::{pos2, Align2, Color32, CornerRadius, FontId, Rect, Sense, Stroke, Ui, Vec2};
 
 const DAY_NAMES: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 const DAY_INITIALS: [&str; 7] = ["M", "T", "W", "T", "F", "S", "S"];
@@ -84,13 +84,8 @@ fn heat_cell_at(x: f32, y: f32, cell_w: f32, cell_h: f32, gap: f32) -> Option<(u
     (inside && h < 24 && wd < 7).then_some((wd, h))
 }
 
-fn section_title(ui: &mut Ui, title: &str, right: &str) {
-    ui.horizontal(|ui| {
-        ui.label(RichText::new(title).size(11.0).color(MUTED).strong());
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.label(RichText::new(right).size(11.0).color(MUTED));
-        });
-    });
+fn section_title(ui: &mut Ui, title: &str, right: &str, width: f32) {
+    super::panel::title_row(ui, width, title, right);
     ui.add_space(8.0);
 }
 
@@ -111,6 +106,7 @@ pub(super) fn draw_tokens_by_day(ui: &mut Ui, snap: &StatsSnapshot, width: f32) 
             ordered.len().max(days_with),
             format_tokens(avg)
         ),
+        width,
     );
 
     let slots = day_slots(&ordered, &snap.days);
@@ -212,7 +208,7 @@ pub(super) fn draw_heatmap(ui: &mut Ui, snap: &StatsSnapshot, width: f32) {
     } else {
         String::new()
     };
-    section_title(ui, "WHEN THEY WORK", &right);
+    section_title(ui, "WHEN THEY WORK", &right, width);
 
     let cell_w = ((width - HEAT_LABEL_W - 23.0 * CELL_GAP) / 24.0).clamp(3.0, 15.5);
     let grid_h = 7.0 * (CELL_H + CELL_GAP) - CELL_GAP;

@@ -17,7 +17,7 @@ asserts only fire there, so a release-only check is not enough.
 - Keep logic in pure functions and test those: layout maths (`sidebar::row_layout`,
   `files::pane_split`, `app::strip_slots`, `ui_theme::cell_size`, `resize::hold_frame`),
   parsers (`osc`, `gitinfo::parse_head/parse_porcelain_z/parse_numstat_z`,
-  `changes::parse_unified/compare_url`), decisions (`status::next_status`,
+  `changes::parse_unified/compare_url`),   decisions (`status::next_status`, `stats::panel::stats_layout`,
   `dir_picker::visible_rows/step`, `window_watch::changes/layout_untrusted`,
   `procs::has_foreground_child`, `layout::new_session_cwd`, `config::migrate`).
 - Panels that are hard to click headlessly (changes pane, inbox): render a few frames with
