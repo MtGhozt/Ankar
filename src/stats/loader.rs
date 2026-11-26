@@ -266,13 +266,21 @@ fn compute(
     let mut windows = [snap, StatsSnapshot::default()];
     let n = if with_prev { 2 } else { 1 };
     let tz = jiff::tz::TimeZone::system();
+    // Clone Ankar hours before reading Junie summaries so the UI lock is not held during disk IO.
+    let hours = ankar.lock().ok().map(|store| store.hours_clone());
     opencode::load_into(&mut windows[..n], &tz, since_ms, scan_since, until_ms, filter);
     cursor_agent::load_into(&mut windows[..n], &tz, since_ms, scan_since, until_ms, filter);
-    junie::load_into(&mut windows[..n], &tz, since_ms, scan_since, until_ms, filter);
+    junie::load_into(
+        &mut windows[..n],
+        &tz,
+        since_ms,
+        scan_since,
+        until_ms,
+        prev_since,
+        hours.as_ref(),
+        filter,
+    );
     let [mut snap, mut prev] = windows;
-
-    // Hold the Ankar lock only to copy the hour buckets; the UI waits on it every frame.
-    let hours = ankar.lock().ok().map(|store| store.hours_clone());
     if let Some(hours) = &hours {
         let (busy, waiting, starts, agents, days, activity) =
             AnkarStatsStore::snapshot_hours(hours, &tz, since_ms, until_ms, filter);

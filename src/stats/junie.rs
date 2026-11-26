@@ -1,5 +1,6 @@
 //! Junie session summaries: timestamps and token totals only (no prompts, no message text).
 
+use super::ankar::{parse_hour_key, AnkarHours};
 use super::{window_idx, AgentFilter, AgentRow, DayBucket, Source, StatsSnapshot, Tokens};
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -10,12 +11,15 @@ const MAX_FILES: usize = 500;
 const MAX_BYTES: u64 = 64 * 1024;
 const AGENT_NAME: &str = "Junie";
 
+#[allow(clippy::too_many_arguments)]
 pub fn load_into(
     snaps: &mut [StatsSnapshot],
     tz: &jiff::tz::TimeZone,
     split_ms: i64,
-    since_ms: i64,
+    scan_since: i64,
     until_ms: i64,
+    prev_since: i64,
+    hours: Option<&AnkarHours>,
     filter: Option<&AgentFilter>,
 ) {
     let Some(root) = sessions_root() else {
@@ -51,15 +55,19 @@ pub fn load_into(
             continue;
         };
         let created = summary.created_at;
-        if created <= 0 || created < since_ms || created >= until_ms {
+        if created <= 0 || created < scan_since || created >= until_ms {
             continue;
         }
         let i = window_idx(split_ms, created, snaps.len());
         let updated = summary.updated_at.max(created);
         let dur_ms = (updated - created).clamp(0, 6 * 60 * 60 * 1000) as u64;
+        let dur_secs = dur_ms / 1000;
+        let (win_since, win_until) = window_bounds(i, split_ms, prev_since, until_ms);
+        let add_secs =
+            summary_busy_contribution(created, updated, dur_secs, hours, tz, win_since, win_until);
         let acc = &mut accs[i];
         acc.tasks = acc.tasks.saturating_add(1);
-        acc.busy_secs = acc.busy_secs.saturating_add(dur_ms / 1000);
+        acc.busy_secs = acc.busy_secs.saturating_add(add_secs);
         for use_ in &summary.main_agent.model_usage {
             acc.tokens.input = acc.tokens.input.saturating_add(use_.input_tokens);
             acc.tokens.output = acc.tokens.output.saturating_add(use_.output_tokens);
@@ -76,7 +84,7 @@ pub fn load_into(
             ..DayBucket::default()
         });
         d.tasks = d.tasks.saturating_add(1);
-        d.busy_secs = d.busy_secs.saturating_add(dur_ms / 1000);
+        d.busy_secs = d.busy_secs.saturating_add(add_secs);
     }
 
     for (snap, acc) in snaps.iter_mut().zip(accs) {
@@ -85,6 +93,64 @@ pub fn load_into(
         }
         finish(snap, acc);
     }
+}
+
+fn window_bounds(window: usize, split_ms: i64, prev_since: i64, until_ms: i64) -> (i64, i64) {
+    if window > 0 {
+        (prev_since, split_ms)
+    } else {
+        (split_ms, until_ms)
+    }
+}
+
+const HOUR_MS: i64 = 3_600_000;
+
+/// Busy seconds from a Junie summary when Ankar did not already record Junie busy in the overlap window.
+pub(crate) fn summary_busy_contribution(
+    created_at: i64,
+    updated_at: i64,
+    duration_secs: u64,
+    hours: Option<&AnkarHours>,
+    tz: &jiff::tz::TimeZone,
+    since_ms: i64,
+    until_ms: i64,
+) -> u64 {
+    let Some(hours) = hours else {
+        return duration_secs;
+    };
+    if ankar_recorded_junie_busy(hours, tz, created_at, updated_at, since_ms, until_ms) {
+        0
+    } else {
+        duration_secs
+    }
+}
+
+fn ankar_recorded_junie_busy(
+    hours: &AnkarHours,
+    tz: &jiff::tz::TimeZone,
+    created_at: i64,
+    updated_at: i64,
+    since_ms: i64,
+    until_ms: i64,
+) -> bool {
+    for (hour_key, agents) in hours {
+        let Some((_, _, _, ts_ms)) = parse_hour_key(hour_key, tz) else {
+            continue;
+        };
+        if ts_ms < since_ms || ts_ms >= until_ms {
+            continue;
+        }
+        let hour_end = ts_ms.saturating_add(HOUR_MS);
+        if created_at >= hour_end || updated_at <= ts_ms {
+            continue;
+        }
+        for (raw, cell) in agents {
+            if super::canonical_tool(raw).name == AGENT_NAME && cell.busy > 0 {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn sessions_root() -> Option<PathBuf> {
@@ -171,4 +237,55 @@ fn local_day(tz: &jiff::tz::TimeZone, time_ms: i64) -> String {
         return "1970-01-01".into();
     };
     ts.to_zoned_datetime(tz.clone()).strftime("%Y-%m-%d").to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::stats::AnkarHourCell;
+    use std::collections::HashMap;
+
+    #[test]
+    fn summary_busy_skips_when_ankar_timed_junie_in_overlap() {
+        let tz = jiff::tz::TimeZone::UTC;
+        let hour_start = jiff::civil::Date::strptime("%Y-%m-%d", "2026-06-01")
+            .unwrap()
+            .at(12, 0, 0, 0)
+            .to_zoned_datetime(tz.clone())
+            .unwrap()
+            .timestamp()
+            .as_millisecond();
+        let key = "2026-06-01T12".to_string();
+        let mut hours = AnkarHours::new();
+        hours.insert(
+            key,
+            HashMap::from([("junie".into(), AnkarHourCell { busy: 30, waiting: 0, starts: 1 })]),
+        );
+        let created = hour_start + 1_000;
+        let updated = created + 600_000;
+        assert_eq!(
+            summary_busy_contribution(
+                created,
+                updated,
+                600,
+                Some(&hours),
+                &tz,
+                hour_start,
+                hour_start + HOUR_MS
+            ),
+            0
+        );
+        assert_eq!(
+            summary_busy_contribution(
+                hour_start + HOUR_MS + 1_000,
+                hour_start + HOUR_MS + 601_000,
+                600,
+                Some(&hours),
+                &tz,
+                hour_start,
+                hour_start + 2 * HOUR_MS
+            ),
+            600
+        );
+    }
 }

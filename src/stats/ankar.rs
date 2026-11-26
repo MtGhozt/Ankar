@@ -335,7 +335,7 @@ fn local_hour_key() -> String {
         .to_string()
 }
 
-fn parse_hour_key(
+pub(crate) fn parse_hour_key(
     key: &str,
     tz: &jiff::tz::TimeZone,
 ) -> Option<(String, usize, usize, i64)> {
