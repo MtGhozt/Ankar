@@ -7,6 +7,11 @@
 - License: SIL Open Font License 1.1 (OFL-1.1)
 - Subset: Latin + Latin-1 Supplement + common punctuation / arrows
 
+## Ankar Symbols (fallback)
+
+- File: `ankar-symbols.ttf` (braille, arrows, geometric shapes; no emoji)
+- Source: Cascadia Code (SIL OFL 1.1, `OFL-CascadiaCode.txt`) + DejaVu Sans Mono (`LICENSE-DejaVu.txt`), subset and merged, renamed "Ankar Symbols"
+
 ## Lucide (icons)
 
 - File: `ankar-icons.ttf`

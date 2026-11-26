@@ -1,4 +1,6 @@
 use crate::config::Config;
+use crate::files::FileViewer;
+use crate::dir_picker::DirPicker;
 use crate::launchers;
 use crate::layout::{SessionStatus, Workspace};
 use crate::logos::LogoAtlas;
@@ -9,10 +11,10 @@ use egui::{
     Sense, Stroke, TextureHandle, Ui, Vec2,
 };
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::Path;
 use std::time::{Duration, Instant};
 
-/// Stable focus id for the sidebar search field (`/` shortcut in `app.rs`).
+/// Stable focus id for the sidebar search field.
 #[inline]
 pub fn search_field_id() -> egui::Id {
     egui::Id::unique("ankar_sidebar_search")
@@ -25,18 +27,99 @@ pub enum SessionFilter {
     Working,
 }
 
+/// What the sidebar column shows under its icon switch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SidebarView {
+    Sessions,
+    Files,
+}
+
+/// Sessions | Files icon row at the top of the sidebar.
+const SWITCH_ROW_H: f32 = 34.0;
+const ROW_H: f32 = 40.0;
+/// Session row: the relative time ends this far from the row's right edge (296 at the default width).
+const TIME_INSET: f32 = 13.33;
+/// Natural width of the search field and the filter pills (mockup); they never stretch.
+const CONTROL_W: f32 = 297.33;
+
+/// 6 px left inset, 5 px right.
+fn control_width(row_w: f32) -> f32 {
+    (row_w - 11.0).min(CONTROL_W)
+}
+
+/// New session button and the folder button right of it, together as wide as the search field.
+fn action_rects(row: Rect) -> (Rect, Rect) {
+    const FOLDER: f32 = 30.0;
+    const GAP: f32 = 7.33;
+    let new_w = (control_width(row.width()) - GAP - FOLDER).min(260.0);
+    let new_rect = Rect::from_min_size(egui::pos2(row.left() + 6.0, row.top()), Vec2::new(new_w, 30.0));
+    let folder = Rect::from_min_size(egui::pos2(new_rect.right() + GAP, row.top()), Vec2::splat(FOLDER));
+    (new_rect, folder)
+}
+
+/// Vertical centres and x anchors inside a session row.
+struct RowLayout {
+    icon_y: f32,
+    title_y: f32,
+    sub_y: f32,
+    time_right: f32,
+    archive_x: f32,
+    pin_x: f32,
+}
+
+/// The time hugs the right edge at any width; on hover archive and pin sit just left of it.
+fn row_layout(row: Rect, time_w: f32) -> RowLayout {
+    let mid = row.center().y;
+    let time_right = row.right() - TIME_INSET;
+    let archive_x = time_right - time_w - 6.0 - 9.0;
+    RowLayout {
+        icon_y: mid,
+        title_y: mid - 8.33,
+        sub_y: mid + 8.33,
+        time_right,
+        archive_x,
+        pin_x: archive_x - 20.0,
+    }
+}
+/// The sidebar toggle: 28 px hit area, white icon, a subtle box while the sidebar is open.
+pub fn sidebar_toggle(ui: &mut Ui, rect: Rect, open: bool) -> egui::Response {
+    let resp = ui.interact(rect, ui.scope_id().with("sidebar_toggle"), Sense::click());
+    let fill = if open {
+        ui_theme::TOGGLE_OPEN_BG
+    } else if resp.hovered() {
+        ui_theme::HOVER
+    } else {
+        Color32::TRANSPARENT
+    };
+    ui.painter().rect_filled(rect, CornerRadius::same(ui_theme::RADIUS_ROW), fill);
+    ui.painter().text(
+        rect.center(),
+        Align2::CENTER_CENTER,
+        Icon::PanelLeft.codepoint().to_string(),
+        FontId::new(15.0, FontFamily::Name(ui_theme::FONT_ICONS.into())),
+        Color32::WHITE,
+    );
+    resp.on_hover_text(if open { "Hide sidebar (Ctrl+Shift+B)" } else { "Show sidebar (Ctrl+Shift+B)" })
+}
+
 pub struct SidebarState {
     pub archived: Vec<ArchivedSession>,
     pub show: bool,
+    pub view: SidebarView,
     pub search: String,
     pub filter: SessionFilter,
     pub show_archived: bool,
     pub search_focus: bool,
     pub rename_idx: Option<usize>,
     pub rename_buf: String,
+    /// Focus the rename field only on its first frame, so clicks elsewhere can take the keyboard.
+    rename_just_started: bool,
+    /// Set by the rename field when it loses focus: `true` commits, `false` (Esc) cancels.
+    rename_finished: Option<bool>,
     pub confirm_delete: Option<usize>,
     last_relative_tick: Instant,
     cached_now: Instant,
+    pub new_session_picker: DirPicker,
 }
 
 impl Default for SidebarState {
@@ -45,15 +128,19 @@ impl Default for SidebarState {
         Self {
             archived: Vec::new(),
             show: true,
+            view: SidebarView::Sessions,
             search: String::new(),
             filter: SessionFilter::All,
             show_archived: false,
             search_focus: false,
             rename_idx: None,
             rename_buf: String::new(),
+            rename_just_started: false,
+            rename_finished: None,
             confirm_delete: None,
             last_relative_tick: now,
             cached_now: now,
+            new_session_picker: DirPicker::default(),
         }
     }
 }
@@ -73,64 +160,123 @@ pub fn draw(
     workspace: &mut Workspace,
     config: &mut Config,
     sidebar: &mut SidebarState,
+    files: &mut FileViewer,
     logos: &mut LogoAtlas,
     allow_config_save: bool,
-    sidebar_rect: Rect,
 ) {
+    let sidebar_rect = ui.max_rect();
     let _ = sidebar.now();
     ui.spacing_mut().item_spacing = Vec2::ZERO;
     let painter = ui.painter().clone();
     // midterm footer: launchers y 951–974, archived baseline 1016 in 1033 window → ~92 / ~46 from bottom.
     let divider_launcher_y = sidebar_rect.bottom() - 92.0;
     let divider_archived_y = sidebar_rect.bottom() - 46.0;
-    let filter_bottom_y = sidebar_rect.top() + 151.33;
-    let archived_list_h = if sidebar.show_archived {
-        (sidebar.archived.len() as f32 * 28.0).min(160.0) + 8.0
-    } else {
-        0.0
-    };
-    let scroll_h = (divider_launcher_y - filter_bottom_y - archived_list_h).max(60.0);
+    let filter_bottom_y = sidebar_rect.top() + SWITCH_ROW_H + 113.33;
+    let scroll_h = (divider_launcher_y - filter_bottom_y).max(60.0);
     let mut activate = None;
     let mut archive_idx = None;
     let mut close_idx = None;
     let mut toggle_pin_session = None;
     let mut new_session = false;
-    let mut new_in_folder = false;
+    let mut toggle_session_folder_picker = false;
     let mut restore = None;
     let mut forget = None;
     let mut toggle_group: Option<String> = None;
     let mut start_rename: Option<usize> = None;
 
-    // --- Top actions: New session 260×30 + folder 30×30 (mockup x 6 / 273.33) ---
-    ui.add_space(7.33); // title strip ends at y38; buttons at y45.33 → +7.33 into content
+    // --- Sessions | Files icon switch, at the top (the toggle lives in the tab bar above) ---
+    let (row, _) = ui.allocate_exact_size(Vec2::new(sidebar_rect.width(), SWITCH_ROW_H), Sense::hover());
+    let views = [
+        (SidebarView::Sessions, Icon::Terminal, "Sessions"),
+        (SidebarView::Files, Icon::File, "Files (Ctrl+Shift+F)"),
+    ];
+    for (i, (view, icon, tip)) in views.into_iter().enumerate() {
+        let rect = Rect::from_min_size(
+            egui::pos2(row.left() + 8.0 + i as f32 * 30.0, row.center().y - 12.0),
+            Vec2::new(28.0, 24.0),
+        );
+        let resp = ui
+            .interact(rect, ui.scope_id().with(("view", i)), Sense::click())
+            .on_hover_text(tip);
+        let on = sidebar.view == view;
+        if on || resp.hovered() {
+            let fill = if on { ui_theme::SEGMENT_ACTIVE } else { ui_theme::ROW_HOVER };
+            painter.rect_filled(rect, CornerRadius::same(ui_theme::RADIUS_KBD), fill);
+        }
+        painter.text(
+            rect.center(),
+            Align2::CENTER_CENTER,
+            icon.codepoint().to_string(),
+            FontId::new(15.0, FontFamily::Name(ui_theme::FONT_ICONS.into())),
+            if on { ui_theme::TEXT } else { ui_theme::TEXT_MUTED },
+        );
+        if resp.clicked() {
+            sidebar.view = view;
+        }
+    }
+    // Files view: the close X sits in this row, at the right edge, and hides the sidebar.
+    if sidebar.view == SidebarView::Files {
+        let close_rect = Rect::from_center_size(
+            egui::pos2(row.right() - 18.0, row.center().y),
+            Vec2::splat(22.0),
+        );
+        let close = ui
+            .interact(close_rect, ui.scope_id().with("files_close"), Sense::click())
+            .on_hover_text("Hide sidebar");
+        if close.hovered() {
+            painter.rect_filled(close_rect, CornerRadius::same(ui_theme::RADIUS_KBD), ui_theme::HOVER);
+        }
+        painter.text(
+            close_rect.center(),
+            Align2::CENTER_CENTER,
+            Icon::X.codepoint().to_string(),
+            FontId::new(12.0, FontFamily::Name(ui_theme::FONT_ICONS.into())),
+            ui_theme::TEXT_MUTED,
+        );
+        if close.clicked() {
+            sidebar.show = false;
+        }
+    }
+    painter.hline(row.x_range(), row.bottom() - 0.5, Stroke::new(1.0, ui_theme::SIDEBAR_DIVIDER));
+
+    if sidebar.view == SidebarView::Files {
+        let area = Rect::from_min_max(
+            egui::pos2(row.left() + 10.0, row.bottom() + 4.0),
+            egui::pos2(sidebar_rect.right() - 8.0, sidebar_rect.bottom() - 8.0),
+        );
+        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(area));
+        child.set_clip_rect(area);
+        child.spacing_mut().item_spacing = ui.ctx().global_style().spacing.item_spacing;
+        if let Some(cwd) = files.draw(&mut child) {
+            let _ = workspace.open_tab(ui.ctx(), &crate::shell::default_profile(), Some(cwd));
+        }
+        return;
+    }
+    // --- Top actions: New session 260×30 at mockup x 6, folder 30×30 beside it ---
+    ui.add_space(7.33);
     let row = ui.available_rect_before_wrap();
     let (actions_rect, _) = ui.allocate_exact_size(Vec2::new(row.width(), 30.0), Sense::hover());
     let side_l = 6.0;
-    let new_rect = Rect::from_min_size(
-        egui::pos2(actions_rect.left() + side_l, actions_rect.top()),
-        Vec2::new(260.0, 30.0),
-    );
-    let folder_rect = Rect::from_min_size(
-        egui::pos2(actions_rect.left() + 273.33, actions_rect.top()),
-        Vec2::splat(30.0),
-    );
-    // Clamp folder into row if sidebar is narrow.
-    let folder_rect = if folder_rect.right() > actions_rect.right() - 2.0 {
-        Rect::from_min_size(
-            egui::pos2(actions_rect.right() - 32.0, actions_rect.top()),
-            Vec2::splat(30.0),
-        )
-    } else {
-        folder_rect
-    };
-    let new_rect = if new_rect.right() + 6.0 > folder_rect.left() {
-        Rect::from_min_size(
-            new_rect.min,
-            Vec2::new((folder_rect.left() - 6.0 - new_rect.left()).max(120.0), 30.0),
-        )
-    } else {
-        new_rect
-    };
+    let (new_rect, folder_button_rect) = action_rects(actions_rect);
+
+    {
+        let folder = ui
+            .interact(folder_button_rect, search_field_id().with("new_in_folder"), Sense::click())
+            .on_hover_text("New session in folder…");
+        let fill = if folder.hovered() { ui_theme::ROW_HOVER } else { ui_theme::BUTTON_BG };
+        painter.rect_filled(folder_button_rect, CornerRadius::same(ui_theme::RADIUS_ROW), fill);
+        paint_button_top_highlight(&painter, folder_button_rect, ui_theme::RADIUS_ROW);
+        painter.text(
+            folder_button_rect.center(),
+            Align2::CENTER_CENTER,
+            Icon::FolderPlus.codepoint().to_string(),
+            FontId::new(16.0, FontFamily::Name(ui_theme::FONT_ICONS.into())),
+            ui_theme::TEXT,
+        );
+        if folder.clicked() {
+            toggle_session_folder_picker = true;
+        }
+    }
 
     {
         let new_resp = ui.interact(
@@ -164,7 +310,7 @@ pub fn draw(
             ui_theme::TEXT,
         );
         // Shortcut right edge at x 254.7 (mockup); shrink string if it would collide.
-        let shortcut_right = new_rect.left() + (254.7 - 6.0);
+        let shortcut_right = (new_rect.left() + (254.7 - 6.0)).min(new_rect.right() - 8.0);
         let mut shortcut = "Ctrl+Shift+T";
         let mut sg = painter.layout_no_wrap(
             shortcut.to_owned(),
@@ -179,41 +325,23 @@ pub fn draw(
                 ui_theme::TEXT_MUTED,
             );
         }
-        painter.galley(
-            egui::pos2(shortcut_right - sg.size().x, y_mid - sg.size().y * 0.5),
-            sg,
-            ui_theme::TEXT_MUTED,
-        );
+        // At the narrowest sidebar even the short form can collide with the label: drop it.
+        if shortcut_right - sg.size().x >= label_rect.right() + 8.0 {
+            painter.galley(
+                egui::pos2(shortcut_right - sg.size().x, y_mid - sg.size().y * 0.5),
+                sg,
+                ui_theme::TEXT_MUTED,
+            );
+        }
         if new_resp.clicked() {
             new_session = true;
         }
-    }
-
-    {
-        let folder_resp = ui
-            .interact(
-                folder_rect,
-                search_field_id().with("new_in_folder"),
-                Sense::click(),
-            )
-            .on_hover_text("New session in active folder");
-        let fill = if folder_resp.hovered() {
-            ui_theme::ROW_HOVER
-        } else {
-            ui_theme::BUTTON_BG
-        };
-        painter.rect_filled(folder_rect, CornerRadius::same(ui_theme::RADIUS_ROW), fill);
-        paint_button_top_highlight(&painter, folder_rect, ui_theme::RADIUS_ROW);
-        painter.text(
-            folder_rect.center(),
-            Align2::CENTER_CENTER,
-            Icon::FolderPlus.codepoint().to_string(),
-            FontId::new(17.0, FontFamily::Name(ui_theme::FONT_ICONS.into())),
-            ui_theme::TEXT_MUTED,
-        );
-        if folder_resp.clicked() {
-            new_in_folder = true;
-        }
+        new_resp.context_menu(|ui| {
+            if ui.button("New session in folder…").clicked() {
+                toggle_session_folder_picker = true;
+                ui.close();
+            }
+        });
     }
 
     // Gap mockup: buttons bottom 75.33 → search top 86 = 10.67
@@ -223,7 +351,7 @@ pub fn draw(
     let search_id = search_field_id();
     let row = ui.available_rect_before_wrap();
     let (search_row, _) = ui.allocate_exact_size(Vec2::new(row.width(), 29.33), Sense::click());
-    let search_w = (search_row.width() - side_l - 5.0).max(180.0);
+    let search_w = control_width(search_row.width());
     let search_rect = Rect::from_min_size(
         egui::pos2(search_row.left() + side_l, search_row.top()),
         Vec2::new(search_w, 29.33),
@@ -248,27 +376,36 @@ pub fn draw(
         ui_theme::TEXT_MUTED,
     );
 
-    // `/` kbd chip: 20.67×18.67 at (279.33, 91.33) → vertically centered in search.
-    let kbd_w = 20.67 * s.clamp(0.9, 1.15);
-    let kbd_h = 18.67 * s.clamp(0.9, 1.15);
-    let kbd_rect = Rect::from_center_size(
-        egui::pos2(map_sx(279.33) + kbd_w * 0.5, search_rect.center().y),
-        Vec2::new(kbd_w, kbd_h),
-    );
-    painter.rect(
-        kbd_rect,
-        CornerRadius::same(ui_theme::RADIUS_KBD),
-        ui_theme::KBD_BG,
-        Stroke::new(1.0, ui_theme::KBD_BORDER),
-        egui::StrokeKind::Inside,
-    );
-    painter.text(
-        kbd_rect.center(),
-        Align2::CENTER_CENTER,
-        "/",
-        FontId::new(ui_theme::SIZE_UI, FontFamily::Proportional),
+    // Shortcut kbd chip, right edge where the mockup's 20.67×18.67 chip at (279.33, 91.33) ends.
+    // Inter has no ⌃ glyph, so the chord is spelled out.
+    let kbd_scale = s.clamp(0.9, 1.15);
+    let kbd_h = 18.67 * kbd_scale;
+    let kbd_right = map_sx(279.33) + 20.67 * kbd_scale;
+    let kbd_galley = painter.layout_no_wrap(
+        "Ctrl+Shift+L".to_owned(),
+        FontId::new(10.0, FontFamily::Proportional),
         ui_theme::TEXT_MUTED,
     );
+    let kbd_w = kbd_galley.size().x + 10.0;
+    let kbd_rect = Rect::from_center_size(
+        egui::pos2(kbd_right - kbd_w * 0.5, search_rect.center().y),
+        Vec2::new(kbd_w, kbd_h),
+    );
+    // The chord is a hint, not a label: shown only while hovering or typing in the field.
+    if ui.rect_contains_pointer(search_rect) || ui.memory(|m| m.has_focus(search_id)) {
+        painter.rect(
+            kbd_rect,
+            CornerRadius::same(ui_theme::RADIUS_KBD),
+            ui_theme::KBD_BG,
+            Stroke::new(1.0, ui_theme::KBD_BORDER),
+            egui::StrokeKind::Inside,
+        );
+        painter.galley(
+            kbd_rect.center() - kbd_galley.size() * 0.5,
+            kbd_galley,
+            ui_theme::TEXT_MUTED,
+        );
+    }
 
     // Text field between icon and kbd.
     let edit_left = map_sx(42.67);
@@ -338,7 +475,6 @@ pub fn draw(
     let filter = sidebar.filter;
     let mut groups: BTreeMap<String, Vec<usize>> = BTreeMap::new();
     let mut pinned: Vec<usize> = Vec::new();
-
     for (i, tab) in workspace.tabs.iter().enumerate() {
         if !matches_filter(tab.status, filter) {
             continue;
@@ -346,7 +482,7 @@ pub fn draw(
         if !q.is_empty() {
             let hay = format!(
                 "{} {} {} {}",
-                tab.session_name,
+                tab.shown_name(),
                 tab.title,
                 tab.command.as_deref().unwrap_or(""),
                 tab.project_key
@@ -401,7 +537,7 @@ pub fn draw(
 
             for key in keys {
                 let indices = groups.get(&key).cloned().unwrap_or_default();
-                let display = group_display_name(&key);
+                let display = key.clone();
                 let collapsed = config.collapsed_groups.iter().any(|g| g == &key);
                 let key_clone = key.clone();
                 draw_group_header(ui, &display, collapsed, true, || {
@@ -453,18 +589,26 @@ pub fn draw(
         // midterm: first box (16.67, …) 22×22; centers pitch ≈ 35.
         let mut x = sidebar_rect.left() + 16.67;
         let y_center = launcher_rect.center().y;
+        // Squeeze the pitch so every launcher still fits on a narrow sidebar.
+        let pitch = 35.0_f32
+            .min((sidebar_rect.width() - 16.67 - 8.0 - 22.0) / launchers.len().saturating_sub(1).max(1) as f32);
         for launcher in &launchers {
             let btn_rect = Rect::from_min_size(
                 egui::pos2(x, y_center - 11.0),
                 Vec2::splat(22.0),
             );
             let tip = logos.launcher_tooltip(&launcher.name, &launcher.command, &launcher.args);
+            let detail = tip
+                .strip_prefix(&format!("{}\n", launcher.name))
+                .unwrap_or(tip.as_str());
+            let hover = format!("{}\n{detail}", launcher.name);
             let installed = logos.is_installed(&launcher.command);
-            let tex = logos.get(ui.ctx(), launcher.logo_key());
+            // Painted into the 22 px box shrunk by 2 on each side.
+            let tex = logos.get(ui.ctx(), launcher.logo_key(), 18.0);
             paint_launcher_button(ui, btn_rect, tex.as_ref(), launcher, installed);
             let resp = ui
                 .interact(btn_rect, ui.scope_id().with(&launcher.name), Sense::click())
-                .on_hover_text(tip);
+                .on_hover_text(hover);
             if resp.hovered() {
                 ui.painter().rect_filled(
                     btn_rect.expand(2.0),
@@ -474,7 +618,7 @@ pub fn draw(
                 paint_launcher_button(ui, btn_rect, tex.as_ref(), launcher, installed);
             }
             if resp.clicked() {
-                if installed {
+                if installed || logos.recheck(&launcher.command) {
                     let _ = launchers::run_launcher(ui.ctx(), workspace, launcher, cwd.clone());
                 } else {
                     let ps = crate::shell::ShellProfile::powershell();
@@ -498,7 +642,7 @@ pub fn draw(
                     );
                 }
             }
-            x += 35.0;
+            x += pitch;
         }
     });
 
@@ -544,53 +688,79 @@ pub fn draw(
         if arch_resp.clicked() {
             sidebar.show_archived = !sidebar.show_archived;
         }
+    });
 
-        if sidebar.show_archived {
-            let list_max = (archived_rect.height() - row_h - 8.0).max(40.0);
-            egui::ScrollArea::vertical()
-                .id_salt("sidebar_archived")
-                .max_height(list_max)
-                .show(ui, |ui| {
-                    for i in 0..sidebar.archived.len() {
-                        let name = sidebar.archived[i].name.clone();
-                        ui.horizontal(|ui| {
-                            ui.label(ui_theme::text_sub(name));
-                            ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
-                                if sidebar.confirm_delete == Some(i) {
-                                    if ui
-                                        .add(egui::Button::new(ui_theme::text_kbd("Yes")).frame(false))
-                                        .clicked()
-                                    {
-                                        forget = Some(i);
-                                        sidebar.confirm_delete = None;
-                                    }
-                                    if ui
-                                        .add(egui::Button::new(ui_theme::text_kbd("No")).frame(false))
-                                        .clicked()
-                                    {
-                                        sidebar.confirm_delete = None;
-                                    }
-                                    ui.label(ui_theme::text_kbd("Delete?"));
-                                } else {
-                                    if icon_btn(ui, Icon::Trash2, ui_theme::TEXT_MUTED, 20.0)
-                                        .on_hover_text("Delete")
-                                        .clicked()
-                                    {
-                                        sidebar.confirm_delete = Some(i);
-                                    }
-                                    if icon_btn(ui, Icon::ArchiveRestore, ui_theme::TEXT_MUTED, 20.0)
-                                        .on_hover_text("Restore")
-                                        .clicked()
-                                    {
-                                        restore = Some(i);
-                                    }
+    if sidebar.show_archived {
+        if ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+            sidebar.show_archived = false;
+        }
+        let max_h = sidebar_rect.height() * 0.6;
+        let arch_count = sidebar.archived.len();
+        let list_h = ((arch_count as f32 * 28.0) + 8.0).min(max_h).max(if arch_count > 0 { 40.0 } else { 0.0 });
+        egui::Area::new(egui::Id::unique("sidebar_archived_overlay"))
+            .order(egui::Order::Foreground)
+            .pivot(Align2::LEFT_BOTTOM)
+            .fixed_pos(egui::pos2(sidebar_rect.left(), divider_archived_y))
+            .show(ui.ctx(), |ui| {
+                Frame::NONE
+                    .fill(ui_theme::SIDEBAR_BG)
+                    .stroke(Stroke::new(1.0, ui_theme::SIDEBAR_DIVIDER))
+                    .corner_radius(CornerRadius::same(ui_theme::RADIUS_ROW))
+                    .shadow(ui_theme::popup_shadow())
+                    .inner_margin(Margin::symmetric(0, 4))
+                    .show(ui, |ui| {
+                        ui.set_width(sidebar_rect.width());
+                        egui::ScrollArea::vertical()
+                            .id_salt("sidebar_archived")
+                            .max_height(list_h)
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| {
+                                for i in 0..sidebar.archived.len() {
+                                    let name = ellipsize(
+                                        ui,
+                                        &sidebar.archived[i].name,
+                                        FontId::new(ui_theme::SIZE_SUB, FontFamily::Proportional),
+                                        (ui.available_width() - 90.0).max(40.0),
+                                    );
+                                    ui.horizontal(|ui| {
+                                        ui.label(ui_theme::text_sub(name));
+                                        ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                                            if sidebar.confirm_delete == Some(i) {
+                                                if ui
+                                                    .add(egui::Button::new(ui_theme::text_kbd("Yes")).frame(false))
+                                                    .clicked()
+                                                {
+                                                    forget = Some(i);
+                                                    sidebar.confirm_delete = None;
+                                                }
+                                                if ui
+                                                    .add(egui::Button::new(ui_theme::text_kbd("No")).frame(false))
+                                                    .clicked()
+                                                {
+                                                    sidebar.confirm_delete = None;
+                                                }
+                                                ui.label(ui_theme::text_kbd("Delete?"));
+                                            } else {
+                                                if icon_btn(ui, Icon::Trash2, ui_theme::TEXT_MUTED, 20.0)
+                                                    .on_hover_text("Delete")
+                                                    .clicked()
+                                                {
+                                                    sidebar.confirm_delete = Some(i);
+                                                }
+                                                if icon_btn(ui, Icon::ArchiveRestore, ui_theme::TEXT_MUTED, 20.0)
+                                                    .on_hover_text("Restore")
+                                                    .clicked()
+                                                {
+                                                    restore = Some(i);
+                                                }
+                                            }
+                                        });
+                                    });
                                 }
                             });
-                        });
-                    }
-                });
-        }
-    });
+                    });
+            });
+    }
 
     // --- Apply deferred actions ---
     if let Some(key) = toggle_group {
@@ -604,18 +774,26 @@ pub fn draw(
         }
     }
     if new_session {
-        let profile = crate::shell::default_profile();
-        let _ = workspace.open_tab(ui.ctx(), &profile, None);
+        workspace.new_session(ui.ctx());
     }
-    if new_in_folder {
-        let profile = crate::shell::default_profile();
-        let cwd = workspace.active_tab().and_then(|t| t.cwd.clone());
-        let _ = workspace.open_tab(ui.ctx(), &profile, cwd);
+    if toggle_session_folder_picker {
+        sidebar.new_session_picker.toggle_new_session();
+    }
+    if sidebar.new_session_picker.is_open() {
+        let anchor = folder_button_rect.left_bottom() + Vec2::new(0.0, 4.0);
+        if let Some(dir) = sidebar
+            .new_session_picker
+            .show(ui.ctx(), anchor, folder_button_rect, None)
+        {
+            workspace.new_session_in(ui.ctx(), dir);
+        }
     }
     if let Some(i) = start_rename {
         if let Some(tab) = workspace.tabs.get(i) {
             sidebar.rename_idx = Some(i);
             sidebar.rename_buf = tab.session_name.clone();
+            sidebar.rename_just_started = true;
+            sidebar.rename_finished = None;
         }
     }
     if let Some(i) = activate {
@@ -694,9 +872,9 @@ pub fn draw(
         }
     }
 
-    // Commit rename on Enter / click away handled inside row; apply here if buffer set
-    if let Some(i) = sidebar.rename_idx {
-        if ui.input(|inp| inp.key_pressed(egui::Key::Enter)) {
+    // The rename field reports Enter / click away (commit) or Esc (cancel) when it loses focus.
+    if let (Some(i), Some(commit)) = (sidebar.rename_idx, sidebar.rename_finished.take()) {
+        if commit {
             if let Some(tab) = workspace.tabs.get_mut(i) {
                 if !sidebar.rename_buf.trim().is_empty() {
                     tab.session_name = sidebar.rename_buf.trim().to_string();
@@ -704,11 +882,8 @@ pub fn draw(
                     workspace.mark_dirty();
                 }
             }
-            sidebar.rename_idx = None;
         }
-        if ui.input(|inp| inp.key_pressed(egui::Key::Escape)) {
-            sidebar.rename_idx = None;
-        }
+        sidebar.rename_idx = None;
     }
 }
 
@@ -720,21 +895,19 @@ fn matches_filter(status: SessionStatus, filter: SessionFilter) -> bool {
     }
 }
 
+/// Sidebar group of a session: the last folder of its project path (git root, else cwd);
+/// a drive root is its drive (`C:\` -> `C:`).
 fn project_group_key(project_key: &str) -> String {
     if project_key.is_empty() || project_key == "(no project)" {
-        return "other".into();
+        return "C:".into();
     }
-    PathBuf::from(project_key)
-        .file_name()
-        .map(|s| s.to_string_lossy().to_lowercase())
-        .unwrap_or_else(|| "other".into())
-}
-
-fn group_display_name(key: &str) -> String {
-    if key == "other" {
-        "other".into()
-    } else {
-        key.to_string()
+    let path = Path::new(project_key);
+    if let Some(name) = path.file_name() {
+        return name.to_string_lossy().into_owned();
+    }
+    match path.components().next() {
+        Some(std::path::Component::Prefix(p)) => p.as_os_str().to_string_lossy().into_owned(),
+        _ => "C:".into(),
     }
 }
 
@@ -745,17 +918,18 @@ fn draw_filter_bar(
     n_waiting: usize,
     n_working: usize,
 ) {
-    // Spinner glyph always visible — keep it turning.
-    ui.ctx()
-        .request_repaint_after(Duration::from_millis(100));
-    let time = ui.input(|i| i.time) as f32;
+    if n_working > 0 {
+        ui.ctx()
+            .request_repaint_after(Duration::from_millis(100));
+    }
+    // Frozen at 0 with nothing working: the icon is static (any other repaint must not spin it).
+    let time = if n_working > 0 { ui.input(|i| i.time) as f32 } else { 0.0 };
 
     // midterm: container x=6, w=297.33, h=28, padding 2, 3×96.67 segments.
     let row = ui.available_rect_before_wrap();
     let (row_rect, _) = ui.allocate_exact_size(Vec2::new(row.width(), 28.0), Sense::hover());
     let side_l = 6.0;
-    let side_r = 5.0;
-    let bar_w = (row_rect.width() - side_l - side_r).max(180.0);
+    let bar_w = control_width(row_rect.width());
     let bar = Rect::from_min_size(
         egui::pos2(row_rect.left() + side_l, row_rect.top()),
         Vec2::new(bar_w, 28.0),
@@ -806,6 +980,24 @@ fn draw_filter_bar(
         } else {
             ui_theme::TEXT_MUTED
         };
+
+        // Narrow sidebar: the mockup x positions no longer fit, so just center
+        // label + count in the segment (no dot / spinner) and clip to it.
+        if seg_w < 90.0 {
+            let p = painter.with_clip_rect(seg_rect);
+            let label_g = p.layout_no_wrap((*label).to_owned(), font.clone(), text_color);
+            let count_g = (*seg_filter == SessionFilter::All || *count > 0)
+                .then(|| p.layout_no_wrap(count.to_string(), font.clone(), ui_theme::TEXT_MUTED));
+            let total = label_g.size().x + count_g.as_ref().map_or(0.0, |g| 3.0 + g.size().x);
+            let x = (seg_rect.center().x - total * 0.5).max(seg_rect.left() + 2.0);
+            let y = y_mid - label_g.size().y * 0.5;
+            let count_x = x + label_g.size().x + 3.0;
+            p.galley(egui::pos2(x, y), label_g, text_color);
+            if let Some(g) = count_g {
+                p.galley(egui::pos2(count_x, y), g, ui_theme::TEXT_MUTED);
+            }
+            continue;
+        }
 
         match seg_filter {
             SessionFilter::All => {
@@ -904,11 +1096,12 @@ fn draw_group_header(
         );
         x = hdr_rect.left() + 18.0;
     }
+    let font = FontId::new(ui_theme::SIZE_UI_SMALL, FontFamily::Proportional);
     painter.text(
         egui::pos2(x, hdr_rect.center().y),
         Align2::LEFT_CENTER,
-        name,
-        FontId::new(ui_theme::SIZE_UI_SMALL, FontFamily::Proportional),
+        ellipsize(ui, name, font.clone(), hdr_rect.right() - x - 8.0),
+        font,
         ui_theme::TEXT_MUTED,
     );
     if interactive && resp.clicked() {
@@ -933,29 +1126,35 @@ fn draw_session_row(
     let Some(tab) = workspace.tabs.get(idx) else {
         return;
     };
-    const ROW_H: f32 = 45.33;
     let selected = idx == workspace.active_tab;
-    let (agent_icon, agent_color, logo_key) = agent_visual(tab, config);
-    let logo_tex = logo_key.and_then(|k| logos.get(ui.ctx(), k));
+    let (agent_icon, agent_color, logo_key) = crate::logos::agent_visual(tab, config);
+    let logo_tex = logo_key.and_then(|k| logos.get(ui.ctx(), k, 18.0));
     let now = sidebar.cached_now;
     let rel = relative_time(now.duration_since(tab.status_changed_at));
     let (sub, sub_color) = subtitle_for(tab);
 
     let full = ui.available_rect_before_wrap();
     let (row_rect, resp) = ui.allocate_exact_size(Vec2::new(full.width(), ROW_H), Sense::click());
+    // Not `resp.hovered()`: that turns false while the pointer is on the pin/archive buttons.
+    let row_hovered = ui.rect_contains_pointer(resp.rect);
 
-    // Icon 26.7 box at x 10.67; glyph ≈18 centered. Title baseline ≈ icon_top + 20.
-    let icon_rect = Rect::from_min_size(
-        egui::pos2(row_rect.left() + 10.67, row_rect.top() + 4.0),
-        Vec2::splat(26.7),
-    );
     let title_font = FontId::new(ui_theme::SIZE_UI, FontFamily::Proportional);
     let sub_font = FontId::new(ui_theme::SIZE_UI_SMALL, FontFamily::Proportional);
-    let title_y = icon_rect.top() + 13.5;
-    let sub_y = title_y + 16.67;
+    let time_galley = ui
+        .painter()
+        .layout_no_wrap(rel, sub_font.clone(), ui_theme::TEXT_MUTED);
+    let l = row_layout(row_rect, time_galley.size().x);
+    // Icon 26.7 box at x 10.67; glyph ≈18 centered.
+    let icon_rect = Rect::from_center_size(
+        egui::pos2(row_rect.left() + 10.67 + 13.35, l.icon_y),
+        Vec2::splat(26.7),
+    );
+    let (title_y, sub_y, time_right) = (l.title_y, l.sub_y, l.time_right);
     let text_left = row_rect.left() + 42.67;
-    let time_right = row_rect.left() + (296.0_f32).min(row_rect.width() - 8.0);
-    let text_w = (time_right - text_left - 8.0).max(40.0);
+    // The title stops short of the time, and of the pin/archive buttons while hovered.
+    let title_end = if row_hovered { l.pin_x - 13.0 } else { time_right - time_galley.size().x - 8.0 };
+    let text_w = (title_end - text_left).max(40.0);
+    let sub_w = (time_right - text_left).max(40.0);
 
     if sidebar.rename_idx == Some(idx) {
         let edit_rect = Rect::from_min_size(
@@ -973,7 +1172,13 @@ fn draw_session_row(
                 .desired_width(text_w)
                 .font(egui::TextStyle::Body),
         );
-        edit.request_focus();
+        if sidebar.rename_just_started {
+            edit.request_focus();
+            sidebar.rename_just_started = false;
+        } else if edit.lost_focus() {
+            let cancelled = ui.input(|i| i.key_pressed(egui::Key::Escape));
+            sidebar.rename_finished = Some(!cancelled);
+        }
     }
 
     {
@@ -989,7 +1194,7 @@ fn draw_session_row(
                 CornerRadius::same(ui_theme::RADIUS_ROW),
                 ui_theme::ROW_SELECTED,
             );
-        } else if resp.hovered() {
+        } else if row_hovered {
             painter.rect_filled(
                 bg,
                 CornerRadius::same(ui_theme::RADIUS_ROW),
@@ -1018,7 +1223,7 @@ fn draw_session_row(
         paint_status_badge(ui, badge_center, tab.status);
 
         if sidebar.rename_idx != Some(idx) {
-            let title = ellipsize(ui, &tab.session_name, title_font.clone(), text_w);
+            let title = ellipsize(ui, tab.shown_name(), title_font.clone(), text_w);
             painter.text(
                 egui::pos2(text_left, title_y),
                 Align2::LEFT_CENTER,
@@ -1027,7 +1232,7 @@ fn draw_session_row(
                 ui_theme::TEXT,
             );
         }
-        let sub_text = ellipsize(ui, &sub, sub_font.clone(), text_w);
+        let sub_text = ellipsize(ui, &sub, sub_font.clone(), sub_w);
         painter.text(
             egui::pos2(text_left, sub_y),
             Align2::LEFT_CENTER,
@@ -1036,16 +1241,15 @@ fn draw_session_row(
             sub_color,
         );
 
-        // Time on the title baseline; hover reveals archive/pin.
-        if resp.hovered() {
-            let archive_r = Rect::from_center_size(
-                egui::pos2(time_right - 10.0, title_y),
-                Vec2::splat(18.0),
-            );
-            let pin_r = Rect::from_center_size(
-                egui::pos2(time_right - 30.0, title_y),
-                Vec2::splat(18.0),
-            );
+        // Time on the title line; hover reveals archive/pin just left of it.
+        painter.galley(
+            egui::pos2(time_right - time_galley.size().x, title_y - time_galley.size().y * 0.5),
+            time_galley,
+            ui_theme::TEXT_MUTED,
+        );
+        if row_hovered {
+            let archive_r = Rect::from_center_size(egui::pos2(l.archive_x, title_y), Vec2::splat(18.0));
+            let pin_r = Rect::from_center_size(egui::pos2(l.pin_x, title_y), Vec2::splat(18.0));
             let pin_ic = if tab.pinned {
                 Icon::PinOff
             } else {
@@ -1065,26 +1269,12 @@ fn draw_session_row(
                 FontId::new(14.0, FontFamily::Name(ui_theme::FONT_ICONS.into())),
                 ui_theme::TEXT_MUTED,
             );
-        } else {
-            painter.text(
-                egui::pos2(time_right, title_y),
-                Align2::RIGHT_CENTER,
-                rel,
-                sub_font,
-                ui_theme::TEXT_MUTED,
-            );
         }
     }
 
-    if resp.hovered() {
-        let archive_r = Rect::from_center_size(
-            egui::pos2(time_right - 10.0, title_y),
-            Vec2::splat(18.0),
-        );
-        let pin_r = Rect::from_center_size(
-            egui::pos2(time_right - 30.0, title_y),
-            Vec2::splat(18.0),
-        );
+    if row_hovered {
+        let archive_r = Rect::from_center_size(egui::pos2(l.archive_x, title_y), Vec2::splat(18.0));
+        let pin_r = Rect::from_center_size(egui::pos2(l.pin_x, title_y), Vec2::splat(18.0));
         let a = ui.interact(archive_r, ui.scope_id().with(("arch", idx)), Sense::click());
         let p = ui.interact(pin_r, ui.scope_id().with(("pin", idx)), Sense::click());
         if a.clicked() {
@@ -1125,61 +1315,6 @@ fn draw_session_row(
         ui.ctx()
             .request_repaint_after(Duration::from_millis(100));
     }
-}
-
-fn agent_visual(
-    tab: &crate::layout::Tab,
-    config: &Config,
-) -> (Icon, Color32, Option<&'static str>) {
-    let name = tab.session_name.to_lowercase();
-    let cmd = tab.command.as_deref().unwrap_or("").to_lowercase();
-    let hay = format!("{name} {cmd} {}", tab.profile_id);
-
-    for launcher in &config.launchers {
-        let ln = launcher.name.to_lowercase();
-        if hay.contains(&ln) || name == ln {
-            let ic = Icon::from_name(&launcher.icon).unwrap_or(Icon::Bot);
-            let color =
-                ui_theme::parse_hex_color(&launcher.color).unwrap_or(ui_theme::TEXT_MUTED);
-            // Leak-free: map known keys to static strs for logo lookup.
-            let key = match launcher.logo_key() {
-                "opencode" => Some("opencode"),
-                "openai" | "codex" => Some("openai"),
-                "claude" | "anthropic" => Some("claude"),
-                "grok" => Some("grok"),
-                "antigravity" => Some("antigravity"),
-                "cursor" | "cursor-agent" => Some("cursor"),
-                "copilot" | "github-copilot" => Some("copilot"),
-                _ => None,
-            };
-            return (ic, color, key);
-        }
-    }
-    if hay.contains("claude") {
-        return (Icon::Sparkles, ui_theme::rgb(0xD9, 0x77, 0x57), Some("claude"));
-    }
-    if hay.contains("opencode") {
-        return (Icon::Sparkles, ui_theme::rgb(0xD9, 0x77, 0x57), Some("opencode"));
-    }
-    if hay.contains("codex") || hay.contains("openai") {
-        return (Icon::Bot, ui_theme::rgb(0x10, 0xA3, 0x7F), Some("openai"));
-    }
-    if hay.contains("cursor") {
-        return (Icon::Bot, ui_theme::rgb(0x5A, 0xA0, 0xF2), Some("cursor"));
-    }
-    if hay.contains("grok") {
-        return (Icon::Bot, ui_theme::TEXT, Some("grok"));
-    }
-    if hay.contains("antigravity") {
-        return (Icon::Bot, ui_theme::rgb(0x5A, 0xA0, 0xF2), Some("antigravity"));
-    }
-    if hay.contains("copilot") {
-        return (Icon::Bot, ui_theme::TEXT, Some("copilot"));
-    }
-    if tab.command.is_some() {
-        return (Icon::Bot, ui_theme::TEXT_MUTED, None);
-    }
-    (Icon::Terminal, ui_theme::TEXT_MUTED, None)
 }
 
 fn paint_launcher_button(
@@ -1240,6 +1375,7 @@ fn subtitle_for(tab: &crate::layout::Tab) -> (String, Color32) {
                 ("Working".into(), ui_theme::TEXT_MUTED)
             }
         }
+        SessionStatus::Idle => ("Idle".into(), ui_theme::TEXT_FAINT),
         SessionStatus::Waiting => ("Waiting".into(), ui_theme::TEXT_MUTED),
         SessionStatus::Finished => {
             if let Some(code) = tab.exit_code {
@@ -1261,6 +1397,7 @@ fn paint_status_badge(ui: &Ui, center: egui::Pos2, status: SessionStatus) {
     let time = ui.input(|i| i.time) as f32;
     let painter = ui.painter();
     match status {
+        SessionStatus::Idle => {}
         SessionStatus::Active => {
             painter.circle_filled(center, 4.5 + 1.5, ring_bg);
             paint_working_spinner(painter, center, 4.5, ui_theme::WORKING_RING_DIM, time);
@@ -1363,4 +1500,105 @@ fn paint_working_spinner(
         painter.circle_filled(p, dot_r, c);
     }
 }
+#[cfg(test)]
+mod tests {
+    use super::*;
 
+    fn empty_workspace() -> Workspace {
+        Workspace {
+            tabs: Vec::new(),
+            active_tab: 0,
+            next_id: 1,
+            profiles: Vec::new(),
+            scrollback_lines: 100,
+            dirty: false,
+            skip_save_until_dirty: true,
+            last_autosave: Instant::now(),
+        }
+    }
+
+    /// Runs `draw` for one frame of a 360x700 sidebar with the given pointer events.
+    fn frame(ctx: &egui::Context, sidebar: &mut SidebarState, events: Vec<egui::Event>) {
+        let (mut ws, mut config, mut files) = (empty_workspace(), Config::default(), FileViewer::default());
+        let mut logos = LogoAtlas::new(ctx, Vec::new());
+        let raw = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(360.0, 700.0))),
+            events,
+            ..Default::default()
+        };
+        let mut out = ctx.run_ui(raw, |ui| {
+            draw(ui, &mut ws, &mut config, sidebar, &mut files, &mut logos, false);
+        });
+        out.textures_delta.clear();
+    }
+
+    fn click(ctx: &egui::Context, sidebar: &mut SidebarState, pos: egui::Pos2) {
+        let button = |pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        frame(ctx, sidebar, vec![egui::Event::PointerMoved(pos)]);
+        frame(ctx, sidebar, vec![button(true)]);
+        frame(ctx, sidebar, vec![button(false)]);
+    }
+
+    #[test]
+    fn wide_rows_keep_the_time_at_the_right_edge_and_icons_beside_it() {
+        for width in [180.0, 309.33, 420.0] {
+            let row = Rect::from_min_size(egui::pos2(0.0, 100.0), Vec2::new(width, ROW_H));
+            let l = row_layout(row, 14.0);
+            assert!((l.time_right - (row.right() - TIME_INSET)).abs() < 1e-3, "width {width}");
+            assert!(l.archive_x + 9.0 <= l.time_right - 14.0, "archive left of the time");
+            assert!(l.pin_x + 9.0 <= l.archive_x - 9.0, "pin left of archive");
+            let (top_pad, bottom_pad) = (l.title_y - row.top(), row.bottom() - l.sub_y);
+            assert!((top_pad - bottom_pad).abs() < 0.5, "two lines centred: {top_pad} vs {bottom_pad}");
+            assert!((l.icon_y - row.center().y).abs() < 0.5);
+        }
+    }
+
+    #[test]
+    fn the_folder_button_sits_right_of_new_session_and_ends_with_the_search_field() {
+        for width in [180.0, 309.33, 420.0] {
+            let row = Rect::from_min_size(egui::pos2(0.0, 40.0), Vec2::new(width, 30.0));
+            let (new, folder) = action_rects(row);
+            assert!(folder.left() > new.right(), "width {width}");
+            assert!((folder.right() - (6.0 + control_width(width))).abs() < 0.01, "width {width}");
+            assert_eq!(folder.size(), Vec2::splat(30.0));
+            assert!(new.width() <= 260.0 && new.width() > 100.0);
+        }
+    }
+
+    #[test]
+    fn search_and_filters_keep_their_natural_width() {
+        assert_eq!(control_width(420.0), CONTROL_W);
+        assert_eq!(control_width(309.33), CONTROL_W.min(309.33 - 11.0));
+        assert_eq!(control_width(180.0), 169.0);
+    }
+
+    #[test]
+    fn files_close_hides_the_whole_sidebar_and_the_switch_sits_at_the_top() {
+        let ctx = egui::Context::default();
+        let mut sidebar = SidebarState::default();
+        frame(&ctx, &mut sidebar, Vec::new());
+        assert_eq!(sidebar.view, SidebarView::Sessions);
+        // Files icon: second slot of the switch row, the sidebar's first row.
+        let row_mid = SWITCH_ROW_H / 2.0;
+        click(&ctx, &mut sidebar, egui::pos2(8.0 + 30.0 + 14.0, row_mid));
+        assert!(sidebar.show && sidebar.view == SidebarView::Files);
+        click(&ctx, &mut sidebar, egui::pos2(360.0 - 18.0, row_mid));
+        assert!(!sidebar.show, "X hides the sidebar like the toggle");
+        assert_eq!(sidebar.view, SidebarView::Files, "the view is kept for next time");
+    }
+
+    #[test]
+    fn groups_are_the_project_folder_name_never_other() {
+        assert_eq!(project_group_key(r"C:\dev\Ankar"), "Ankar");
+        assert_eq!(project_group_key(r"C:\Users\Matias\code\OLAP"), "OLAP");
+        assert_eq!(project_group_key(r"C:\Users\Matias"), "Matias");
+        assert_eq!(project_group_key(r"C:\"), "C:");
+        assert_eq!(project_group_key("(no project)"), "C:");
+        assert_eq!(project_group_key(""), "C:");
+    }
+}

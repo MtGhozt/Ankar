@@ -1,16 +1,19 @@
-use super::backend::{CellMetrics, TerminalSession, VisibleCell};
+use super::backend::{CellMetrics, ResizeState, TerminalSession, VisibleCell};
+use super::resize::DEBOUNCE;
 use super::bindings::{map_key, KeyAction};
-use crate::ui_theme::{self, CELL_H, CELL_W, PANE_PAD_X, PANE_PAD_Y};
+use crate::ui_theme::{self, PANE_PAD_X, PANE_PAD_Y};
 use alacritty_terminal::index::{Column, Line, Point};
 use alacritty_terminal::selection::{SelectionRange, SelectionType};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::TermMode;
+use alacritty_terminal::vte::ansi::CursorShape;
 use egui::epaint::RectShape;
 use egui::text::{LayoutJob, TextFormat};
 use egui::{
-    Color32, CornerRadius, FontId, Frame, Pos2, Rect, Sense, Shape, Stroke, Ui, Vec2,
+    Color32, CornerRadius, FontId, Pos2, Rect, Sense, Shape, Stroke, Ui, Vec2,
 };
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 const FONT_FAMILY: egui::FontFamily = egui::FontFamily::Monospace;
 
@@ -26,16 +29,26 @@ impl TerminalView {
         let available = ui.available_size();
         let (response, painter) = ui.allocate_painter(available, Sense::click_and_drag());
         let ppp = ui.ctx().pixels_per_point();
+        if let Some(text) = session.take_clipboard() {
+            ui.ctx().copy_text(text);
+        }
 
-        // Midterm: Hack at 14.33 with fixed cell metrics (config size is for scroll only).
-        let paint_size = ui_theme::TERM_FONT_SIZE;
-        let font_id = FontId::new(paint_size, FONT_FAMILY);
+        // Hack at the configured size. Cell size is the font's advance and line box.
+        ui_theme::sync_cell_metrics(ui.ctx());
+        let font_id = FontId::new(ui_theme::term_font_size(), FONT_FAMILY);
         let metrics = CellMetrics {
-            width: CELL_W,
-            height: CELL_H,
+            width: ui_theme::cell_w(),
+            height: ui_theme::cell_h(),
         };
         let content = content_rect(response.rect, ppp);
-        session.resize(content.width(), content.height(), metrics);
+        match session.resize(content.width(), content.height(), metrics) {
+            ResizeState::Idle => {}
+            ResizeState::Pending => ui.ctx().request_repaint_after(DEBOUNCE),
+            ResizeState::Applied => {
+                ui_theme::log_cell_metrics(Some(session.grid()));
+                ui.ctx().request_repaint();
+            }
+        }
 
         // Only take focus on click/drag — never every frame, or sidebar search
         // and other TextEdits can never keep the keyboard.
@@ -50,31 +63,33 @@ impl TerminalView {
             response.request_focus();
         }
 
-        if focused {
-            if response.has_focus() {
-                ui.memory_mut(|m| {
-                    m.set_focus_lock_filter(
-                        response.id,
-                        egui::EventFilter {
-                            tab: true,
-                            horizontal_arrows: true,
-                            vertical_arrows: true,
-                            escape: true,
-                        },
-                    );
-                });
-            }
-            // Keys only when the terminal widget has focus (sidebar search can keep it).
-            handle_input(
-                ui,
-                &response,
-                session,
-                font_size,
-                response.has_focus(),
-                content,
-            );
+        if focused && response.has_focus() {
+            ui.memory_mut(|m| {
+                m.set_focus_lock_filter(
+                    response.id,
+                    egui::EventFilter {
+                        tab: true,
+                        horizontal_arrows: true,
+                        vertical_arrows: true,
+                        escape: true,
+                    },
+                );
+            });
         }
-        paint_grid(ui, &response, &painter, session, &font_id, metrics, content);
+        // Pointer reporting must work while hovering, even if another widget owns
+        // the keyboard. Keys stay gated on this pane being active and focused.
+        handle_input(
+            ui,
+            &response,
+            session,
+            font_size,
+            focused && response.has_focus(),
+            content,
+        );
+        paint_grid(ui, &response, &painter, session, &font_id, metrics, content, focused);
+        if session.holding_frame() {
+            ui.ctx().request_repaint_after(Duration::from_millis(16));
+        }
         response
     }
 }
@@ -226,13 +241,25 @@ fn handle_wheel(
     }
 }
 
+/// Protocol modifier bits: shift 4, alt 8, ctrl 16.
+fn mouse_modifiers(m: egui::Modifiers) -> u8 {
+    (if m.shift { 4 } else { 0 })
+        | (if m.alt { 8 } else { 0 })
+        | (if m.ctrl || m.command { 16 } else { 0 })
+}
+
 fn handle_mouse_report(
     ui: &Ui,
     response: &egui::Response,
     session: &mut TerminalSession,
     content: Rect,
 ) {
+    if !response.hovered() {
+        session.clear_mouse_motion();
+        return;
+    }
     let mode = session.snapshot().mode;
+    let modifiers = ui.input(|i| i.modifiers);
     let events: Vec<egui::Event> = ui.input(|i| i.events.clone());
     for event in events {
         match event {
@@ -240,6 +267,7 @@ fn handle_mouse_report(
                 pos,
                 button,
                 pressed,
+                modifiers,
                 ..
             } if response.rect.contains(pos) => {
                 let local = to_content_local(pos, content);
@@ -250,7 +278,14 @@ fn handle_mouse_report(
                     egui::PointerButton::Secondary => 2,
                     egui::PointerButton::Extra1 | egui::PointerButton::Extra2 => continue,
                 };
-                session.report_mouse(btn, col, row, pressed, false);
+                session.report_mouse(
+                    btn,
+                    col,
+                    row,
+                    pressed,
+                    false,
+                    mouse_modifiers(modifiers),
+                );
             }
             egui::Event::PointerMoved(pos)
                 if response.rect.contains(pos)
@@ -266,12 +301,13 @@ fn handle_mouse_report(
                 } else if ui.input(|i| i.pointer.button_down(egui::PointerButton::Secondary)) {
                     2
                 } else if mode.contains(TermMode::MOUSE_MOTION) {
-                    3 // motion with no button (rare)
+                    3 // motion with no button held (DECSET 1003)
                 } else {
                     continue;
                 };
+                // 1002 only reports drags; 1003 also reports plain hover.
                 if pressed || mode.contains(TermMode::MOUSE_MOTION) {
-                    session.report_mouse(btn, col, row, true, true);
+                    session.report_mouse(btn, col, row, true, true, mouse_modifiers(modifiers));
                 }
             }
             egui::Event::MouseWheel { delta, .. } if response.hovered() => {
@@ -284,8 +320,9 @@ fn handle_mouse_report(
                 let local = to_content_local(pos, content);
                 let (col, row) = session.cell_at(local.x, local.y);
                 let btn = if delta.y > 0.0 { 64 } else { 65 };
-                session.report_mouse(btn, col, row, true, false);
+                session.report_mouse(btn, col, row, true, false, mouse_modifiers(modifiers));
             }
+            egui::Event::PointerGone => session.clear_mouse_motion(),
             _ => {}
         }
     }
@@ -365,6 +402,7 @@ fn handle_selection_pointer(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn paint_grid(
     ui: &Ui,
     response: &egui::Response,
@@ -373,6 +411,7 @@ fn paint_grid(
     font_id: &FontId,
     metrics: CellMetrics,
     content_area: Rect,
+    focused: bool,
 ) {
     let colors = session.colors.clone();
     let grid = session.sync();
@@ -388,11 +427,12 @@ fn paint_grid(
     ))];
 
     let display_offset = grid.display_offset as i32;
-    let cursor_point = grid.cursor;
-    let app_cursor = grid.mode.contains(TermMode::APP_CURSOR);
-    // TUIs (OpenCode, etc.) draw their own cursor on the alternate screen.
-    let alt_screen = grid.mode.contains(TermMode::ALT_SCREEN);
     let selection = grid.selection;
+    // row_top(n) snapped; bottom = next row's top (no seams).
+    let row_span = |row: i32| {
+        let y = ui_theme::term_row_top(origin.y, row, ppp);
+        (y, ui_theme::term_row_top(origin.y, row + 1, ppp) - y)
+    };
 
     let mut by_line: BTreeMap<i32, Vec<&VisibleCell>> = BTreeMap::new();
     for cell in &grid.cells {
@@ -400,33 +440,66 @@ fn paint_grid(
         by_line.entry(row).or_default().push(cell);
     }
 
+    let cursor = host_cursor(grid, &colors, focused && ui.input(|i| i.focused));
+    let block_cursor = cursor
+        .filter(|c| c.shape == CursorShape::Block)
+        .map(|c| c.point);
+
     for (row, cells) in &by_line {
-        // row_top(n) snapped; bottom = next row's top (no seams).
-        let y = ui_theme::term_row_top(origin.y, *row, ppp);
-        let y_next = ui_theme::term_row_top(origin.y, *row + 1, ppp);
-        let row_h = (y_next - y).max(cell_h);
+        let (y, row_h) = row_span(*row);
         paint_row_backgrounds(
             &mut shapes,
             origin.x,
             y,
-            cell_w,
             row_h,
             cells,
             selection,
             &colors,
-            cursor_point,
             ppp,
-            !alt_screen,
         );
+    }
+
+    paint_edge_backgrounds(
+        &mut shapes,
+        response.rect,
+        origin,
+        (grid.size.num_cols, grid.size.num_lines),
+        &by_line,
+        &colors,
+        ppp,
+    );
+
+    // Above backgrounds, below glyphs: a block cursor shows the text in the cell's bg.
+    if let Some(cursor) = cursor {
+        let row = cursor.point.line.0 + display_offset;
+        if (0..grid.size.num_lines as i32).contains(&row) {
+            let (y, row_h) = row_span(row);
+            let col = cursor.point.column.0 as u16;
+            let x = ui_theme::term_col_x(origin.x, col, ppp);
+            let x_end = ui_theme::term_col_x(origin.x, col.saturating_add(cursor.width), ppp);
+            paint_cursor(
+                &mut shapes,
+                Rect::from_min_max(Pos2::new(x, y), Pos2::new(x_end, y + row_h)),
+                cursor.shape,
+                cursor.color,
+                ppp,
+            );
+        }
+    }
+
+    for (row, cells) in &by_line {
+        let (y, row_h) = row_span(*row);
         paint_row_box_drawing(
             &mut shapes,
             origin.x,
             y,
             cell_w,
             cell_h,
+            row_h,
             cells,
             selection,
             &colors,
+            block_cursor,
             ppp,
         );
         paint_row_text(
@@ -434,14 +507,12 @@ fn paint_grid(
             &mut shapes,
             origin.x,
             y,
-            cell_w,
+            row_h,
             cells,
             selection,
             &colors,
             font_id,
-            app_cursor,
-            cursor_point,
-            !alt_screen,
+            block_cursor,
             ppp,
         );
         paint_row_underlines(
@@ -456,62 +527,396 @@ fn paint_grid(
         );
     }
 
-    if !alt_screen {
-        let cursor_row = cursor_point.line.0 + display_offset;
-        let cursor_on_skipped = !grid.cells.iter().any(|c| {
-            c.line == cursor_point.line.0 && c.col as usize == cursor_point.column.0
-        });
-        let window_focused = ui.input(|i| i.focused);
-        if cursor_on_skipped {
-            let x = ui_theme::term_col_x(origin.x, cursor_point.column.0 as u16, ppp);
-            let y = ui_theme::term_row_top(origin.y, cursor_row, ppp);
-            let y_next = ui_theme::term_row_top(origin.y, cursor_row + 1, ppp);
-            paint_cursor(
-                &mut shapes,
-                x,
-                y,
-                cell_w,
-                (y_next - y).max(cell_h),
-                colors.cursor,
-                window_focused,
-            );
-        }
-    }
-
     painter.extend(shapes);
-
-    let _ = Frame::NONE;
 }
 
+#[derive(Clone, Copy, Debug)]
+struct HostCursor {
+    point: Point,
+    shape: CursorShape,
+    color: Color32,
+    /// Cells covered: 2 on a wide glyph.
+    width: u16,
+}
+
+/// The cursor the app asked for (DECSCUSR shape, OSC 12 colour, DECTCEM visibility).
+/// An unfocused pane always shows the hollow box.
+fn host_cursor(
+    grid: &super::backend::Snapshot,
+    colors: &super::theme::TermColors,
+    focused: bool,
+) -> Option<HostCursor> {
+    if grid.cursor_shape == CursorShape::Hidden {
+        return None;
+    }
+    let point = grid.cursor;
+    let wide = grid.cells.iter().any(|c| {
+        c.line == point.line.0
+            && c.col as usize == point.column.0
+            && c.flags.contains(Flags::WIDE_CHAR)
+    });
+    Some(HostCursor {
+        point,
+        shape: if focused {
+            grid.cursor_shape
+        } else {
+            CursorShape::HollowBlock
+        },
+        color: grid
+            .cursor_color
+            .map(|c| Color32::from_rgb(c.r, c.g, c.b))
+            .unwrap_or(colors.cursor),
+        width: if wide { 2 } else { 1 },
+    })
+}
+
+/// `cell` is the snapped cell rect; every part is a whole-pixel solid rect.
 fn paint_cursor(
+    shapes: &mut Vec<Shape>,
+    cell: Rect,
+    shape: CursorShape,
+    color: Color32,
+    ppp: f32,
+) {
+    let px = 1.0 / ppp.max(f32::EPSILON);
+    let rect = |x0: f32, y0: f32, x1: f32, y1: f32| {
+        let (x0, x1) = px_span(x0, x1, ppp);
+        let (y0, y1) = px_span(y0, y1, ppp);
+        Rect::from_min_max(Pos2::new(x0, y0), Pos2::new(x1, y1))
+    };
+    let Rect { min, max } = cell;
+    match shape {
+        CursorShape::Block => push_solid_rect(shapes, cell, color),
+        // Midterm bar: 2 px wide, inset 1.5 px top and bottom.
+        CursorShape::Beam => {
+            push_solid_rect(shapes, rect(min.x, min.y + 1.5, min.x + 2.0, max.y - 1.5), color)
+        }
+        CursorShape::Underline => {
+            push_solid_rect(shapes, rect(min.x, max.y - 2.0, max.x, max.y), color)
+        }
+        CursorShape::HollowBlock => {
+            for edge in [
+                rect(min.x, min.y, max.x, min.y + px),
+                rect(min.x, max.y - px, max.x, max.y),
+                rect(min.x, min.y, min.x + px, max.y),
+                rect(max.x - px, min.y, max.x, max.y),
+            ] {
+                push_solid_rect(shapes, edge, color);
+            }
+        }
+        CursorShape::Hidden => {}
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Weight {
+    Light,
+    Heavy,
+}
+
+impl Weight {
+    /// Light strokes are ~1/8 of the cell in whole device pixels; heavy ones are
+    /// clearly double. Returned in logical points.
+    fn px(self, cell_w: f32, cell_h: f32, ppp: f32) -> f32 {
+        let ppp = ppp.max(f32::EPSILON);
+        let light = (cell_w.min(cell_h) * ppp / 8.0).round().max(1.0);
+        let device = match self {
+            Self::Light => light,
+            Self::Heavy => (light * 2.0).max(light + 1.0),
+        };
+        device / ppp
+    }
+}
+
+#[derive(Clone, Copy)]
+struct Arms {
+    up: Option<Weight>,
+    down: Option<Weight>,
+    left: Option<Weight>,
+    right: Option<Weight>,
+}
+
+fn arms(u: u8, d: u8, l: u8, r: u8) -> Option<Arms> {
+    let w = |v| match v {
+        1 => Some(Weight::Light),
+        2 => Some(Weight::Heavy),
+        _ => None,
+    };
+    Some(Arms { up: w(u), down: w(d), left: w(l), right: w(r) })
+}
+
+/// Arms of the U+2500–U+257F box glyphs that need no font glyph.
+/// Weights: 0 = none, 1 = light, 2 = heavy (`─` vs `━`, `│` vs `┃`).
+fn box_arms(c: char) -> Option<Arms> {
+    match c {
+        '─' | '┄' | '┈' => arms(0, 0, 1, 1),
+        '━' | '┅' | '┉' => arms(0, 0, 2, 2),
+        '│' | '┆' | '┊' => arms(1, 1, 0, 0),
+        '┃' | '┇' | '┋' => arms(2, 2, 0, 0),
+        '┌' => arms(0, 1, 0, 1),
+        '┍' => arms(0, 1, 0, 2),
+        '┎' => arms(0, 2, 0, 1),
+        '┏' => arms(0, 2, 0, 2),
+        '┐' => arms(0, 1, 1, 0),
+        '┑' => arms(0, 1, 2, 0),
+        '┒' => arms(0, 2, 1, 0),
+        '┓' => arms(0, 2, 2, 0),
+        '└' => arms(1, 0, 0, 1),
+        '┕' => arms(1, 0, 0, 2),
+        '┖' => arms(2, 0, 0, 1),
+        '┗' => arms(2, 0, 0, 2),
+        '┘' => arms(1, 0, 1, 0),
+        '┙' => arms(1, 0, 2, 0),
+        '┚' => arms(2, 0, 1, 0),
+        '┛' => arms(2, 0, 2, 0),
+        '├' => arms(1, 1, 0, 1),
+        '┝' => arms(1, 1, 0, 2),
+        '┞' => arms(2, 1, 0, 1),
+        '┟' => arms(1, 2, 0, 1),
+        '┠' => arms(2, 2, 0, 1),
+        '┡' => arms(2, 1, 0, 2),
+        '┢' => arms(1, 2, 0, 2),
+        '┣' => arms(2, 2, 0, 2),
+        '┤' => arms(1, 1, 1, 0),
+        '┥' => arms(1, 1, 2, 0),
+        '┦' => arms(2, 1, 1, 0),
+        '┧' => arms(1, 2, 1, 0),
+        '┨' => arms(2, 2, 1, 0),
+        '┩' => arms(2, 1, 2, 0),
+        '┪' => arms(1, 2, 2, 0),
+        '┫' => arms(2, 2, 2, 0),
+        '┬' => arms(0, 1, 1, 1),
+        '┭' => arms(0, 1, 2, 1),
+        '┮' => arms(0, 1, 1, 2),
+        '┯' => arms(0, 1, 2, 2),
+        '┰' => arms(0, 2, 1, 1),
+        '┱' => arms(0, 2, 2, 1),
+        '┲' => arms(0, 2, 1, 2),
+        '┳' => arms(0, 2, 2, 2),
+        '┴' => arms(1, 0, 1, 1),
+        '┵' => arms(1, 0, 2, 1),
+        '┶' => arms(1, 0, 1, 2),
+        '┷' => arms(1, 0, 2, 2),
+        '┸' => arms(2, 0, 1, 1),
+        '┹' => arms(2, 0, 2, 1),
+        '┺' => arms(2, 0, 1, 2),
+        '┻' => arms(2, 0, 2, 2),
+        '┼' => arms(1, 1, 1, 1),
+        '┽' => arms(1, 1, 2, 1),
+        '┾' => arms(1, 1, 1, 2),
+        '┿' => arms(1, 1, 2, 2),
+        '╀' => arms(2, 1, 1, 1),
+        '╁' => arms(1, 2, 1, 1),
+        '╂' => arms(2, 2, 1, 1),
+        '╃' => arms(2, 1, 2, 1),
+        '╄' => arms(2, 1, 1, 2),
+        '╅' => arms(1, 2, 2, 1),
+        '╆' => arms(1, 2, 1, 2),
+        '╇' => arms(2, 1, 2, 2),
+        '╈' => arms(1, 2, 2, 2),
+        '╉' => arms(2, 2, 2, 1),
+        '╊' => arms(2, 2, 1, 2),
+        '╋' => arms(2, 2, 2, 2),
+        // Half arms (╴╵╶╷ light, ╸╹╺╻ heavy, ╼–╿ mixed).
+        '╴' => arms(0, 0, 1, 0),
+        '╵' => arms(1, 0, 0, 0),
+        '╶' => arms(0, 0, 0, 1),
+        '╷' => arms(0, 1, 0, 0),
+        '╸' => arms(0, 0, 2, 0),
+        '╹' => arms(2, 0, 0, 0),
+        '╺' => arms(0, 0, 0, 2),
+        '╻' => arms(0, 2, 0, 0),
+        '╼' => arms(0, 0, 1, 2),
+        '╽' => arms(1, 2, 0, 0),
+        '╾' => arms(0, 0, 2, 1),
+        '╿' => arms(2, 1, 0, 0),
+        _ => None,
+    }
+}
+
+fn is_arc(c: char) -> bool {
+    matches!(c, '╭'..='╰')
+}
+
+/// Glyphs painted as geometry; everything else in the box/block ranges keeps the font.
+fn is_box_geometry(c: char) -> bool {
+    box_arms(c).is_some()
+        || is_arc(c)
+        || matches!(c, '\u{2580}'..='\u{259F}' | '\u{2800}'..='\u{28FF}')
+}
+
+/// Raised dots of a braille pattern (U+2800–U+28FF) as (column, row) in the 2x4 grid.
+/// Bits 0-2 are the left column top to bottom, bits 3-5 the right one, bits 6 and 7 the
+/// bottom row (left, right).
+fn braille_dots(c: char) -> Vec<(u8, u8)> {
+    const DOTS: [(u8, u8); 8] = [(0, 0), (0, 1), (0, 2), (1, 0), (1, 1), (1, 2), (0, 3), (1, 3)];
+    let bits = (c as u32).wrapping_sub(0x2800);
+    if bits > 0xFF {
+        return Vec::new();
+    }
+    DOTS.iter().enumerate().filter(|(i, _)| bits >> i & 1 == 1).map(|(_, d)| *d).collect()
+}
+
+/// Spinners and graphs use braille constantly; fonts either lack it or draw dots of a
+/// different size, so the dots are circles on the cell's own 2x4 grid.
+fn paint_braille(shapes: &mut Vec<Shape>, c: char, rect: Rect, fg: Color32) -> bool {
+    if !('\u{2800}'..='\u{28FF}').contains(&c) {
+        return false;
+    }
+    let (pitch_x, pitch_y) = (rect.width() / 2.0, rect.height() / 4.0);
+    let radius = pitch_x.min(pitch_y) * 0.4;
+    for (col, row) in braille_dots(c) {
+        let center = Pos2::new(
+            rect.left() + pitch_x * (col as f32 + 0.5),
+            rect.top() + pitch_y * (row as f32 + 0.5),
+        );
+        shapes.push(Shape::circle_filled(center, radius, fg));
+    }
+    true
+}
+
+/// Snap a span to whole physical pixels so neighbours share their edge exactly.
+fn px_span(lo: f32, hi: f32, ppp: f32) -> (f32, f32) {
+    let lo_px = (lo * ppp).round();
+    let hi_px = (hi * ppp).round().max(lo_px + 1.0);
+    (lo_px / ppp, hi_px / ppp)
+}
+
+/// Stroke band of a fixed whole-pixel thickness centred on `center`, so every
+/// cell draws the same width regardless of its fractional position.
+fn px_band(center: f32, thickness: f32, ppp: f32) -> (f32, f32) {
+    let t = (thickness * ppp).round().max(1.0);
+    let lo = (center * ppp - t * 0.5).round();
+    (lo / ppp, (lo + t) / ppp)
+}
+
+/// Filled rect as a raw mesh: no anti-aliasing halo, so adjacent rects tile.
+fn push_solid_rect(shapes: &mut Vec<Shape>, rect: Rect, color: Color32) {
+    if rect.width() <= 0.0 || rect.height() <= 0.0 {
+        return;
+    }
+    let mut mesh = egui::Mesh::default();
+    mesh.add_colored_rect(rect, color);
+    shapes.push(Shape::mesh(mesh));
+}
+
+type Frac = (f32, f32, f32, f32);
+
+#[allow(clippy::too_many_arguments)]
+fn push_rect(
     shapes: &mut Vec<Shape>,
     x: f32,
     y: f32,
-    cell_w: f32,
-    cell_h: f32,
-    color: Color32,
-    window_focused: bool,
+    w: f32,
+    h: f32,
+    fg: Color32,
+    fx: Frac,
+    ppp: f32,
 ) {
-    // Midterm: focused = 2 px bar, height cell − 3; unfocused = 1 px outline box.
-    if window_focused {
-        let h = (cell_h - 3.0).max(1.0);
-        let bar = Rect::from_min_size(Pos2::new(x, y + 1.5), Vec2::new(2.0, h));
-        shapes.push(Shape::Rect(RectShape::filled(bar, CornerRadius::ZERO, color)));
-    } else {
-        shapes.push(Shape::Rect(RectShape::stroke(
-            Rect::from_min_size(Pos2::new(x, y), Vec2::new(cell_w, cell_h)),
-            CornerRadius::ZERO,
-            Stroke::new(1.0, color),
-            egui::StrokeKind::Inside,
-        )));
-    }
+    let (x0, x1) = px_span(x + w * fx.0, x + w * fx.2, ppp);
+    let (y0, y1) = px_span(y + h * fx.1, y + h * fx.3, ppp);
+    push_solid_rect(
+        shapes,
+        Rect::from_min_max(Pos2::new(x0, y0), Pos2::new(x1, y1)),
+        fg,
+    );
 }
 
-fn is_box_drawing(c: char) -> bool {
-    matches!(
-        c,
-        '\u{2500}'..='\u{257F}' | '\u{2580}'..='\u{259F}'
-    )
+/// U+2580–U+259F as cell fractions (eighths, halves, shades, quadrants).
+#[allow(clippy::too_many_arguments)]
+fn paint_block(
+    shapes: &mut Vec<Shape>,
+    c: char,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    fg: Color32,
+    ppp: f32,
+) -> bool {
+    let parts: &[Frac] = match c {
+        '▀' => &[(0.0, 0.0, 1.0, 0.5)],
+        '▔' => &[(0.0, 0.0, 1.0, 0.125)],
+        '▁' => &[(0.0, 0.875, 1.0, 1.0)],
+        '▂' => &[(0.0, 0.75, 1.0, 1.0)],
+        '▃' => &[(0.0, 0.625, 1.0, 1.0)],
+        '▄' => &[(0.0, 0.5, 1.0, 1.0)],
+        '▅' => &[(0.0, 0.375, 1.0, 1.0)],
+        '▆' => &[(0.0, 0.25, 1.0, 1.0)],
+        '▇' => &[(0.0, 0.125, 1.0, 1.0)],
+        '█' => &[(0.0, 0.0, 1.0, 1.0)],
+        '▉' => &[(0.0, 0.0, 0.875, 1.0)],
+        '▊' => &[(0.0, 0.0, 0.75, 1.0)],
+        '▋' => &[(0.0, 0.0, 0.625, 1.0)],
+        '▌' => &[(0.0, 0.0, 0.5, 1.0)],
+        '▍' => &[(0.0, 0.0, 0.375, 1.0)],
+        '▎' => &[(0.0, 0.0, 0.25, 1.0)],
+        '▏' => &[(0.0, 0.0, 0.125, 1.0)],
+        '▐' => &[(0.5, 0.0, 1.0, 1.0)],
+        '▕' => &[(0.875, 0.0, 1.0, 1.0)],
+        '░' => &[(0.0, 0.0, 1.0, 1.0)],
+        '▒' => &[(0.0, 0.0, 1.0, 1.0)],
+        '▓' => &[(0.0, 0.0, 1.0, 1.0)],
+        '▖' => &[(0.0, 0.5, 0.5, 1.0)],
+        '▗' => &[(0.5, 0.5, 1.0, 1.0)],
+        '▘' => &[(0.0, 0.0, 0.5, 0.5)],
+        '▝' => &[(0.5, 0.0, 1.0, 0.5)],
+        '▚' => &[(0.0, 0.0, 0.5, 0.5), (0.5, 0.5, 1.0, 1.0)],
+        '▞' => &[(0.5, 0.0, 1.0, 0.5), (0.0, 0.5, 0.5, 1.0)],
+        '▙' => &[(0.0, 0.0, 0.5, 0.5), (0.0, 0.5, 0.5, 1.0), (0.5, 0.5, 1.0, 1.0)],
+        '▛' => &[(0.0, 0.0, 0.5, 0.5), (0.5, 0.0, 1.0, 0.5), (0.0, 0.5, 0.5, 1.0)],
+        '▜' => &[(0.0, 0.0, 0.5, 0.5), (0.5, 0.0, 1.0, 0.5), (0.5, 0.5, 1.0, 1.0)],
+        '▟' => &[(0.5, 0.0, 1.0, 0.5), (0.5, 0.5, 1.0, 1.0), (0.0, 0.5, 0.5, 1.0)],
+        _ => return false,
+    };
+    let fg = match c {
+        '░' => fg.gamma_multiply(0.25),
+        '▒' => fg.gamma_multiply(0.5),
+        '▓' => fg.gamma_multiply(0.75),
+        _ => fg,
+    };
+    for &part in parts {
+        push_rect(shapes, x, y, w, h, fg, part, ppp);
+    }
+    true
+}
+
+/// Quarter-circle elbow for ╭ ╮ ╯ ╰, with a straight arm reaching each cell edge.
+fn paint_arc(
+    shapes: &mut Vec<Shape>,
+    c: char,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    stroke: Stroke,
+) {
+    let cx = x + w * 0.5;
+    let cy = y + h * 0.5;
+    let r = (w.min(h) * 0.25).max(1.0);
+    let (center, a0, a1) = match c {
+        '╭' => (Pos2::new(cx + r, cy + r), std::f32::consts::PI, 1.5 * std::f32::consts::PI),
+        '╮' => (Pos2::new(cx - r, cy + r), 1.5 * std::f32::consts::PI, 2.0 * std::f32::consts::PI),
+        '╯' => (Pos2::new(cx - r, cy - r), 0.0, 0.5 * std::f32::consts::PI),
+        _ => (Pos2::new(cx + r, cy - r), 0.5 * std::f32::consts::PI, std::f32::consts::PI), // ╰
+    };
+    let mut points = Vec::with_capacity(9);
+    for i in 0..=8 {
+        let a = a0 + (a1 - a0) * (i as f32 / 8.0);
+        points.push(Pos2::new(center.x + r * a.cos(), center.y + r * a.sin()));
+    }
+    let first = points[0];
+    let last = points[8];
+    // Straight arms from the arc ends out to the edges.
+    let (first_edge, last_edge) = match c {
+        '╭' => (Pos2::new(cx, y + h), Pos2::new(x + w, cy)),
+        '╮' => (Pos2::new(cx, y + h), Pos2::new(x, cy)),
+        '╯' => (Pos2::new(x, cy), Pos2::new(cx, y)),
+        _ => (Pos2::new(x + w, cy), Pos2::new(cx, y)),
+    };
+    shapes.push(Shape::line_segment([first_edge, first], stroke));
+    shapes.push(Shape::line_segment([last, last_edge], stroke));
+    shapes.push(Shape::line(points, stroke));
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -521,101 +926,77 @@ fn paint_row_box_drawing(
     y: f32,
     cell_w: f32,
     cell_h: f32,
+    row_h: f32,
     cells: &[&VisibleCell],
     selection: Option<SelectionRange>,
     colors: &super::theme::TermColors,
+    block_cursor: Option<Point>,
     ppp: f32,
 ) {
     for cell in cells {
-        if !is_box_drawing(cell.c) {
+        let c = cell.c;
+        if !is_box_geometry(c) {
             continue;
         }
-        let (fg, _bg, width_cells) = cell_colors(
-            cell,
-            selection,
-            colors,
-            false,
-            Point::new(Line(0), Column(0)),
-            false,
-        );
+        let (fg, _bg, width_cells) = cell_colors(cell, selection, colors, block_cursor);
         let x = ui_theme::term_col_x(origin_x, cell.col, ppp);
         let x_end =
             ui_theme::term_col_x(origin_x, cell.col.saturating_add(width_cells as u16), ppp);
         let w = (x_end - x).max(cell_w * width_cells);
         let cx = x + w * 0.5;
-        let cy = y + cell_h * 0.5;
-        let stroke = Stroke::new(1.25, fg);
-        let hline = |shapes: &mut Vec<Shape>, x0: f32, x1: f32| {
-            shapes.push(Shape::LineSegment {
-                points: [Pos2::new(x0, cy), Pos2::new(x1, cy)],
-                stroke,
-            });
+        // Centre on whole physical pixels so the two arms share one clean edge.
+        let cy = ui_theme::snap(y + row_h * 0.5, ppp);
+        if paint_block(shapes, c, x, y, w, row_h, fg, ppp) {
+            continue;
+        }
+        let cell_rect = Rect::from_min_size(Pos2::new(x, y), Vec2::new(w, row_h));
+        if paint_braille(shapes, c, cell_rect, fg) {
+            continue;
+        }
+        if is_arc(c) {
+            paint_arc(
+                shapes,
+                c,
+                x,
+                y,
+                w,
+                row_h,
+                Stroke::new(Weight::Light.px(cell_w, cell_h, ppp), fg),
+            );
+            continue;
+        }
+        let Some(arms) = box_arms(c) else {
+            continue;
         };
-        let vline = |shapes: &mut Vec<Shape>, y0: f32, y1: f32| {
-            shapes.push(Shape::LineSegment {
-                points: [Pos2::new(cx, y0), Pos2::new(cx, y1)],
-                stroke,
-            });
+        let vertical = |shapes: &mut Vec<Shape>, weight: Weight, y0: f32, y1: f32| {
+            let (x0, x1) = px_band(cx, weight.px(cell_w, cell_h, ppp), ppp);
+            push_solid_rect(
+                shapes,
+                Rect::from_min_max(Pos2::new(x0, y0), Pos2::new(x1, y1)),
+                fg,
+            );
         };
-        match cell.c {
-            '─' | '━' => hline(shapes, x, x + w),
-            '│' | '┃' => vline(shapes, y, y + cell_h),
-            '┌' | '╭' => {
-                hline(shapes, cx, x + w);
-                vline(shapes, cy, y + cell_h);
-            }
-            '┐' | '╮' => {
-                hline(shapes, x, cx);
-                vline(shapes, cy, y + cell_h);
-            }
-            '└' | '╰' => {
-                hline(shapes, cx, x + w);
-                vline(shapes, y, cy);
-            }
-            '┘' | '╯' => {
-                hline(shapes, x, cx);
-                vline(shapes, y, cy);
-            }
-            '├' => {
-                hline(shapes, cx, x + w);
-                vline(shapes, y, y + cell_h);
-            }
-            '┤' => {
-                hline(shapes, x, cx);
-                vline(shapes, y, y + cell_h);
-            }
-            '▀' => {
-                shapes.push(Shape::Rect(RectShape::filled(
-                    Rect::from_min_size(Pos2::new(x, y), Vec2::new(w, cell_h * 0.5)),
-                    CornerRadius::ZERO,
-                    fg,
-                )));
-            }
-            '▄' => {
-                shapes.push(Shape::Rect(RectShape::filled(
-                    Rect::from_min_size(
-                        Pos2::new(x, y + cell_h * 0.5),
-                        Vec2::new(w, cell_h * 0.5),
-                    ),
-                    CornerRadius::ZERO,
-                    fg,
-                )));
-            }
-            '█' => {
-                shapes.push(Shape::Rect(RectShape::filled(
-                    Rect::from_min_size(Pos2::new(x, y), Vec2::new(w, cell_h)),
-                    CornerRadius::ZERO,
-                    fg,
-                )));
-            }
-            _ => {
-                // Fallback: full cell block so unknown box glyphs still join.
-                shapes.push(Shape::Rect(RectShape::filled(
-                    Rect::from_min_size(Pos2::new(x, y), Vec2::new(w, cell_h)),
-                    CornerRadius::ZERO,
-                    fg.gamma_multiply(0.35),
-                )));
-            }
+        let horizontal = |shapes: &mut Vec<Shape>, weight: Weight, x0: f32, x1: f32| {
+            let (y0, y1) = px_band(cy, weight.px(cell_w, cell_h, ppp), ppp);
+            push_solid_rect(
+                shapes,
+                Rect::from_min_max(Pos2::new(x0, y0), Pos2::new(x1, y1)),
+                fg,
+            );
+        };
+        // Full row spans: row N's bottom is exactly row N+1's top, so a vertical
+        // bar stays solid instead of showing the line-cap anti-aliasing seams.
+        if let Some(weight) = arms.up {
+            vertical(shapes, weight, y, cy);
+        }
+        if let Some(weight) = arms.down {
+            vertical(shapes, weight, cy, y + row_h);
+        }
+        if let Some(weight) = arms.left {
+            horizontal(shapes, weight, x, cx);
+        }
+        if let Some(weight) = arms.right {
+            horizontal(shapes, weight, cx, x + w);
         }
     }
 }
@@ -624,13 +1005,12 @@ fn cell_colors(
     cell: &VisibleCell,
     selection: Option<SelectionRange>,
     colors: &super::theme::TermColors,
-    app_cursor: bool,
-    cursor_point: Point,
-    apply_host_cursor: bool,
+    block_cursor: Option<Point>,
 ) -> (Color32, Color32, f32) {
     let wide = cell.flags.contains(Flags::WIDE_CHAR);
     let inverse = cell.flags.contains(Flags::INVERSE);
-    let dim = cell.flags.intersects(Flags::DIM | Flags::DIM_BOLD);
+    // DIM_BOLD is DIM|BOLD, so `intersects` would dim every bold cell: test DIM alone.
+    let dim = cell.flags.contains(Flags::DIM);
     let point = Point::new(Line(cell.line), Column(cell.col as usize));
     let selected = selection.is_some_and(|r| r.contains(point));
 
@@ -645,18 +1025,9 @@ fn cell_colors(
         std::mem::swap(&mut fg, &mut bg);
     }
 
-    // Only invert/blank for our host cursor on the primary screen.
-    // On ALT_SCREEN the TUI already painted the cursor via cell attrs.
-    if apply_host_cursor {
-        let at_cursor =
-            cursor_point.line.0 == cell.line && cursor_point.column.0 == cell.col as usize;
-        if at_cursor {
-            if app_cursor {
-                std::mem::swap(&mut fg, &mut bg);
-            } else {
-                fg = colors.background;
-            }
-        }
+    // Under a filled block cursor the glyph takes the cell's background colour.
+    if block_cursor == Some(point) {
+        fg = bg;
     }
 
     (fg, bg, width_cells)
@@ -667,14 +1038,11 @@ fn paint_row_backgrounds(
     shapes: &mut Vec<Shape>,
     origin_x: f32,
     y: f32,
-    cell_w: f32,
-    cell_h: f32,
+    row_h: f32,
     cells: &[&VisibleCell],
     selection: Option<SelectionRange>,
     colors: &super::theme::TermColors,
-    cursor_point: Point,
     ppp: f32,
-    paint_host_cursor: bool,
 ) {
     let mut sorted: Vec<&VisibleCell> = cells.to_vec();
     sorted.sort_by_key(|c| c.col);
@@ -683,34 +1051,25 @@ fn paint_row_backgrounds(
     let mut run_start_x = 0.0;
     let mut run_end_x = 0.0;
 
-    // Overlap by 1 physical px so adjacent rows/cols have no hairline gaps.
-    let overlap = 1.0 / ppp;
+    // Whole-pixel mesh rects: edges come from the snapped column/row grid, so
+    // neighbours share them exactly (no hairline, no bleed into the next cell).
     let flush = |shapes: &mut Vec<Shape>, bg: Color32, x0: f32, x1: f32| {
         if bg != colors.background && x1 > x0 {
-            shapes.push(Shape::Rect(RectShape::filled(
-                Rect::from_min_max(
-                    Pos2::new(ui_theme::snap(x0, ppp), y),
-                    Pos2::new(ui_theme::snap(x1, ppp) + overlap, y + cell_h + overlap),
-                ),
-                CornerRadius::ZERO,
+            let (x0, x1) = px_span(x0, x1, ppp);
+            let (y0, y1) = px_span(y, y + row_h, ppp);
+            push_solid_rect(
+                shapes,
+                Rect::from_min_max(Pos2::new(x0, y0), Pos2::new(x1, y1)),
                 bg,
-            )));
+            );
         }
     };
 
     for cell in &sorted {
-        let (_fg, bg, width_cells) =
-            cell_colors(cell, selection, colors, false, cursor_point, paint_host_cursor);
+        let (_fg, bg, width_cells) = cell_colors(cell, selection, colors, None);
         let x = ui_theme::term_col_x(origin_x, cell.col, ppp);
         let x_end = ui_theme::term_col_x(origin_x, cell.col.saturating_add(width_cells as u16), ppp);
         let w = x_end - x;
-
-        if paint_host_cursor
-            && cursor_point.line.0 == cell.line
-            && cursor_point.column.0 == cell.col as usize
-        {
-            paint_cursor(shapes, x, y, cell_w, cell_h, colors.cursor, true);
-        }
 
         match run_bg {
             Some(prev) if prev == bg && (x - run_end_x).abs() < 0.5 => {
@@ -734,20 +1093,77 @@ fn paint_row_backgrounds(
     }
 }
 
+/// Extends the edge cells' background over the pane padding and the leftover pixels
+/// past the last cell, so a TUI with its own background has no frame (Alacritty/Warp do this).
+fn paint_edge_backgrounds(
+    shapes: &mut Vec<Shape>,
+    pane: Rect,
+    origin: Pos2,
+    (cols, lines): (u16, u16),
+    by_line: &BTreeMap<i32, Vec<&VisibleCell>>,
+    colors: &super::theme::TermColors,
+    ppp: f32,
+) {
+    if cols == 0 || lines == 0 {
+        return;
+    }
+    let (last_col, last_row) = (cols - 1, lines as i32 - 1);
+    // A wide glyph's spacer cell is not in the snapshot: the glyph's own bg covers it.
+    let edge = |row: i32, col: u16| {
+        by_line
+            .get(&row)
+            .and_then(|cells| {
+                cells.iter().find(|c| {
+                    c.col == col || (c.col + 1 == col && c.flags.contains(Flags::WIDE_CHAR))
+                })
+            })
+            .map_or(colors.background, |c| cell_colors(c, None, colors, None).1)
+    };
+    let fill = |shapes: &mut Vec<Shape>, x0: f32, x1: f32, y0: f32, y1: f32, bg: Color32| {
+        if bg == colors.background || x1 <= x0 || y1 <= y0 {
+            return;
+        }
+        let (x0, x1) = px_span(x0, x1, ppp);
+        let (y0, y1) = px_span(y0, y1, ppp);
+        push_solid_rect(
+            shapes,
+            Rect::from_min_max(Pos2::new(x0, y0), Pos2::new(x1, y1)).intersect(pane),
+            bg,
+        );
+    };
+    let grid_right = ui_theme::term_col_x(origin.x, cols, ppp);
+    let grid_bottom = ui_theme::term_row_top(origin.y, lines as i32, ppp);
+
+    for row in 0..lines as i32 {
+        let y0 = ui_theme::term_row_top(origin.y, row, ppp);
+        let y1 = ui_theme::term_row_top(origin.y, row + 1, ppp);
+        fill(shapes, pane.min.x, origin.x, y0, y1, edge(row, 0));
+        fill(shapes, grid_right, pane.max.x, y0, y1, edge(row, last_col));
+    }
+    // Top and bottom bands follow the first/last row cell by cell (status bars stay intact).
+    for (row, y0, y1) in [(0, pane.min.y, origin.y), (last_row, grid_bottom, pane.max.y)] {
+        if y1 > y0 {
+            if let Some(cells) = by_line.get(&row) {
+                paint_row_backgrounds(shapes, origin.x, y0, y1 - y0, cells, None, colors, ppp);
+            }
+            fill(shapes, pane.min.x, origin.x, y0, y1, edge(row, 0));
+            fill(shapes, grid_right, pane.max.x, y0, y1, edge(row, last_col));
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn paint_row_text(
     ui: &Ui,
     shapes: &mut Vec<Shape>,
     origin_x: f32,
     y: f32,
-    _cell_w: f32,
+    row_h: f32,
     cells: &[&VisibleCell],
     selection: Option<SelectionRange>,
     colors: &super::theme::TermColors,
     font_id: &FontId,
-    app_cursor: bool,
-    cursor_point: Point,
-    apply_host_cursor: bool,
+    block_cursor: Option<Point>,
     ppp: f32,
 ) {
     let mut sorted: Vec<&VisibleCell> = cells
@@ -757,7 +1173,7 @@ fn paint_row_text(
             c.c != ' '
                 && c.c != '\t'
                 && !c.flags.contains(Flags::WIDE_CHAR_SPACER)
-                && !is_box_drawing(c.c)
+                && !is_box_geometry(c.c)
         })
         .collect();
     sorted.sort_by_key(|c| c.col);
@@ -769,14 +1185,7 @@ fn paint_row_text(
     let mut i = 0;
     while i < sorted.len() {
         let start = sorted[i];
-        let (fg0, _bg, _) = cell_colors(
-            start,
-            selection,
-            colors,
-            app_cursor,
-            cursor_point,
-            apply_host_cursor,
-        );
+        let (fg0, _bg, _) = cell_colors(start, selection, colors, block_cursor);
         let mut job = LayoutJob::default();
         job.wrap.max_width = f32::INFINITY;
         job.wrap.break_anywhere = false;
@@ -790,14 +1199,7 @@ fn paint_row_text(
             if cell.col != expected_col {
                 break;
             }
-            let (fg, _, width_cells) = cell_colors(
-                cell,
-                selection,
-                colors,
-                app_cursor,
-                cursor_point,
-                apply_host_cursor,
-            );
+            let (fg, _, width_cells) = cell_colors(cell, selection, colors, block_cursor);
             if fg != fg0 {
                 break;
             }
@@ -817,12 +1219,31 @@ fn paint_row_text(
             TextFormat {
                 font_id: font_id.clone(),
                 color: fg0,
+                // Default is BOTTOM, which parks the glyph at the bottom of a taller galley row.
+                valign: egui::Align::TOP,
                 ..Default::default()
             },
         );
 
         let galley = ui.fonts_mut(|f| f.layout_job(job));
-        shapes.push(Shape::galley(Pos2::new(run_x, y), galley, fg0));
+        let face = ui_theme::font_line_metrics();
+        let galley_baseline = galley
+            .rows
+            .first()
+            .and_then(|row| row.glyphs.first().map(|g| row.pos.y + g.pos.y))
+            .unwrap_or(face.ascent);
+        ui_theme::log_row_text_once(
+            ui_theme::cell_h(),
+            galley.size().y,
+            row_h,
+            face.ascent,
+            face.descent,
+            galley_baseline,
+            ppp,
+        );
+        let top = y
+            + ui_theme::glyph_top_offset(row_h, face.ascent, face.descent, galley_baseline, ppp);
+        shapes.push(Shape::galley(Pos2::new(run_x, top), galley, fg0));
     }
 }
 
@@ -852,5 +1273,341 @@ fn paint_row_underlines(
             points: [Pos2::new(x, y2), Pos2::new(x + width, y2)],
             stroke: Stroke::new(1.0, fg),
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ui_theme::{CELL_H, CELL_W};
+    use alacritty_terminal::vte::ansi::{Color as TermColor, NamedColor, Rgb};
+    use crate::terminal::backend::Snapshot;
+    use crate::terminal::theme::TermColors;
+
+    fn cell(c: char) -> VisibleCell {
+        VisibleCell {
+            line: 0,
+            col: 0,
+            c,
+            fg: TermColor::Spec(Rgb {
+                r: 118,
+                g: 153,
+                b: 254,
+            }),
+            bg: TermColor::Named(NamedColor::Background),
+            flags: Flags::empty(),
+        }
+    }
+
+    #[test]
+    fn truecolor_is_rendered_as_sent_and_dim_only_on_request() {
+        let colors = TermColors::default();
+        let mut c = cell('┃');
+        let (fg, bg, _) = cell_colors(&c, None, &colors, None);
+        assert_eq!(fg, Color32::from_rgb(118, 153, 254), "SGR 38;2 untouched");
+        assert_eq!(bg, colors.background);
+        c.bg = TermColor::Spec(Rgb { r: 8, g: 8, b: 8 });
+        assert_eq!(cell_colors(&c, None, &colors, None).1, Color32::from_rgb(8, 8, 8));
+        c.flags = Flags::DIM;
+        let dimmed = cell_colors(&c, None, &colors, None).0;
+        assert_ne!(dimmed, Color32::from_rgb(118, 153, 254), "SGR 2 dims");
+        c.flags = Flags::BOLD;
+        assert_eq!(
+            cell_colors(&c, None, &colors, None).0,
+            Color32::from_rgb(118, 153, 254),
+            "bold never brightens or remaps truecolor"
+        );
+    }
+
+    #[test]
+    fn half_heavy_lines_meet_the_next_row_without_a_gap() {
+        let ppp = 1.25;
+        let spans = |ch: char, row: i32| {
+            let mut c = cell(ch);
+            c.line = row;
+            let y = ui_theme::term_row_top(0.0, row, ppp);
+            let h = ui_theme::term_row_top(0.0, row + 1, ppp) - y;
+            let mut shapes = Vec::new();
+            paint_row_box_drawing(
+                &mut shapes, 0.0, y, CELL_W, CELL_H, h, &[&c], None,
+                &TermColors::default(), None, ppp,
+            );
+            (y, y + h, shapes.iter().map(|s| s.visual_bounding_rect()).collect::<Vec<_>>())
+        };
+        // ╻ runs from the middle to the exact bottom, ╹ from the exact top to the middle.
+        let (y0, y1, down) = spans('╻', 3);
+        assert_eq!(down.len(), 1);
+        assert!((down[0].max.y - y1).abs() < 1e-4, "╻ reaches the bottom pixel");
+        let (n0, _, up) = spans('╹', 4);
+        assert!((up[0].min.y - n0).abs() < 1e-4, "╹ starts at the top pixel");
+        assert!((y1 - n0).abs() < 1e-4, "next row starts where this one ends");
+        assert!(y0 < down[0].min.y);
+    }
+
+    fn snapshot_with_cursor(shape: CursorShape, color: Option<Rgb>) -> Snapshot {
+        Snapshot {
+            cursor: Point::new(Line(2), Column(5)),
+            cursor_shape: shape,
+            cursor_color: color,
+            ..Snapshot::default()
+        }
+    }
+
+    #[test]
+    fn cursor_follows_decscusr_osc12_and_dectcem() {
+        let colors = TermColors::default();
+        let cyan = Rgb { r: 0x56, g: 0xd4, b: 0xdd };
+        let c = host_cursor(&snapshot_with_cursor(CursorShape::Block, Some(cyan)), &colors, true)
+            .unwrap();
+        assert_eq!(c.shape, CursorShape::Block);
+        assert_eq!(c.color, Color32::from_rgb(0x56, 0xd4, 0xdd));
+        assert_eq!(c.point, Point::new(Line(2), Column(5)));
+
+        let unset = host_cursor(&snapshot_with_cursor(CursorShape::Beam, None), &colors, true);
+        assert_eq!(unset.unwrap().color, colors.cursor, "no OSC 12 → theme cursor");
+        let blurred = host_cursor(&snapshot_with_cursor(CursorShape::Block, None), &colors, false);
+        assert_eq!(blurred.unwrap().shape, CursorShape::HollowBlock);
+        assert!(
+            host_cursor(&snapshot_with_cursor(CursorShape::Hidden, None), &colors, true).is_none(),
+            "DECTCEM off"
+        );
+    }
+
+    #[test]
+    fn block_cursor_fills_the_cell_and_inverts_its_glyph() {
+        let ppp = 1.25;
+        let cell_rect = Rect::from_min_max(Pos2::new(8.8, 17.6), Pos2::new(17.6, 35.2));
+        let mut shapes = Vec::new();
+        paint_cursor(&mut shapes, cell_rect, CursorShape::Block, Color32::RED, ppp);
+        assert_eq!(shapes[0].visual_bounding_rect(), cell_rect);
+
+        let mut shapes = Vec::new();
+        paint_cursor(&mut shapes, cell_rect, CursorShape::Underline, Color32::RED, ppp);
+        let underline = shapes[0].visual_bounding_rect();
+        assert!((underline.max.y - cell_rect.max.y).abs() < 1e-4);
+        assert!((underline.width() - cell_rect.width()).abs() < 1e-4);
+
+        let glyph = cell('x');
+        let at = Point::new(Line(0), Column(0));
+        let (fg, bg, _) = cell_colors(&glyph, None, &TermColors::default(), Some(at));
+        assert_eq!(fg, bg, "glyph under a block cursor uses the cell background");
+    }
+
+    #[test]
+    fn edge_cell_background_covers_padding_and_remainder() {
+        let ppp = 1.0;
+        let colors = TermColors::default();
+        let mut a = cell(' ');
+        a.bg = TermColor::Spec(Rgb { r: 10, g: 10, b: 10 });
+        let mut b = a.clone();
+        b.col = 1;
+        let by_line = BTreeMap::from([(0, vec![&a, &b])]);
+        // 2x1 grid at (14, 15) inside a 60x50 pane: padding left/top, remainder right/bottom.
+        let pane = Rect::from_min_size(Pos2::ZERO, Vec2::new(60.0, 50.0));
+        let mut shapes = Vec::new();
+        paint_edge_backgrounds(&mut shapes, pane, Pos2::new(14.0, 15.0), (2, 1), &by_line, &colors, ppp);
+        let hit = |p: Pos2| shapes.iter().any(|s| s.visual_bounding_rect().contains(p));
+        assert!(hit(Pos2::new(5.0, 20.0)), "left padding");
+        assert!(hit(Pos2::new(20.0, 5.0)), "top padding over the grid columns");
+        assert!(hit(Pos2::new(5.0, 5.0)), "corner");
+        assert!(hit(Pos2::new(59.0, 20.0)), "right remainder takes the last column's bg");
+        assert!(hit(Pos2::new(20.0, 45.0)), "bottom remainder");
+        assert!(!hit(Pos2::new(20.0, 20.0)), "grid cells are painted elsewhere");
+    }
+
+    #[test]
+    fn reverse_video_cells_paint_as_solid_filled_runs() {
+        let colors = TermColors::default();
+        let mut shapes = Vec::new();
+        // "Current" tab pill: SGR 7 on default colours, three cells.
+        let cells: Vec<VisibleCell> = (0..3)
+            .map(|col| {
+                let mut c = cell('x');
+                c.col = col;
+                c.fg = TermColor::Named(NamedColor::Foreground);
+                c.flags.insert(Flags::INVERSE);
+                c
+            })
+            .collect();
+        let refs: Vec<&VisibleCell> = cells.iter().collect();
+        let (fg, bg, _) = cell_colors(&cells[0], None, &colors, None);
+        assert_eq!((fg, bg), (colors.background, colors.foreground), "fg and bg swap");
+        paint_row_backgrounds(&mut shapes, 0.0, 0.0, 18.0, &refs, None, &colors, 1.0);
+        assert_eq!(shapes.len(), 1, "one solid run, no per-cell seams");
+        let w = ui_theme::term_col_x(0.0, 3, 1.0);
+        assert!((shapes[0].visual_bounding_rect().width() - w).abs() < 1.0);
+    }
+
+    #[test]
+    fn braille_is_drawn_as_dots_on_the_2x4_grid() {
+        assert_eq!(braille_dots('\u{2800}'), vec![]);
+        assert_eq!(braille_dots('\u{280B}'), vec![(0, 0), (0, 1), (1, 0)], "⠋ = dots 1 2 4");
+        assert_eq!(braille_dots('\u{28FF}').len(), 8);
+        assert_eq!(braille_dots('a'), vec![]);
+        let rect = Rect::from_min_size(Pos2::new(10.0, 20.0), Vec2::new(8.0, 16.0));
+        let mut shapes = Vec::new();
+        assert!(paint_braille(&mut shapes, '\u{2839}', rect, Color32::WHITE));
+        assert_eq!(shapes.len(), 4, "⠹ has four dots");
+        assert!(shapes.iter().all(|s| rect.contains_rect(s.visual_bounding_rect())), "dots stay in the cell");
+        assert!(!paint_braille(&mut shapes, 'x', rect, Color32::WHITE));
+        assert!(is_box_geometry('\u{283C}'), "text pass skips braille");
+    }
+
+    #[test]
+    fn heavy_vertical_fills_the_snapped_row_without_seams() {
+        let cell = cell('┃');
+        let ppp = 1.5;
+        let mut shapes = Vec::new();
+        paint_row_box_drawing(
+            &mut shapes,
+            0.0,
+            0.0,
+            CELL_W,
+            CELL_H,
+            18.0,
+            &[&cell],
+            None,
+            &TermColors::default(),
+            None,
+            ppp,
+        );
+        assert_eq!(shapes.len(), 2, "up and down arms");
+        let top = shapes[0].visual_bounding_rect();
+        let bottom = shapes[1].visual_bounding_rect();
+        assert!((top.min.y - 0.0).abs() < 1e-4);
+        assert!((top.max.y - bottom.min.y).abs() < 1e-4, "shared row edge");
+        assert!((bottom.max.y - 18.0).abs() < 1e-4);
+        for v in [top.min.x, top.max.x, top.min.y, top.max.y] {
+            assert!(((v * ppp) - (v * ppp).round()).abs() < 1e-4, "whole pixel");
+        }
+    }
+
+    #[test]
+    fn heavy_bar_keeps_one_device_width_in_every_column() {
+        for ppp in [1.0, 1.25, 1.5, 2.0] {
+            let expected = Weight::Heavy.px(CELL_W, CELL_H, ppp) * ppp;
+            assert_eq!(expected, expected.round(), "whole device pixels");
+            for col in 0..40u16 {
+                let mut cell = cell('┃');
+                cell.col = col;
+                let mut shapes = Vec::new();
+                paint_row_box_drawing(
+                    &mut shapes,
+                    3.3,
+                    0.0,
+                    CELL_W,
+                    CELL_H,
+                    18.0,
+                    &[&cell],
+                    None,
+                    &TermColors::default(),
+                    None,
+                    ppp,
+                );
+                let width = shapes[0].visual_bounding_rect().width() * ppp;
+                assert!((width - expected).abs() < 1e-3, "col {col} ppp {ppp}: {width}");
+            }
+        }
+    }
+
+    #[test]
+    fn backgrounds_tile_rows_and_columns_without_overlap() {
+        let ppp = 1.25;
+        let bg = TermColor::Spec(Rgb { r: 30, g: 30, b: 40 });
+        let mut a = cell(' ');
+        a.bg = bg;
+        let mut b = a.clone();
+        b.col = 1;
+        b.bg = TermColor::Spec(Rgb { r: 50, g: 30, b: 40 });
+        let rect_of = |row: i32, cells: &[&VisibleCell]| {
+            let y = ui_theme::term_row_top(0.0, row, ppp);
+            let h = ui_theme::term_row_top(0.0, row + 1, ppp) - y;
+            let mut shapes = Vec::new();
+            paint_row_backgrounds(
+                &mut shapes,
+                0.0,
+                y,
+                h,
+                cells,
+                None,
+                &TermColors::default(),
+                ppp,
+            );
+            shapes.iter().map(|s| s.visual_bounding_rect()).collect::<Vec<_>>()
+        };
+        let row0 = rect_of(0, &[&a, &b]);
+        let row1 = rect_of(1, &[&a]);
+        assert_eq!(row0.len(), 2);
+        assert!((row0[0].max.x - row0[1].min.x).abs() < 1e-4, "columns share an edge");
+        assert!((row0[0].max.y - row1[0].min.y).abs() < 1e-4, "rows share an edge");
+    }
+
+    #[test]
+    fn heavy_is_thicker_and_blocks_keep_their_fraction() {
+        let (w, h) = (8.0, 16.0);
+        assert!(Weight::Heavy.px(w, h, 1.0) > Weight::Light.px(w, h, 1.0));
+        assert_eq!(box_arms('│').unwrap().up, Some(Weight::Light));
+        assert_eq!(box_arms('┃').unwrap().up, Some(Weight::Heavy));
+        let mut shapes = Vec::new();
+        assert!(paint_block(
+            &mut shapes,
+            '▌',
+            0.0,
+            0.0,
+            w,
+            h,
+            Color32::WHITE,
+            1.0
+        ));
+        let rect = shapes[0].visual_bounding_rect();
+        assert!((rect.width() - w * 0.5).abs() < 0.01);
+        assert!(is_box_geometry('▎') && is_box_geometry('╹'));
+        assert!(!is_box_geometry('╱')); // diagonals keep the font glyph
+    }
+
+    #[test]
+    fn block_rects_share_whole_pixel_edges() {
+        let ppp = 1.5;
+        let mut shapes = Vec::new();
+        assert!(paint_block(
+            &mut shapes,
+            '█',
+            0.0,
+            0.0,
+            CELL_W,
+            CELL_H,
+            Color32::WHITE,
+            ppp
+        ));
+        assert!(paint_block(
+            &mut shapes,
+            '█',
+            CELL_W,
+            0.0,
+            CELL_W,
+            CELL_H,
+            Color32::WHITE,
+            ppp
+        ));
+        let left = shapes[0].visual_bounding_rect();
+        let right = shapes[1].visual_bounding_rect();
+        assert!((left.max.x - right.min.x).abs() < 1e-4);
+        for v in [left.min.x, left.max.x, left.min.y, left.max.y] {
+            assert!(((v * ppp) - (v * ppp).round()).abs() < 1e-4, "whole pixel");
+        }
+
+        let mut half = Vec::new();
+        assert!(paint_block(
+            &mut half,
+            '▀',
+            0.0,
+            0.0,
+            CELL_W,
+            CELL_H,
+            Color32::WHITE,
+            ppp
+        ));
+        let top = half[0].visual_bounding_rect();
+        assert!(((top.max.y * ppp) - (top.max.y * ppp).round()).abs() < 1e-4);
     }
 }

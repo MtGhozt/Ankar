@@ -14,6 +14,8 @@ pub enum PaletteAction {
     ToggleStats,
     NewTab,
     PinActive,
+    OpenLogFolder,
+    ColorCheck,
     RestoreArchived(usize),
 }
 
@@ -232,6 +234,18 @@ fn build_groups(
             icon: Some(Icon::Pin),
             shortcut: "Ctrl+Shift+P".into(),
             action: PaletteAction::PinActive,
+        },
+        PaletteItem {
+            label: "Open log folder".into(),
+            icon: Some(Icon::Folder),
+            shortcut: String::new(),
+            action: PaletteAction::OpenLogFolder,
+        },
+        PaletteItem {
+            label: "Debug: check colors (log)".into(),
+            icon: None,
+            shortcut: String::new(),
+            action: PaletteAction::ColorCheck,
         },
     ];
     actions.retain(|i| q.is_empty() || i.label.to_lowercase().contains(q));

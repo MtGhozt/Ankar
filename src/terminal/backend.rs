@@ -1,6 +1,8 @@
-use super::theme::TermColors;
+use super::osc::{AgentInfo, OscTap};
+use super::resize::{grid_size, hold_frame, ResizeDebouncer};
+use super::theme::{indexed_256, TermColors};
 use alacritty_terminal::event::{Event, EventListener, Notify, OnResize, WindowSize};
-use alacritty_terminal::event_loop::{EventLoop, Msg, Notifier};
+use alacritty_terminal::event_loop::{EventLoop, EventLoopSender, Msg, Notifier};
 use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::{Column, Line, Point, Side};
 use alacritty_terminal::selection::{Selection, SelectionRange, SelectionType};
@@ -9,15 +11,36 @@ use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::test::TermSize;
 use alacritty_terminal::term::{self, viewport_to_point, Term, TermMode};
 use alacritty_terminal::tty;
-use alacritty_terminal::vte::ansi::{Color, NamedColor};
+use alacritty_terminal::vte::ansi::{Color, CursorShape, CursorStyle, NamedColor, Rgb};
 use egui::Context;
+use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 const MAX_SCROLLBACK: usize = 50_000;
+
+/// What `TerminalSession::resize` did this frame.
+pub enum ResizeState {
+    Idle,
+    /// A new size is waiting for the debounce: repaint after it elapses.
+    Pending,
+    /// Grid and PTY were just resized together: repaint so the TUI's redraw shows up.
+    Applied,
+}
+
+impl ResizeState {
+    fn from_pending(pending: bool) -> Self {
+        if pending {
+            Self::Pending
+        } else {
+            Self::Idle
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug)]
 pub struct CellMetrics {
@@ -94,6 +117,10 @@ pub struct VisibleCell {
 pub struct Snapshot {
     pub cells: Vec<VisibleCell>,
     pub cursor: Point,
+    /// DECSCUSR shape; `Hidden` when DECTCEM is off.
+    pub cursor_shape: CursorShape,
+    /// OSC 12 override, if the app set one.
+    pub cursor_color: Option<Rgb>,
     pub display_offset: usize,
     pub selection: Option<SelectionRange>,
     pub mode: TermMode,
@@ -105,6 +132,8 @@ impl Default for Snapshot {
         Self {
             cells: Vec::new(),
             cursor: Point::new(Line(0), Column(0)),
+            cursor_shape: CursorShape::Hidden,
+            cursor_color: None,
             display_offset: 0,
             selection: None,
             mode: TermMode::empty(),
@@ -113,13 +142,21 @@ impl Default for Snapshot {
     }
 }
 
+type PtyThread = std::thread::JoinHandle<(
+    EventLoop<OscTap<tty::Pty>, EventProxy>,
+    alacritty_terminal::event_loop::State,
+)>;
+
 pub struct TerminalSession {
-    #[allow(dead_code)]
-    pub id: u64,
-    #[allow(dead_code)]
-    pub title: String,
     term: Arc<FairMutex<Term<EventProxy>>>,
     size: TerminalSize,
+    /// Debounces layout size changes; `size` above is the one applied to grid AND PTY.
+    debounce: ResizeDebouncer,
+    /// Next `resize` applies immediately (drag released, panel toggled).
+    apply_now: bool,
+    /// When `apply_size` last ran while a frame was on screen; `sync` keeps that frame until
+    /// the app has redrawn (`resize::hold_frame`).
+    applied_at: Option<Instant>,
     notifier: Notifier,
     snapshot: Snapshot,
     exited: Arc<AtomicBool>,
@@ -130,7 +167,25 @@ pub struct TerminalSession {
     cwd: Arc<Mutex<Option<PathBuf>>>,
     /// Latest non-cwd window title (agent activity).
     activity: Arc<Mutex<Option<String>>>,
+    /// Latest OSC 7501 agent report (state / session id / title).
+    agent: Arc<Mutex<AgentInfo>>,
     exit_code: Arc<Mutex<Option<i32>>>,
+    /// Shared with the event thread so it can answer size queries (CSI 14/18 t).
+    window_size: Arc<Mutex<WindowSize>>,
+    /// OSC 52 copy waiting for the UI thread (the clipboard only works inside a frame).
+    clipboard: Arc<Mutex<Option<String>>>,
+    /// Last cell/button reported for motion, so pixels inside one cell stay quiet.
+    last_motion: Option<(u16, u16, u8)>,
+    /// Process id of the shell (ConPTY child), root of the tree `procs` walks.
+    shell_pid: Option<u32>,
+    /// OpenConsole / conhost pids created for this session.
+    host_pids: Vec<u32>,
+    /// Shell process handle. alacritty's watcher never closes it.
+    child_handle: isize,
+    id: u64,
+    pty_thread: Option<PtyThread>,
+    /// When the user last sent Enter: work starts with a submitted command or prompt.
+    last_submit: Option<Instant>,
     pub colors: TermColors,
 }
 
@@ -143,31 +198,74 @@ impl TerminalSession {
         cwd: Option<PathBuf>,
         scrollback_lines: usize,
     ) -> anyhow::Result<Self> {
+        // Merged into the inherited environment by alacritty_terminal. TUIs (OpenCode) only
+        // enable truecolor and OSC color queries when TERM is a real xterm-style value.
+        let env = HashMap::from([
+            ("TERM".to_owned(), "xterm-256color".to_owned()),
+            ("COLORTERM".to_owned(), "truecolor".to_owned()),
+            // Dark-background hint (foreground 15, background 0) for apps that cannot query it.
+            ("COLORFGBG".to_owned(), "15;0".to_owned()),
+            ("TERM_PROGRAM".to_owned(), "Ankar".to_owned()),
+            ("TERM_PROGRAM_VERSION".to_owned(), env!("CARGO_PKG_VERSION").to_owned()),
+        ]);
         let pty_config = tty::Options {
             shell: Some(tty::Shell::new(program.to_string(), args.to_vec())),
             working_directory: cwd.clone(),
+            env,
             ..tty::Options::default()
         };
 
         let history = scrollback_lines.min(MAX_SCROLLBACK);
         let config = term::Config {
             scrolling_history: history,
+            // Midterm bar until an app picks a shape with DECSCUSR (DECSCUSR 0 returns here).
+            default_cursor_style: CursorStyle {
+                shape: CursorShape::Beam,
+                blinking: false,
+            },
             ..term::Config::default()
         };
         let terminal_size = TerminalSize::default();
+        let hosts_before = console_host_pids();
         let pty = tty::new(&pty_config, terminal_size.into(), id)
             .map_err(|e| anyhow::anyhow!("failed to open PTY for {program}: {e}"))?;
+        let host_pids: Vec<u32> = console_host_pids()
+            .into_iter()
+            .filter(|pid| !hosts_before.contains(pid))
+            .collect();
 
+        let agent = Arc::new(Mutex::new(AgentInfo::default()));
+        let cwd_state = Arc::new(Mutex::new(cwd.clone()));
+        let cwd_flag = cwd_state.clone();
+        #[cfg(windows)]
+        let (shell_pid, child_handle) = {
+            let watcher = pty.child_watcher();
+            (watcher.pid().map(|p| p.get()), watcher.raw_handle() as isize)
+        };
+        #[cfg(not(windows))]
+        let (shell_pid, child_handle) = (None, 0isize);
         let (event_sender, event_receiver) = mpsc::channel();
+        // Queries alacritty_terminal ignores are answered from the raw-byte scanner, through
+        // the same PtyWrite path as its own replies.
+        let reply_sender = event_sender.clone();
+        let pty = OscTap::new(
+            pty,
+            agent.clone(),
+            cwd_state.clone(),
+            Box::new(move |text| {
+                let _ = reply_sender.send(Event::PtyWrite(text));
+            }),
+        );
         let event_proxy = EventProxy(event_sender);
         let term = Term::new(config, &terminal_size, event_proxy.clone());
 
         let term = Arc::new(FairMutex::new(term));
+        let term_events = term.clone();
         let event_loop = EventLoop::new(term.clone(), event_proxy, pty, false, false)
             .map_err(|e| anyhow::anyhow!("failed to create PTY event loop: {e}"))?;
         let notifier = Notifier(event_loop.channel());
         let pty_notifier = Notifier(event_loop.channel());
-        let _loop_thread = event_loop.spawn();
+        let pty_thread = event_loop.spawn();
 
         let exited = Arc::new(AtomicBool::new(false));
         let exited_flag = exited.clone();
@@ -177,19 +275,17 @@ impl TerminalSession {
         let last_output_flag = last_output.clone();
         let visible = Arc::new(AtomicBool::new(true));
         let visible_flag = visible.clone();
-        let cwd_state = Arc::new(Mutex::new(cwd));
-        let cwd_flag = cwd_state.clone();
         let activity_state = Arc::new(Mutex::new(None::<String>));
         let activity_flag = activity_state.clone();
         let exit_code_state = Arc::new(Mutex::new(None::<i32>));
         let exit_code_flag = exit_code_state.clone();
-        let title = program
-            .rsplit(['\\', '/'])
-            .next()
-            .unwrap_or(program)
-            .to_string();
-
-        std::thread::Builder::new()
+        let window_size = Arc::new(Mutex::new(WindowSize::from(terminal_size)));
+        let window_size_flag = window_size.clone();
+        let clipboard = Arc::new(Mutex::new(None::<String>));
+        let clipboard_flag = clipboard.clone();
+        let colors = TermColors::default();
+        let query_colors = colors.clone();
+        let reader = std::thread::Builder::new()
             .name(format!("ankar-pty-{id}"))
             .spawn(move || {
                 while let Ok(event) = event_receiver.recv() {
@@ -210,6 +306,7 @@ impl TerminalSession {
                             break;
                         }
                         Event::PtyWrite(data) => {
+                            log::debug!("pty reply: {data:?}");
                             pty_notifier.notify(data.as_bytes().to_vec());
                         }
                         Event::Bell => {
@@ -241,6 +338,34 @@ impl TerminalSession {
                             }
                             ctx.request_repaint();
                         }
+                        Event::ColorRequest(index, format) => {
+                            // An OSC 12 query must answer with the colour the app set, not the default.
+                            let set_cursor = (*index == NamedColor::Cursor as usize)
+                                .then(|| term_events.lock().colors()[NamedColor::Cursor])
+                                .flatten();
+                            let reply =
+                                query_color(&query_colors, *index, set_cursor).map(|rgb| format(rgb));
+                            log::debug!("pty reply: color index={index} {reply:?}");
+                            if let Some(reply) = reply {
+                                pty_notifier.notify(reply.into_bytes());
+                            }
+                        }
+                        Event::TextAreaSizeRequest(format) => {
+                            let size = window_size_flag.lock().ok().map(|g| *g);
+                            if let Some(size) = size {
+                                let reply = format(size);
+                                log::debug!("pty reply: text area {reply:?}");
+                                pty_notifier.notify(reply.into_bytes());
+                            }
+                        }
+                        Event::ClipboardStore(_, text) => {
+                            if let Ok(mut g) = clipboard_flag.lock() {
+                                *g = Some(text.clone());
+                            }
+                            ctx.request_repaint();
+                        }
+                        // OSC 52 paste is ignored on purpose: no program may read the clipboard.
+                        // Event::ClipboardLoad(..) => {}
                         _ => {
                             if visible_flag.load(Ordering::Relaxed) {
                                 ctx.request_repaint_after(Duration::from_millis(8));
@@ -248,13 +373,28 @@ impl TerminalSession {
                         }
                     }
                 }
-            })?;
+            });
+        if let Err(e) = reader {
+            handoff_conpty_teardown(
+                id,
+                shell_pid,
+                host_pids,
+                notifier.0.clone(),
+                pty_thread,
+                child_handle,
+                false,
+            );
+            return Err(e.into());
+        }
 
+        let live = LIVE_CONPTY.fetch_add(1, Ordering::Relaxed) + 1;
+        log::debug!("conpty spawn id={id} live={live}");
         Ok(Self {
-            id,
-            title,
             term,
             size: terminal_size,
+            debounce: ResizeDebouncer::default(),
+            apply_now: false,
+            applied_at: None,
             notifier,
             snapshot: Snapshot::default(),
             exited,
@@ -263,9 +403,32 @@ impl TerminalSession {
             visible,
             cwd: cwd_state,
             activity: activity_state,
+            agent,
             exit_code: exit_code_state,
-            colors: TermColors::default(),
+            window_size,
+            clipboard,
+            last_motion: None,
+            shell_pid,
+            host_pids,
+            child_handle,
+            id,
+            pty_thread: Some(pty_thread),
+            last_submit: None,
+            colors,
         })
+    }
+
+    pub fn last_submit(&self) -> Option<Instant> {
+        self.last_submit
+    }
+
+    pub fn shell_pid(&self) -> Option<u32> {
+        self.shell_pid
+    }
+
+    /// Text an app copied via OSC 52 since the last call.
+    pub fn take_clipboard(&self) -> Option<String> {
+        self.clipboard.lock().ok().and_then(|mut g| g.take())
     }
 
     pub fn set_visible(&self, visible: bool) {
@@ -295,6 +458,10 @@ impl TerminalSession {
         self.activity.lock().ok().and_then(|g| g.clone())
     }
 
+    pub fn agent(&self) -> AgentInfo {
+        self.agent.lock().map(|g| g.clone()).unwrap_or_default()
+    }
+
     pub fn exit_code(&self) -> Option<i32> {
         self.exit_code.lock().ok().and_then(|g| *g)
     }
@@ -303,6 +470,9 @@ impl TerminalSession {
         let bytes = bytes.into();
         if bytes.is_empty() {
             return;
+        }
+        if bytes.contains(&b'\r') {
+            self.last_submit = Some(Instant::now());
         }
         self.notifier.notify(bytes);
         let mut term = self.term.lock();
@@ -318,41 +488,74 @@ impl TerminalSession {
         term.scroll_display(Scroll::Delta(lines));
     }
 
-    pub fn resize(&mut self, pixel_w: f32, pixel_h: f32, metrics: CellMetrics) {
+    /// Follows the layout size. While it is still changing the old grid keeps being painted
+    /// (clipped / background-padded by the view); `apply_size` runs once it is stable.
+    /// alacritty_terminal only reflows the primary grid (`grid.resize(!ALT_SCREEN, ..)`), so on
+    /// the alternate screen a resize just changes the dimensions — no rewrapped rows, no old
+    /// frames pushed into scrollback.
+    pub fn grid(&self) -> (u16, u16) {
+        (self.size.num_cols, self.size.num_lines)
+    }
+
+    pub fn resize(&mut self, pixel_w: f32, pixel_h: f32, metrics: CellMetrics) -> ResizeState {
+        if super::resize::layout_held() {
+            return ResizeState::from_pending(self.debounce.is_pending());
+        }
+        let Some((cols, lines)) =
+            grid_size(pixel_w, pixel_h, metrics.width, metrics.height)
+        else {
+            return ResizeState::from_pending(self.debounce.is_pending());
+        };
         let cell_w = metrics.width.max(1.0);
         let cell_h = metrics.height.max(1.0);
-        let cols = (pixel_w / cell_w).floor() as u16;
-        let lines = (pixel_h / cell_h).floor() as u16;
-        if cols == 0 || lines == 0 {
-            return;
+        let immediate = std::mem::take(&mut self.apply_now);
+        if let Some((cols, lines)) = self.debounce.update((cols, lines), Instant::now(), immediate) {
+            self.apply_size(cols, lines, cell_w, cell_h);
+            return ResizeState::Applied;
         }
-        if cols == self.size.num_cols
-            && lines == self.size.num_lines
-            && (self.size.cell_width - cell_w).abs() < 0.01
-            && (self.size.cell_height - cell_h).abs() < 0.01
-        {
-            return;
-        }
+        ResizeState::from_pending(self.debounce.is_pending())
+    }
 
+    /// Skip the debounce on the next `resize` (drag released, panel shown/hidden).
+    pub fn apply_next_resize_now(&mut self) {
+        self.apply_now = true;
+    }
+
+    /// The only place that changes the size: grid first, then the PTY, so they never differ.
+    fn apply_size(&mut self, cols: u16, lines: u16, cell_w: f32, cell_h: f32) {
         self.size = TerminalSize {
             cell_width: cell_w,
             cell_height: cell_h,
             num_cols: cols,
             num_lines: lines,
         };
-
+        if let Ok(mut g) = self.window_size.lock() {
+            *g = self.size.into();
+        }
+        self.term.lock().resize(TermSize::new(cols as usize, lines as usize));
         self.notifier.on_resize(self.size.into());
-        let mut term = self.term.lock();
-        term.resize(TermSize::new(
-            self.size.num_cols as usize,
-            self.size.num_lines as usize,
-        ));
+        if !self.snapshot.cells.is_empty() {
+            self.applied_at = Some(Instant::now());
+        }
+    }
+
+    /// True while `sync` is still returning the pre-resize frame; repaint soon.
+    pub fn holding_frame(&self) -> bool {
+        self.applied_at.is_some()
     }
 
     pub fn sync(&mut self) -> &Snapshot {
         if !self.visible.load(Ordering::Relaxed) {
+            self.applied_at = None;
             self.release_snapshot();
             return &self.snapshot;
+        }
+        if let Some(applied_at) = self.applied_at {
+            let last_output = self.last_output.lock().map(|t| *t).unwrap_or(applied_at);
+            if hold_frame(Instant::now(), applied_at, last_output) {
+                return &self.snapshot;
+            }
+            self.applied_at = None;
         }
 
         let term = self.term.lock();
@@ -386,6 +589,8 @@ impl TerminalSession {
         }
 
         self.snapshot.cursor = content.cursor.point;
+        self.snapshot.cursor_shape = content.cursor.shape;
+        self.snapshot.cursor_color = content.colors[NamedColor::Cursor];
         self.snapshot.display_offset = content.display_offset;
         self.snapshot.selection = selection;
         self.snapshot.mode = content.mode;
@@ -446,34 +651,35 @@ impl TerminalSession {
         row: u16,
         pressed: bool,
         motion: bool,
+        modifiers: u8,
     ) {
-        let mode = self.snapshot.mode;
-        // 1-based coordinates for the protocol.
-        let x = col.saturating_add(1);
-        let y = row.saturating_add(1);
-        let mut b = button;
+        let key = (col, row, button | modifiers | if motion { 32 } else { 0 });
         if motion {
-            b |= 32;
-        }
-        let bytes = if mode.contains(TermMode::SGR_MOUSE) {
-            let ch = if pressed || motion { b'M' } else { b'm' };
-            format!("\x1b[<{b};{x};{y}{ch}").into_bytes()
-        } else {
-            // X10 classic — coords must fit in a byte after +32 (≤ 223).
-            if x > 223 || y > 223 {
+            // Motion is only useful when the cell changes; pixel jitter inside one
+            // cell would otherwise flood the PTY.
+            if self.last_motion == Some(key) {
                 return;
             }
-            let release_or = if pressed || motion { b } else { 3 };
-            vec![
-                0x1b,
-                b'[',
-                b'M',
-                release_or.saturating_add(32),
-                (x as u8).saturating_add(32),
-                (y as u8).saturating_add(32),
-            ]
-        };
-        self.notifier.notify(bytes);
+            self.last_motion = Some(key);
+        } else {
+            self.last_motion = None;
+        }
+        if let Some(bytes) = mouse_sequence(
+            self.snapshot.mode,
+            button,
+            col,
+            row,
+            pressed,
+            motion,
+            modifiers,
+        ) {
+            self.notifier.notify(bytes);
+        }
+    }
+
+    /// Forget the last motion cell (pointer left the pane).
+    pub fn clear_mouse_motion(&mut self) {
+        self.last_motion = None;
     }
 
     pub fn idle_for(&self) -> Duration {
@@ -486,7 +692,223 @@ impl TerminalSession {
 
 impl Drop for TerminalSession {
     fn drop(&mut self) {
-        let _ = self.notifier.0.send(Msg::Shutdown);
+        // A detached PTY thread is killed on process exit before ClosePseudoConsole, and that
+        // call deadlocks unless the host is already gone (it waits for a reader to drain).
+        let id = self.id;
+        let shell_pid = self.shell_pid.take();
+        let host_pids = std::mem::take(&mut self.host_pids);
+        let shutdown = self.notifier.0.clone();
+        let child_handle = self.child_handle;
+        if let Some(pty_thread) = self.pty_thread.take() {
+            handoff_conpty_teardown(
+                id,
+                shell_pid,
+                host_pids,
+                shutdown,
+                pty_thread,
+                child_handle,
+                true,
+            );
+        }
+    }
+}
+
+static LIVE_CONPTY: AtomicUsize = AtomicUsize::new(0);
+
+fn teardown_workers() -> &'static Mutex<Vec<JoinHandle<()>>> {
+    static WORKERS: Mutex<Vec<JoinHandle<()>>> = Mutex::new(Vec::new());
+    &WORKERS
+}
+
+/// Join ConPTY teardown workers after the window is gone (`main` after `run_native`).
+pub fn join_conpty_teardown_workers() {
+    let handles = std::mem::take(&mut *teardown_workers().lock().unwrap_or_else(|e| e.into_inner()));
+    for handle in handles {
+        let _ = handle.join();
+    }
+}
+
+fn handoff_conpty_teardown(
+    id: u64,
+    shell_pid: Option<u32>,
+    host_pids: Vec<u32>,
+    shutdown: EventLoopSender,
+    pty_thread: PtyThread,
+    child_handle: isize,
+    decrement_live: bool,
+) {
+    let worker = std::thread::spawn(move || {
+        conpty_teardown_worker(
+            id,
+            shell_pid,
+            host_pids,
+            shutdown,
+            pty_thread,
+            child_handle,
+            decrement_live,
+        );
+    });
+    teardown_workers()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push(worker);
+}
+
+fn conpty_teardown_worker(
+    id: u64,
+    shell_pid: Option<u32>,
+    host_pids: Vec<u32>,
+    shutdown: EventLoopSender,
+    pty_thread: PtyThread,
+    child_handle: isize,
+    decrement_live: bool,
+) {
+    let hosts_gone = release_hosts(shell_pid, &host_pids);
+    if hosts_gone {
+        let _ = shutdown.send(Msg::Shutdown);
+        let _ = pty_thread.join();
+    }
+    close_child_handle(child_handle);
+    if decrement_live {
+        let live = LIVE_CONPTY.fetch_sub(1, Ordering::Relaxed).saturating_sub(1);
+        log::debug!("conpty drop id={id} live={live}");
+    }
+}
+
+pub(crate) fn console_host_pids() -> Vec<u32> {
+    let me = std::process::id();
+    crate::procs::snapshot()
+        .into_iter()
+        .filter(|p| p.ppid == me && is_console_host(&p.exe))
+        .map(|p| p.pid)
+        .collect()
+}
+
+fn is_console_host(exe: &str) -> bool {
+    exe.eq_ignore_ascii_case("OpenConsole.exe") || exe.eq_ignore_ascii_case("conhost.exe")
+}
+
+#[cfg(test)]
+pub(crate) fn release_conpty(shell: Option<u32>, before: &[u32]) {
+    let hosts: Vec<u32> = console_host_pids()
+        .into_iter()
+        .filter(|pid| !before.contains(pid))
+        .collect();
+    release_hosts(shell, &hosts);
+}
+
+fn release_hosts(shell: Option<u32>, hosts: &[u32]) -> bool {
+    let shell_ok = shell.is_none_or(terminate_tree);
+    hosts.iter().copied().all(terminate_tree) && shell_ok
+}
+
+fn kill_order(root: u32, edges: &[(u32, u32)]) -> Vec<u32> {
+    let mut order = Vec::new();
+    let mut stack = vec![root];
+    let mut seen = vec![root];
+    while let Some(pid) = stack.pop() {
+        order.push(pid);
+        for &(child, parent) in edges {
+            if parent == pid && !seen.contains(&child) {
+                seen.push(child);
+                stack.push(child);
+            }
+        }
+    }
+    order.reverse();
+    order
+}
+
+fn terminate_tree(root: u32) -> bool {
+    if root == 0 {
+        return true;
+    }
+    let edges: Vec<(u32, u32)> = crate::procs::snapshot()
+        .into_iter()
+        .map(|p| (p.pid, p.ppid))
+        .collect();
+    kill_order(root, &edges).into_iter().all(terminate_pid)
+}
+
+// shortcut: 2s wait and the pid is not rechecked, if TerminateProcess is ignored or a pid was reused use a job object.
+fn terminate_pid(pid: u32) -> bool {
+    #[cfg(windows)]
+    unsafe {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, TerminateProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE,
+        };
+        const WAIT_OBJECT_0: u32 = 0x0000_0000;
+        let handle = OpenProcess(PROCESS_TERMINATE | PROCESS_SYNCHRONIZE, 0, pid);
+        if handle.is_null() {
+            return true;
+        }
+        TerminateProcess(handle, 1);
+        let waited = WaitForSingleObject(handle, 2000);
+        CloseHandle(handle);
+        waited == WAIT_OBJECT_0
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = pid;
+        true
+    }
+}
+
+fn close_child_handle(handle: isize) {
+    #[cfg(windows)]
+    unsafe {
+        use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+        let handle = handle as HANDLE;
+        if !handle.is_null() {
+            CloseHandle(handle);
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = handle;
+    }
+}
+
+/// Encode a mouse report. `button` is 0/1/2, 3 for no button, 64/65 for wheel;
+/// `modifiers` uses the protocol bits (4 shift, 8 alt, 16 ctrl).
+fn mouse_sequence(
+    mode: TermMode,
+    button: u8,
+    col: u16,
+    row: u16,
+    pressed: bool,
+    motion: bool,
+    modifiers: u8,
+) -> Option<Vec<u8>> {
+    // 1-based coordinates for the protocol.
+    let x = col.saturating_add(1);
+    let y = row.saturating_add(1);
+    let mut b = button | modifiers;
+    if motion {
+        b |= 32;
+    }
+    if mode.contains(TermMode::SGR_MOUSE) {
+        let ch = if pressed || motion { 'M' } else { 'm' };
+        Some(format!("\x1b[<{b};{x};{y}{ch}").into_bytes())
+    } else {
+        // X10 classic — coords must fit in a byte after +32 (≤ 223).
+        if x > 223 || y > 223 {
+            return None;
+        }
+        let code = if pressed || motion {
+            b
+        } else {
+            3 | modifiers
+        };
+        Some(vec![
+            0x1b,
+            b'[',
+            b'M',
+            code.saturating_add(32),
+            (x as u8).saturating_add(32),
+            (y as u8).saturating_add(32),
+        ])
     }
 }
 
@@ -526,6 +948,27 @@ fn parse_cwd_title(title: &str) -> Option<PathBuf> {
     Some(path)
 }
 
+/// Palette entry reported for OSC 4 / 10 / 11 / 12 queries.
+/// cursor is the colour the app set with OSC 12, if any.
+fn query_color(colors: &TermColors, index: usize, cursor: Option<Rgb>) -> Option<Rgb> {
+    if index == NamedColor::Cursor as usize && cursor.is_some() {
+        return cursor;
+    }
+    let c = match index {
+        0..=15 => colors.ansi[index],
+        16..=255 => indexed_256(index as u8),
+        i if i == NamedColor::Foreground as usize => colors.foreground,
+        i if i == NamedColor::Background as usize => colors.background,
+        i if i == NamedColor::Cursor as usize => colors.cursor,
+        _ => return None,
+    };
+    Some(Rgb {
+        r: c.r(),
+        g: c.g(),
+        b: c.b(),
+    })
+}
+
 fn is_default_skip(c: char, _fg: Color, bg: Color, flags: Flags, selected: bool) -> bool {
     if selected {
         return false;
@@ -560,5 +1003,149 @@ struct EventProxy(mpsc::Sender<Event>);
 impl EventListener for EventProxy {
     fn send_event(&self, event: Event) {
         let _ = self.0.send(event);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn kill_order_finishes_children_before_the_host() {
+        // (pid, ppid): host 1 → shell 2 and conhost 3, shell → command 4.
+        let order = kill_order(1, &[(2, 1), (3, 1), (4, 2)]);
+        assert_eq!(order.last().copied(), Some(1), "host dies last");
+        let pos = |pid| order.iter().position(|p| *p == pid).unwrap();
+        assert!(pos(4) < pos(2), "command before shell");
+        assert!(pos(2) < pos(1) && pos(3) < pos(1), "children before host");
+    }
+
+    #[test]
+    fn sgr_reports_motion_release_wheel_and_modifiers() {
+        let mode = TermMode::SGR_MOUSE | TermMode::MOUSE_MOTION;
+        assert_eq!(
+            mouse_sequence(mode, 3, 4, 2, true, true, 0).unwrap(),
+            b"\x1b[<35;5;3M",
+            "no-button motion"
+        );
+        assert_eq!(
+            mouse_sequence(mode, 0, 4, 2, false, false, 0).unwrap(),
+            b"\x1b[<0;5;3m",
+            "release uses lowercase m"
+        );
+        assert_eq!(
+            mouse_sequence(mode, 64, 4, 2, true, false, 4).unwrap(),
+            b"\x1b[<68;5;3M",
+            "wheel up with shift"
+        );
+        assert_eq!(
+            mouse_sequence(mode, 0, 4, 2, true, false, 16 | 8).unwrap(),
+            b"\x1b[<24;5;3M",
+            "click with ctrl+alt"
+        );
+    }
+
+    #[test]
+    fn color_queries_get_16_bit_replies_with_the_query_terminator() {
+        use alacritty_terminal::vte::ansi::Processor;
+        let (tx, rx) = mpsc::channel();
+        let mut term = Term::new(
+            term::Config::default(),
+            &TermSize::new(80, 24),
+            EventProxy(tx),
+        );
+        let mut parser: Processor = Processor::new();
+        // OSC 10 / 11 / 12 / 4, with both BEL and ST terminators.
+        parser.advance(&mut term, b"\x1b]10;?\x07\x1b]11;?\x1b\\\x1b]12;?\x07\x1b]4;4;?\x1b\\");
+        let colors = TermColors::default();
+        let set_cursor = term.colors()[NamedColor::Cursor];
+        let replies: Vec<String> = rx
+            .try_iter()
+            .filter_map(|event| match event {
+                Event::ColorRequest(index, format) => {
+                    query_color(&colors, index, set_cursor).map(|rgb| format(rgb))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            replies,
+            [
+                "\x1b]10;rgb:d4d4/d4d4/d4d4\x07",
+                "\x1b]11;rgb:0000/0000/0000\x1b\\",
+                "\x1b]12;rgb:7676/9999/fefe\x07",
+                "\x1b]4;4;rgb:4e4e/9b9b/ffff\x1b\\",
+            ],
+            "bytes doubled, same terminator as the query"
+        );
+    }
+
+    /// What Junie (and any TUI picking light/dark) sends: OSC 11 with BEL, expecting the
+    /// background back with the same terminator; black means "dark theme".
+    #[test]
+    fn osc_11_query_with_bel_gets_the_black_background_back_with_bel() {
+        use alacritty_terminal::vte::ansi::Processor;
+        let (tx, rx) = mpsc::channel();
+        let mut term = Term::new(term::Config::default(), &TermSize::new(80, 24), EventProxy(tx));
+        Processor::<alacritty_terminal::vte::ansi::StdSyncHandler>::new().advance(&mut term, b"\x1b]11;?\x07");
+        let colors = TermColors::default();
+        let replies: Vec<Vec<u8>> = rx
+            .try_iter()
+            .filter_map(|e| match e {
+                Event::ColorRequest(i, format) => query_color(&colors, i, None).map(|c| format(c).into_bytes()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(replies, [b"\x1b]11;rgb:0000/0000/0000\x07".to_vec()]);
+    }
+
+    #[test]
+    fn device_attribute_queries_are_answered() {
+        use alacritty_terminal::vte::ansi::Processor;
+        let (tx, rx) = mpsc::channel();
+        let mut term = Term::new(term::Config::default(), &TermSize::new(80, 24), EventProxy(tx));
+        let mut parser: Processor = Processor::new();
+        parser.advance(&mut term, b"\x1b[c\x1b[>c");
+        let writes: Vec<String> = rx
+            .try_iter()
+            .filter_map(|e| if let Event::PtyWrite(s) = e { Some(s) } else { None })
+            .collect();
+        assert_eq!(writes.len(), 2);
+        assert!(writes[0].starts_with("\x1b[?") && writes[0].ends_with('c'), "DA1");
+        assert!(writes[1].starts_with("\x1b[>") && writes[1].ends_with('c'), "DA2");
+    }
+
+    #[test]
+    fn cursor_query_answers_with_the_colour_the_app_set_until_osc_112() {
+        use alacritty_terminal::vte::ansi::Processor;
+        let (tx, _rx) = mpsc::channel();
+        let mut term = Term::new(term::Config::default(), &TermSize::new(80, 24), EventProxy(tx));
+        let mut parser: Processor = Processor::new();
+        let colors = TermColors::default();
+        let blue = Rgb { r: 0x3b, g: 0x82, b: 0xf6 };
+        let reply = |term: &Term<EventProxy>| {
+            query_color(&colors, NamedColor::Cursor as usize, term.colors()[NamedColor::Cursor])
+        };
+        parser.advance(&mut term, b"\x1b]12;#3b82f6\x07");
+        assert_eq!(term.colors()[NamedColor::Cursor], Some(blue));
+        assert_eq!(reply(&term), Some(blue));
+        parser.advance(&mut term, b"\x1b]112\x07");
+        assert_eq!(term.colors()[NamedColor::Cursor], None);
+        assert_eq!(
+            reply(&term).map(|c| (c.r, c.g, c.b)),
+            Some((0x76, 0x99, 0xFE)),
+            "default is the Ankar accent blue"
+        );
+    }
+
+    #[test]
+    fn x10_drops_coordinates_that_do_not_fit_a_byte() {
+        let mode = TermMode::MOUSE_REPORT_CLICK;
+        assert!(mouse_sequence(mode, 0, 223, 0, true, false, 0).is_none());
+        assert_eq!(
+            mouse_sequence(mode, 0, 0, 0, false, false, 4).unwrap(),
+            vec![0x1b, b'[', b'M', 32 + 7, 32 + 1, 32 + 1],
+            "release is button 3 plus modifiers"
+        );
     }
 }

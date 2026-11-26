@@ -1,6 +1,6 @@
-//! cursor-agent local chats: meta.json + prompt_history.json only (no store.db, no auth).
+//! cursor-agent local chats: meta.json timestamps only (no store.db, no auth).
 
-use super::{AgentRow, DayBucket, Source, StatsSnapshot};
+use super::{window_idx, AgentFilter, AgentRow, DayBucket, Source, StatsSnapshot};
 use std::fs;
 use std::path::PathBuf;
 
@@ -17,22 +17,39 @@ pub fn chats_root() -> Option<PathBuf> {
     }
 }
 
-pub fn load_into(snap: &mut StatsSnapshot, since_ms: i64, until_ms: i64) {
+/// Per-window totals for one chats walk.
+#[derive(Default)]
+struct Acc {
+    chats: u64,
+    busy_secs: u64,
+    days: std::collections::HashMap<String, DayBucket>,
+}
+
+/// One walk of the chats folder; chats created in `[since_ms, until_ms)` go to `snaps[0]`
+/// (>= `split_ms`) or `snaps[1]` (before it).
+pub fn load_into(
+    snaps: &mut [StatsSnapshot],
+    tz: &jiff::tz::TimeZone,
+    split_ms: i64,
+    since_ms: i64,
+    until_ms: i64,
+    filter: Option<&AgentFilter>,
+) {
+    let keep = AgentFilter::allows(filter, Source::CursorAgent, AGENT_NAME);
     let Some(root) = chats_root() else {
-        snap.warnings
+        snaps[0]
+            .warnings
             .push("cursor-agent: no local chats folder (~/.cursor/chats)".into());
         return;
     };
 
     let mut files = 0usize;
-    let mut chats = 0u64;
-    let mut prompts = 0u64;
-    let mut busy_secs = 0u64;
-    let mut days: std::collections::HashMap<String, DayBucket> = std::collections::HashMap::new();
+    let mut accs: Vec<Acc> = snaps.iter().map(|_| Acc::default()).collect();
 
     // Two levels: chats/<hash>/<uuid>/meta.json
     let Ok(level1) = fs::read_dir(&root) else {
-        snap.warnings
+        snaps[0]
+            .warnings
             .push("cursor-agent: cannot read chats folder".into());
         return;
     };
@@ -81,50 +98,57 @@ pub fn load_into(snap: &mut StatsSnapshot, since_ms: i64, until_ms: i64) {
             if created < since_ms || created >= until_ms {
                 continue;
             }
-            chats = chats.saturating_add(1);
-            bump_activity(&mut snap.activity, created);
+            let i = window_idx(split_ms, created, snaps.len());
+            let acc = &mut accs[i];
+            acc.chats = acc.chats.saturating_add(1);
 
             let updated = updated.unwrap_or(created).max(created);
             let dur_ms = (updated - created).clamp(0, 6 * 60 * 60 * 1000) as u64;
             let secs = dur_ms / 1000;
-            busy_secs = busy_secs.saturating_add(secs);
+            acc.busy_secs = acc.busy_secs.saturating_add(secs);
+            if !keep {
+                continue;
+            }
+            bump_activity(&mut snaps[i].activity, tz, created);
 
-            let day = local_day(created);
-            let d = days.entry(day.clone()).or_insert_with(|| DayBucket {
+            let day = local_day(tz, created);
+            let d = acc.days.entry(day.clone()).or_insert_with(|| DayBucket {
                 day,
                 ..DayBucket::default()
             });
             d.tasks = d.tasks.saturating_add(1);
             d.busy_secs = d.busy_secs.saturating_add(secs);
-
-            let hist = chat_dir.join("prompt_history.json");
-            if hist.is_file() {
-                if let Ok(md) = hist.metadata() {
-                    if md.len() <= MAX_BYTES {
-                        if let Ok(ht) = fs::read_to_string(&hist) {
-                            if let Ok(arr) = serde_json::from_str::<serde_json::Value>(&ht) {
-                                if let Some(a) = arr.as_array() {
-                                    prompts = prompts.saturating_add(a.len() as u64);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
         }
     }
 
-    snap.sessions = snap.sessions.saturating_add(chats);
-    snap.prompts = snap.prompts.saturating_add(prompts);
-    snap.cursor_hours = busy_secs as f64 / 3600.0;
+    for (snap, acc) in snaps.iter_mut().zip(accs) {
+        finish(snap, acc, keep);
+    }
+}
+
+/// The name of the one agent this source reports.
+const AGENT_NAME: &str = "cursor-agent";
+
+/// The AGENTS row is always added; sessions, hours and days only when `keep` (filter).
+fn finish(snap: &mut StatsSnapshot, acc: Acc, keep: bool) {
+    let Acc {
+        chats,
+        busy_secs,
+        days,
+    } = acc;
+    if keep {
+        snap.sessions = snap.sessions.saturating_add(chats);
+        snap.cursor_hours = busy_secs as f64 / 3600.0;
+    }
 
     snap.agents.push(AgentRow {
         source: Source::CursorAgent,
-        name: "cursor-agent".into(),
+        name: AGENT_NAME.into(),
         busy_secs,
         waiting_secs: 0,
         tasks: chats,
         tokens: None, // cursor-agent does not store tokens locally
+        modes: String::new(),
     });
 
     for (_, d) in days {
@@ -152,11 +176,11 @@ fn as_i64(v: &serde_json::Value, key: &str) -> Option<i64> {
     None
 }
 
-fn bump_activity(activity: &mut [[u32; 24]; 7], time_ms: i64) {
+fn bump_activity(activity: &mut [[u32; 24]; 7], tz: &jiff::tz::TimeZone, time_ms: i64) {
     let Ok(ts) = jiff::Timestamp::from_millisecond(time_ms) else {
         return;
     };
-    let z = ts.to_zoned_datetime(jiff::tz::TimeZone::system());
+    let z = ts.to_zoned_datetime(tz.clone());
     let wd = z.weekday().to_monday_zero_offset() as usize;
     let hour = z.hour() as usize;
     if let Some(row) = activity.get_mut(wd) {
@@ -166,11 +190,11 @@ fn bump_activity(activity: &mut [[u32; 24]; 7], time_ms: i64) {
     }
 }
 
-fn local_day(time_ms: i64) -> String {
+fn local_day(tz: &jiff::tz::TimeZone, time_ms: i64) -> String {
     let Ok(ts) = jiff::Timestamp::from_millisecond(time_ms) else {
         return "1970-01-01".into();
     };
-    ts.to_zoned_datetime(jiff::tz::TimeZone::system())
+    ts.to_zoned_datetime(tz.clone())
         .strftime("%Y-%m-%d")
         .to_string()
 }

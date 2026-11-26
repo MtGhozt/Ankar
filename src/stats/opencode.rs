@@ -1,6 +1,6 @@
 //! Read-only OpenCode SQLite (`opencode.db`) — tokens, models, agents, activity.
 
-use super::{DayBucket, ModelRow, Source, AgentRow, StatsSnapshot, Tokens};
+use super::{window_idx, AgentFilter, DayBucket, ModelRow, Source, AgentRow, StatsSnapshot, Tokens};
 use rusqlite::{Connection, OpenFlags};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -73,13 +73,18 @@ pub fn mtime_pair(path: &Path) -> (Option<u64>, Option<u64>) {
     (db, wal.or(wal2))
 }
 
+/// One scan of `[since_ms, until_ms)`; rows go to `snaps[0]` (>= `split_ms`) or `snaps[1]` (before it).
 pub fn load_into(
-    snap: &mut StatsSnapshot,
+    snaps: &mut [StatsSnapshot],
+    tz: &jiff::tz::TimeZone,
+    split_ms: i64,
     since_ms: i64,
     until_ms: i64,
+    filter: Option<&AgentFilter>,
 ) {
     let Some(path) = db_path() else {
-        snap.warnings
+        snaps[0]
+            .warnings
             .push("OpenCode: database not found (~/.local/share/opencode/opencode.db)".into());
         return;
     };
@@ -92,7 +97,7 @@ pub fn load_into(
             match open_readonly(&path) {
                 Ok(c) => c,
                 Err(_) => {
-                    snap.warnings.push(format!(
+                    snaps[0].warnings.push(format!(
                         "OpenCode is writing or locked ({e}); retry in a moment"
                     ));
                     return;
@@ -108,21 +113,28 @@ pub fn load_into(
         tables.iter().any(|t| t == "session") && tables.iter().any(|t| t == "message");
 
     if !has_v2 && !has_v1 {
-        snap.warnings
+        snaps[0]
+            .warnings
             .push("OpenCode: no session_v2/session_message tables found".into());
         return;
     }
 
     let mut v2_ids: HashMap<String, ()> = HashMap::new();
     if has_v2 {
-        if let Err(e) = aggregate_v2(&conn, snap, since_ms, until_ms, &mut v2_ids) {
-            snap.warnings
+        if let Err(e) =
+            aggregate_v2(&conn, snaps, tz, (split_ms, since_ms, until_ms), filter, &mut v2_ids)
+        {
+            snaps[0]
+                .warnings
                 .push(format!("OpenCode v2 query failed: {e}"));
         }
     }
     if has_v1 {
-        if let Err(e) = aggregate_v1(&conn, snap, since_ms, until_ms, &v2_ids) {
-            snap.warnings
+        if let Err(e) =
+            aggregate_v1(&conn, snaps, tz, (split_ms, since_ms, until_ms), filter, &v2_ids)
+        {
+            snaps[0]
+                .warnings
                 .push(format!("OpenCode v1 query failed: {e}"));
         }
     }
@@ -169,28 +181,43 @@ fn table_names(conn: &Connection) -> Vec<String> {
     out
 }
 
+/// Per-window accumulators for the v2 message loop.
+#[derive(Default)]
+struct V2Acc {
+    models: HashMap<(String, String), ModelRow>,
+    agents: HashMap<String, AgentRow>,
+    days: HashMap<String, DayBucket>,
+    hours_ms: u64,
+}
+
 fn aggregate_v2(
     conn: &Connection,
-    snap: &mut StatsSnapshot,
-    since_ms: i64,
-    until_ms: i64,
+    snaps: &mut [StatsSnapshot],
+    tz: &jiff::tz::TimeZone,
+    (split_ms, since_ms, until_ms): (i64, i64, i64),
+    filter: Option<&AgentFilter>,
     v2_ids: &mut HashMap<String, ()>,
 ) -> Result<(), rusqlite::Error> {
-    // Session counts.
+    // Session counts (with a filter they come from the kept messages below).
     {
         let mut stmt = conn.prepare(
-            "SELECT id, parent_id FROM session_v2
+            "SELECT id, parent_id, time_created FROM session_v2
              WHERE time_created >= ?1 AND time_created < ?2",
         )?;
         let rows = stmt.query_map(rusqlite::params![since_ms, until_ms], |r| {
             Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, Option<String>>(1)?,
+                r.get::<_, Option<i64>>(2)?.unwrap_or(0),
             ))
         })?;
         for row in rows.flatten() {
-            let (id, parent) = row;
+            let (id, parent, created) = row;
+            let snap = &mut snaps[window_idx(split_ms, created, snaps.len())];
             v2_ids.insert(id, ());
+            if filter.is_some() {
+                continue;
+            }
             if parent.is_none() {
                 snap.sessions = snap.sessions.saturating_add(1);
             } else {
@@ -223,10 +250,7 @@ fn aggregate_v2(
     ";
 
     let mut stmt = conn.prepare(sql)?;
-    let mut models: HashMap<(String, String), ModelRow> = HashMap::new();
-    let mut agents: HashMap<String, AgentRow> = HashMap::new();
-    let mut days: HashMap<String, DayBucket> = HashMap::new();
-    let mut hours_ms: u64 = 0;
+    let mut accs: Vec<V2Acc> = snaps.iter().map(|_| V2Acc::default()).collect();
 
     let rows = stmt.query_map(rusqlite::params![since_ms, until_ms], |r| {
         Ok(MsgRow {
@@ -248,23 +272,37 @@ fn aggregate_v2(
         })
     })?;
 
+    let mut seen: std::collections::HashSet<(usize, String)> = std::collections::HashSet::new();
     for row in rows.flatten() {
-        bump_activity(&mut snap.activity, row.time_created);
-        let day = local_day(row.time_created);
-        let day_e = days.entry(day.clone()).or_insert_with(|| DayBucket {
-            day,
-            ..DayBucket::default()
-        });
-
-        if row.msg_type == "user" && row.parent_id.is_none() {
-            snap.prompts = snap.prompts.saturating_add(1);
+        let i = window_idx(split_ms, row.time_created, snaps.len());
+        let snap = &mut snaps[i];
+        let V2Acc {
+            models,
+            agents,
+            days,
+            hours_ms,
+        } = &mut accs[i];
+        let agent_name = shown_agent(&row.agent);
+        // The AGENTS table always lists every tool; the rest of the page follows the filter.
+        let keep = AgentFilter::allows(filter, Source::OpenCode, &agent_name);
+        if keep {
+            bump_activity(&mut snap.activity, tz, row.time_created);
+            if row.msg_type == "user" && row.parent_id.is_none() {
+                snap.prompts = snap.prompts.saturating_add(1);
+            }
+            if filter.is_some() && seen.insert((i, row.session_id.clone())) {
+                if row.parent_id.is_none() {
+                    snap.sessions = snap.sessions.saturating_add(1);
+                } else {
+                    snap.subagents = snap.subagents.saturating_add(1);
+                }
+            }
         }
 
         if row.msg_type != "assistant" {
             continue;
         }
 
-        snap.steps = snap.steps.saturating_add(1);
         let tok = Tokens {
             input: row.input,
             output: row.output,
@@ -272,12 +310,48 @@ fn aggregate_v2(
             cache_read: row.cache_read,
             cache_write: row.cache_write,
         };
+        let busy_ms = match (row.t_created, row.t_completed) {
+            // Cap at 6h per message.
+            (Some(c), Some(d)) => Some(d.saturating_sub(c)).filter(|d| *d > 0 && *d <= 6 * 60 * 60 * 1000),
+            _ => None,
+        };
+        let a = agents.entry(agent_name.clone()).or_insert_with(|| AgentRow {
+            source: Source::OpenCode,
+            name: agent_name,
+            busy_secs: 0,
+            waiting_secs: 0,
+            tasks: 0,
+            tokens: Some(Tokens::default()),
+            modes: String::new(),
+        });
+        super::remember_mode(&mut a.modes, &row.agent);
+        a.tasks = a.tasks.saturating_add(1);
+        if let Some(t) = a.tokens.as_mut() {
+            t.add_assign(&tok);
+        }
+        if let Some(ms) = busy_ms {
+            a.busy_secs = a.busy_secs.saturating_add(ms as u64 / 1000);
+        }
+        if !keep {
+            continue;
+        }
+
+        snap.steps = snap.steps.saturating_add(1);
         snap.tokens.add_assign(&tok);
         snap.cost += row.cost.max(0.0);
 
+        let day = local_day(tz, row.time_created);
+        let day_e = days.entry(day.clone()).or_insert_with(|| DayBucket {
+            day,
+            ..DayBucket::default()
+        });
         day_e.input = day_e.input.saturating_add(row.input);
         day_e.output = day_e.output.saturating_add(row.output);
         day_e.tasks = day_e.tasks.saturating_add(1);
+        if let Some(ms) = busy_ms {
+            *hours_ms = hours_ms.saturating_add(ms as u64);
+            day_e.busy_secs = day_e.busy_secs.saturating_add(ms as u64 / 1000);
+        }
 
         let provider = if row.provider.is_empty() {
             "unknown".into()
@@ -301,59 +375,25 @@ fn aggregate_v2(
         m.steps = m.steps.saturating_add(1);
         m.tokens.add_assign(&tok);
         m.cost += row.cost.max(0.0);
-
-        let agent_name = if row.agent.is_empty() {
-            "opencode".into()
-        } else {
-            row.agent.clone()
-        };
-        let a = agents.entry(agent_name.clone()).or_insert_with(|| AgentRow {
-            source: Source::OpenCode,
-            name: agent_name,
-            busy_secs: 0,
-            waiting_secs: 0,
-            tasks: 0,
-            tokens: Some(Tokens::default()),
-        });
-        a.tasks = a.tasks.saturating_add(1);
-        if let Some(t) = a.tokens.as_mut() {
-            t.add_assign(&tok);
-        }
-
-        if let (Some(c), Some(d)) = (row.t_created, row.t_completed) {
-            let dur = d.saturating_sub(c);
-            // Cap at 6h per message.
-            if dur > 0 && dur <= 6 * 60 * 60 * 1000 {
-                let secs = (dur as u64) / 1000;
-                hours_ms = hours_ms.saturating_add(dur as u64);
-                a.busy_secs = a.busy_secs.saturating_add(secs);
-                day_e.busy_secs = day_e.busy_secs.saturating_add(secs);
-            }
-        }
-
-        let _ = row.session_id;
     }
 
+    for (snap, acc) in snaps.iter_mut().zip(accs) {
+        finish_v2(snap, acc);
+    }
+    Ok(())
+}
+
+fn finish_v2(snap: &mut StatsSnapshot, acc: V2Acc) {
+    let V2Acc {
+        models,
+        agents,
+        days,
+        hours_ms,
+    } = acc;
     snap.opencode_hours = hours_ms as f64 / 3_600_000.0;
 
     let mut model_vec: Vec<ModelRow> = models.into_values().collect();
     model_vec.sort_by_key(|a| std::cmp::Reverse(a.tokens.total()));
-    if model_vec.len() > 8 {
-        let rest = model_vec.split_off(8);
-        let mut other = ModelRow {
-            provider: "other".into(),
-            model: format!("{} more", rest.len()),
-            steps: 0,
-            tokens: Tokens::default(),
-            cost: 0.0,
-        };
-        for r in rest {
-            other.steps = other.steps.saturating_add(r.steps);
-            other.tokens.add_assign(&r.tokens);
-            other.cost += r.cost;
-        }
-        model_vec.push(other);
-    }
     snap.models = model_vec;
 
     let mut agent_vec: Vec<AgentRow> = agents.into_values().collect();
@@ -363,20 +403,19 @@ fn aggregate_v2(
     }
 
     merge_days(&mut snap.days, days);
-    Ok(())
 }
 
 fn aggregate_v1(
     conn: &Connection,
-    snap: &mut StatsSnapshot,
-    since_ms: i64,
-    until_ms: i64,
+    snaps: &mut [StatsSnapshot],
+    tz: &jiff::tz::TimeZone,
+    (split_ms, since_ms, until_ms): (i64, i64, i64),
+    filter: Option<&AgentFilter>,
     v2_ids: &HashMap<String, ()>,
 ) -> Result<(), rusqlite::Error> {
     // Only sessions not already in v2.
     let sql = "
         SELECT message.session_id,
-               message.data,
                json_extract(message.data,'$.role'),
                json_extract(message.data,'$.providerID'),
                json_extract(message.data,'$.modelID'),
@@ -398,18 +437,18 @@ fn aggregate_v1(
     let rows = stmt.query_map(rusqlite::params![since_ms, until_ms], |r| {
         Ok((
             r.get::<_, Option<String>>(0)?.unwrap_or_default(),
+            r.get::<_, Option<String>>(1)?.unwrap_or_default(),
             r.get::<_, Option<String>>(2)?.unwrap_or_default(),
             r.get::<_, Option<String>>(3)?.unwrap_or_default(),
-            r.get::<_, Option<String>>(4)?.unwrap_or_default(),
+            r.get::<_, Option<i64>>(4)?.unwrap_or(0).max(0) as u64,
             r.get::<_, Option<i64>>(5)?.unwrap_or(0).max(0) as u64,
             r.get::<_, Option<i64>>(6)?.unwrap_or(0).max(0) as u64,
             r.get::<_, Option<i64>>(7)?.unwrap_or(0).max(0) as u64,
             r.get::<_, Option<i64>>(8)?.unwrap_or(0).max(0) as u64,
-            r.get::<_, Option<i64>>(9)?.unwrap_or(0).max(0) as u64,
-            r.get::<_, Option<f64>>(10)?.unwrap_or(0.0),
-            r.get::<_, Option<String>>(11)?.unwrap_or_default(),
+            r.get::<_, Option<f64>>(9)?.unwrap_or(0.0),
+            r.get::<_, Option<String>>(10)?.unwrap_or_default(),
+            r.get::<_, Option<i64>>(11)?,
             r.get::<_, Option<i64>>(12)?,
-            r.get::<_, Option<i64>>(13)?,
         ))
     })?;
 
@@ -433,15 +472,21 @@ fn aggregate_v1(
             continue;
         }
         let t = t_created.unwrap_or(0);
-        bump_activity(&mut snap.activity, t);
+        let snap = &mut snaps[window_idx(split_ms, t, snaps.len())];
+        let agent_name = shown_agent(&agent);
+        let keep = AgentFilter::allows(filter, Source::OpenCode, &agent_name);
+        if keep {
+            bump_activity(&mut snap.activity, tz, t);
+        }
         if role == "user" {
-            snap.prompts = snap.prompts.saturating_add(1);
+            if keep {
+                snap.prompts = snap.prompts.saturating_add(1);
+            }
             continue;
         }
         if role != "assistant" {
             continue;
         }
-        snap.steps = snap.steps.saturating_add(1);
         let tok = Tokens {
             input,
             output,
@@ -449,6 +494,40 @@ fn aggregate_v1(
             cache_read,
             cache_write,
         };
+        // The AGENTS table always lists every agent; the rest of the page follows the filter.
+        if let Some(a) = snap.agents.iter_mut().find(|a| a.name == agent_name) {
+            a.tasks = a.tasks.saturating_add(1);
+            if let Some(t) = a.tokens.as_mut() {
+                t.add_assign(&tok);
+            }
+            super::remember_mode(&mut a.modes, &agent);
+        } else {
+            let mut busy = 0u64;
+            if let (Some(c), Some(d)) = (t_created, t_completed) {
+                let dur = d.saturating_sub(c);
+                if dur > 0 && dur <= 6 * 60 * 60 * 1000 {
+                    busy = (dur as u64) / 1000;
+                    if keep {
+                        snap.opencode_hours += dur as f64 / 3_600_000.0;
+                    }
+                }
+            }
+            let mut modes = String::new();
+            super::remember_mode(&mut modes, &agent);
+            snap.agents.push(AgentRow {
+                source: Source::OpenCode,
+                name: agent_name,
+                busy_secs: busy,
+                waiting_secs: 0,
+                tasks: 1,
+                tokens: Some(tok.clone()),
+                modes,
+            });
+        }
+        if !keep {
+            continue;
+        }
+        snap.steps = snap.steps.saturating_add(1);
         snap.tokens.add_assign(&tok);
         snap.cost += cost.max(0.0);
 
@@ -479,35 +558,6 @@ fn aggregate_v1(
                 cost: cost.max(0.0),
             });
         }
-
-        let agent_name = if agent.is_empty() {
-            "opencode".into()
-        } else {
-            agent
-        };
-        if let Some(a) = snap.agents.iter_mut().find(|a| a.name == agent_name) {
-            a.tasks = a.tasks.saturating_add(1);
-            if let Some(t) = a.tokens.as_mut() {
-                t.add_assign(&tok);
-            }
-        } else {
-            let mut busy = 0u64;
-            if let (Some(c), Some(d)) = (t_created, t_completed) {
-                let dur = d.saturating_sub(c);
-                if dur > 0 && dur <= 6 * 60 * 60 * 1000 {
-                    busy = (dur as u64) / 1000;
-                    snap.opencode_hours += dur as f64 / 3_600_000.0;
-                }
-            }
-            snap.agents.push(AgentRow {
-                source: Source::OpenCode,
-                name: agent_name,
-                busy_secs: busy,
-                waiting_secs: 0,
-                tasks: 1,
-                tokens: Some(tok),
-            });
-        }
     }
     Ok(())
 }
@@ -530,13 +580,13 @@ struct MsgRow {
     t_completed: Option<i64>,
 }
 
-fn bump_activity(activity: &mut [[u32; 24]; 7], time_ms: i64) {
+fn bump_activity(activity: &mut [[u32; 24]; 7], tz: &jiff::tz::TimeZone, time_ms: i64) {
     if time_ms <= 0 {
         return;
     }
     let ts = jiff::Timestamp::from_millisecond(time_ms).ok();
     let Some(ts) = ts else { return };
-    let z = ts.to_zoned_datetime(jiff::tz::TimeZone::system());
+    let z = ts.to_zoned_datetime(tz.clone());
     let wd = z.weekday().to_monday_zero_offset() as usize;
     let hour = z.hour() as usize;
     if let Some(row) = activity.get_mut(wd) {
@@ -546,12 +596,17 @@ fn bump_activity(activity: &mut [[u32; 24]; 7], time_ms: i64) {
     }
 }
 
-fn local_day(time_ms: i64) -> String {
+fn local_day(tz: &jiff::tz::TimeZone, time_ms: i64) -> String {
     let Ok(ts) = jiff::Timestamp::from_millisecond(time_ms) else {
         return "1970-01-01".into();
     };
-    let z = ts.to_zoned_datetime(jiff::tz::TimeZone::system());
+    let z = ts.to_zoned_datetime(tz.clone());
     z.strftime("%Y-%m-%d").to_string()
+}
+
+fn shown_agent(agent: &str) -> String {
+    let raw = if agent.is_empty() { "opencode" } else { agent };
+    super::canonical_tool(raw).name.to_string()
 }
 
 fn merge_days(dst: &mut Vec<DayBucket>, src: HashMap<String, DayBucket>) {
@@ -566,90 +621,6 @@ fn merge_days(dst: &mut Vec<DayBucket>, src: HashMap<String, DayBucket>) {
         }
     }
     dst.sort_by(|a, b| a.day.cmp(&b.day));
-}
-
-#[cfg(debug_assertions)]
-pub fn probe() {
-    println!("=== Ankar --stats-probe ===");
-    let Some(path) = db_path() else {
-        println!("opencode.db: not found");
-        return;
-    };
-    println!("db: {}", path.display());
-    let Ok(conn) = open_readonly(&path) else {
-        println!("open failed");
-        return;
-    };
-    println!("tables:");
-    for t in table_names(&conn) {
-        println!("  {t}");
-    }
-    for table in ["session_v2", "session_message", "session", "message"] {
-        println!("PRAGMA table_info({table}):");
-        let Ok(mut stmt) = conn.prepare(&format!("PRAGMA table_info({table})")) else {
-            println!("  (missing)");
-            continue;
-        };
-        let Ok(rows) = stmt.query_map([], |r| {
-            Ok(format!(
-                "{} {} {}",
-                r.get::<_, i64>(0).unwrap_or(0),
-                r.get::<_, String>(1).unwrap_or_default(),
-                r.get::<_, String>(2).unwrap_or_default()
-            ))
-        }) else {
-            continue;
-        };
-        for row in rows.flatten() {
-            println!("  {row}");
-        }
-    }
-    // Keys only from one assistant message.
-    let sql = "SELECT data FROM session_message WHERE type='assistant' LIMIT 1";
-    if let Ok(mut stmt) = conn.prepare(sql) {
-        if let Ok(data) = stmt.query_row([], |r| r.get::<_, String>(0)) {
-            println!("assistant data keys (types only):");
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&data) {
-                print_keys(&v, "", 0);
-            }
-        }
-    }
-}
-
-#[cfg(debug_assertions)]
-fn print_keys(v: &serde_json::Value, prefix: &str, depth: usize) {
-    if depth > 3 {
-        return;
-    }
-    match v {
-        serde_json::Value::Object(map) => {
-            for (k, val) in map {
-                let path = if prefix.is_empty() {
-                    k.clone()
-                } else {
-                    format!("{prefix}.{k}")
-                };
-                let ty = match val {
-                    serde_json::Value::Null => "null",
-                    serde_json::Value::Bool(_) => "bool",
-                    serde_json::Value::Number(_) => "number",
-                    serde_json::Value::String(_) => "string",
-                    serde_json::Value::Array(_) => "array",
-                    serde_json::Value::Object(_) => "object",
-                };
-                println!("  {path}: {ty}");
-                if matches!(val, serde_json::Value::Object(_) | serde_json::Value::Array(_)) {
-                    print_keys(val, &path, depth + 1);
-                }
-            }
-        }
-        serde_json::Value::Array(arr) => {
-            if let Some(first) = arr.first() {
-                print_keys(first, &format!("{prefix}[]"), depth + 1);
-            }
-        }
-        _ => {}
-    }
 }
 
 #[cfg(test)]
@@ -688,15 +659,54 @@ mod tests {
     #[test]
     fn v2_sums() {
         let conn = mem_v2();
-        let mut snap = StatsSnapshot::default();
+        let mut snaps = [StatsSnapshot::default()];
         let mut ids = HashMap::new();
-        aggregate_v2(&conn, &mut snap, 0, 10_000, &mut ids).unwrap();
+        aggregate_v2(&conn, &mut snaps, &jiff::tz::TimeZone::UTC, (0, 0, 10_000), None, &mut ids)
+            .unwrap();
+        let snap = &snaps[0];
         assert_eq!(snap.sessions, 1);
         assert_eq!(snap.steps, 2);
         assert_eq!(snap.tokens.input, 30);
         assert_eq!(snap.tokens.output, 13);
         assert!(snap.cost > 0.0);
         assert!(!snap.models.is_empty());
+    }
+
+    #[test]
+    fn v2_splits_current_and_previous_window() {
+        let conn = mem_v2();
+        let mut snaps = [StatsSnapshot::default(), StatsSnapshot::default()];
+        let mut ids = HashMap::new();
+        aggregate_v2(&conn, &mut snaps, &jiff::tz::TimeZone::UTC, (1200, 0, 10_000), None, &mut ids)
+            .unwrap();
+        assert_eq!((snaps[0].steps, snaps[0].tokens.input), (1, 20));
+        assert_eq!((snaps[1].steps, snaps[1].tokens.input), (1, 10));
+        assert_eq!((snaps[0].sessions, snaps[1].sessions), (0, 1));
+    }
+
+    #[test]
+    fn agent_filter_limits_everything_but_the_agents_table() {
+        let conn = mem_v2();
+        let tz = jiff::tz::TimeZone::UTC;
+        let run = |name: &str| {
+            let f = AgentFilter { source: Source::OpenCode, name: name.into() };
+            let mut snaps = [StatsSnapshot::default()];
+            aggregate_v2(&conn, &mut snaps, &tz, (0, 0, 10_000), Some(&f), &mut HashMap::new())
+                .unwrap();
+            let [snap] = snaps;
+            snap
+        };
+        let build = run("build");
+        assert_eq!((build.sessions, build.steps, build.tokens.input), (1, 2, 30));
+        assert_eq!(build.days.len(), 1);
+        assert!(build.activity.iter().flatten().sum::<u32>() > 0);
+        let plan = run("Junie");
+        assert_eq!((plan.sessions, plan.steps, plan.tokens.input), (0, 0, 0));
+        assert!(plan.models.is_empty() && plan.days.is_empty());
+        assert_eq!(plan.activity.iter().flatten().sum::<u32>(), 0);
+        // The AGENTS table still lists OpenCode (every mode) so the user can pick another row.
+        assert_eq!(plan.agents.len(), 1);
+        assert_eq!(plan.agents[0].name, "OpenCode");
     }
 
     #[test]

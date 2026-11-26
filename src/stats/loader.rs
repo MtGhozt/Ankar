@@ -2,8 +2,7 @@
 
 use super::ankar::AnkarStatsStore;
 use super::format::pct_change;
-use super::{cursor_agent, opencode, StatsSnapshot};
-use std::path::PathBuf;
+use super::{cursor_agent, junie, opencode, AgentFilter, StatsSnapshot};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -41,17 +40,65 @@ impl StatsRange {
     }
 }
 
+/// What a snapshot answers: the range and the page-wide agent filter.
+type Req = (StatsRange, Option<AgentFilter>);
+
 struct CacheEntry {
-    range: StatsRange,
+    req: Req,
     snap: StatsSnapshot,
     loaded_at: Instant,
     db_mtime: (Option<u64>, Option<u64>),
 }
 
-pub struct StatsLoader {
-    tx: Option<mpsc::Sender<StatsSnapshot>>,
-    rx: Receiver<StatsSnapshot>,
+/// Request scheduling: one worker at a time, newest request wins.
+#[derive(Default)]
+struct Sched {
+    generation: u64,
     inflight: bool,
+    pending: Option<Req>,
+}
+
+impl Sched {
+    /// Some(generation) = launch now; None = queued behind the running load.
+    fn submit(&mut self, req: Req) -> Option<u64> {
+        if self.inflight {
+            self.pending = Some(req);
+            return None;
+        }
+        self.inflight = true;
+        self.generation += 1;
+        Some(self.generation)
+    }
+
+    /// A result arrived: (keep it?, next load to launch).
+    fn finish(&mut self, generation: u64) -> (bool, Option<(u64, Req)>) {
+        if generation != self.generation {
+            return (false, None);
+        }
+        match self.pending.take() {
+            Some(r) => {
+                self.generation += 1;
+                (false, Some((self.generation, r)))
+            }
+            None => {
+                self.inflight = false;
+                (true, None)
+            }
+        }
+    }
+
+    fn abort(&mut self) {
+        self.inflight = false;
+        self.pending = None;
+    }
+}
+
+pub struct StatsLoader {
+    tx: Option<mpsc::Sender<(u64, StatsSnapshot)>>,
+    rx: Receiver<(u64, StatsSnapshot)>,
+    sched: Sched,
+    /// Warning snapshot when the worker thread could not start.
+    failed: Option<StatsSnapshot>,
     cache: Option<CacheEntry>,
     /// Shared read of Ankar store for the worker (cloned snapshot of hours).
     ankar: Arc<Mutex<AnkarStatsStore>>,
@@ -63,19 +110,18 @@ impl StatsLoader {
         Self {
             tx: Some(tx),
             rx,
-            inflight: false,
+            sched: Sched::default(),
+            failed: None,
             cache: None,
             ankar,
         }
     }
 
-    pub fn request(&mut self, range: StatsRange, force: bool) {
-        if self.inflight {
-            return;
-        }
-        if !force {
+    pub fn request(&mut self, range: StatsRange, filter: Option<AgentFilter>, force: bool) {
+        let req = (range, filter);
+        if !self.sched.inflight && !force {
             if let Some(c) = &self.cache {
-                if c.range == range && c.loaded_at.elapsed() < Duration::from_secs(60) {
+                if c.req == req && c.loaded_at.elapsed() < Duration::from_secs(60) {
                     let mtime = opencode::db_path()
                         .map(|p| opencode::mtime_pair(&p))
                         .unwrap_or((None, None));
@@ -85,42 +131,62 @@ impl StatsLoader {
                 }
             }
         }
+        if let Some(generation) = self.sched.submit(req.clone()) {
+            self.spawn(generation, req);
+        }
+    }
+
+    fn spawn(&mut self, generation: u64, (range, filter): Req) {
         let Some(tx) = self.tx.clone() else {
+            self.sched.abort();
             return;
         };
         let ankar = self.ankar.clone();
-        self.inflight = true;
-        thread::Builder::new()
+        let thread_filter = filter.clone();
+        let spawned = thread::Builder::new()
             .name("ankar-stats".into())
             .spawn(move || {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    compute(range, &ankar)
+                    compute(range, thread_filter.as_ref(), &ankar)
                 }));
                 let snap = match result {
                     Ok(s) => s,
-                    Err(_) => StatsSnapshot {
+                    Err(_) => warning_snapshot(
                         range,
-                        warnings: vec![
-                            "Stats loader panicked; showing empty snapshot".into(),
-                        ],
-                        computed_at: SystemTime::now(),
-                        ..StatsSnapshot::default()
-                    },
+                        thread_filter,
+                        "Stats loader panicked; showing empty snapshot",
+                    ),
                 };
-                let _ = tx.send(snap);
-            })
-            .ok();
+                let _ = tx.send((generation, snap));
+            });
+        if spawned.is_err() {
+            self.sched.abort();
+            self.failed = Some(warning_snapshot(
+                range,
+                filter,
+                "Stats loader could not start its thread",
+            ));
+        }
     }
 
     pub fn poll(&mut self) -> Option<StatsSnapshot> {
+        if let Some(w) = self.failed.take() {
+            return Some(w);
+        }
         match self.rx.try_recv() {
-            Ok(snap) => {
-                self.inflight = false;
+            Ok((generation, snap)) => {
+                let (keep, next) = self.sched.finish(generation);
+                if let Some((g, r)) = next {
+                    self.spawn(g, r);
+                }
+                if !keep {
+                    return self.failed.take();
+                }
                 let mtime = opencode::db_path()
                     .map(|p| opencode::mtime_pair(&p))
                     .unwrap_or((None, None));
                 self.cache = Some(CacheEntry {
-                    range: snap.range,
+                    req: (snap.range, snap.filter.clone()),
                     snap: snap.clone(),
                     loaded_at: Instant::now(),
                     db_mtime: mtime,
@@ -129,7 +195,7 @@ impl StatsLoader {
             }
             Err(TryRecvError::Empty) => None,
             Err(TryRecvError::Disconnected) => {
-                self.inflight = false;
+                self.sched.abort();
                 // Recreate channel.
                 let (tx, rx) = mpsc::channel();
                 self.tx = Some(tx);
@@ -140,7 +206,11 @@ impl StatsLoader {
     }
 
     pub fn is_loading(&self) -> bool {
-        self.inflight
+        self.sched.inflight
+    }
+
+    pub fn clear_cache(&mut self) {
+        self.cache = None;
     }
 
     pub fn cached(&self) -> Option<&StatsSnapshot> {
@@ -148,9 +218,24 @@ impl StatsLoader {
     }
 }
 
-fn compute(range: StatsRange, ankar: &Arc<Mutex<AnkarStatsStore>>) -> StatsSnapshot {
+fn warning_snapshot(range: StatsRange, filter: Option<AgentFilter>, msg: &str) -> StatsSnapshot {
+    StatsSnapshot {
+        range,
+        filter,
+        warnings: vec![msg.into()],
+        computed_at: SystemTime::now(),
+        ..StatsSnapshot::default()
+    }
+}
+
+fn compute(
+    range: StatsRange,
+    filter: Option<&AgentFilter>,
+    ankar: &Arc<Mutex<AnkarStatsStore>>,
+) -> StatsSnapshot {
     let mut snap = StatsSnapshot {
         range,
+        filter: filter.cloned(),
         computed_at: SystemTime::now(),
         ..StatsSnapshot::default()
     };
@@ -175,12 +260,30 @@ fn compute(range: StatsRange, ankar: &Arc<Mutex<AnkarStatsStore>>) -> StatsSnaps
 
     snap.range_label = range_label(range, since_ms, until_ms);
 
-    opencode::load_into(&mut snap, since_ms, until_ms);
-    cursor_agent::load_into(&mut snap, since_ms, until_ms);
-
-    if let Ok(store) = ankar.lock() {
+    // One scan from prev_since to until fills both windows; rows before `since_ms` go to `prev`.
+    let with_prev = range.days().is_some() && prev_until > prev_since;
+    let scan_since = if with_prev { prev_since } else { since_ms };
+    let mut windows = [snap, StatsSnapshot::default()];
+    let n = if with_prev { 2 } else { 1 };
+    let tz = jiff::tz::TimeZone::system();
+    // Clone Ankar hours before reading Junie summaries so the UI lock is not held during disk IO.
+    let hours = ankar.lock().ok().map(|store| store.hours_clone());
+    opencode::load_into(&mut windows[..n], &tz, since_ms, scan_since, until_ms, filter);
+    cursor_agent::load_into(&mut windows[..n], &tz, since_ms, scan_since, until_ms, filter);
+    junie::load_into(
+        &mut windows[..n],
+        &tz,
+        since_ms,
+        scan_since,
+        until_ms,
+        prev_since,
+        hours.as_ref(),
+        filter,
+    );
+    let [mut snap, mut prev] = windows;
+    if let Some(hours) = &hours {
         let (busy, waiting, starts, agents, days, activity) =
-            store.snapshot_for_range(since_ms, until_ms);
+            AnkarStatsStore::snapshot_hours(hours, &tz, since_ms, until_ms, filter);
         snap.ankar_busy_secs = busy;
         snap.ankar_waiting_secs = waiting;
         snap.ankar_starts = starts;
@@ -204,18 +307,11 @@ fn compute(range: StatsRange, ankar: &Arc<Mutex<AnkarStatsStore>>) -> StatsSnaps
 
     // Tasks = OpenCode sessions + cursor chats + Ankar starts (sessions already includes both).
     // OpenCode sessions counted in snap.sessions; Ankar starts added for card.
-    let tasks_total = snap
-        .sessions
-        .saturating_add(snap.ankar_starts);
+    let tasks_total = snap.sessions.saturating_add(snap.ankar_starts);
 
-    // Primary hours: Ankar busy if any, else OpenCode, else cursor.
-    snap.agent_hours = if snap.ankar_busy_secs > 0 {
-        snap.ankar_busy_secs as f64 / 3600.0
-    } else if snap.opencode_hours > 0.0 {
-        snap.opencode_hours
-    } else {
-        snap.cursor_hours
-    };
+    // One row per tool after OpenCode, cursor-agent, Junie, and Ankar have each appended theirs.
+    snap.agents = super::fold_agent_rows(std::mem::take(&mut snap.agents));
+    snap.agent_hours = super::summed_busy_secs(&snap.agents) as f64 / 3600.0;
 
     // Sort days & agents.
     snap.days.sort_by(|a, b| a.day.cmp(&b.day));
@@ -228,33 +324,25 @@ fn compute(range: StatsRange, ankar: &Arc<Mutex<AnkarStatsStore>>) -> StatsSnaps
     });
 
     // Previous window deltas (skip for All).
-    if range.days().is_some() && prev_until > prev_since {
-        let mut prev = StatsSnapshot::default();
-        opencode::load_into(&mut prev, prev_since, prev_until);
-        cursor_agent::load_into(&mut prev, prev_since, prev_until);
-        if let Ok(store) = ankar.lock() {
-            let (busy, _, starts, _, _, _) = store.snapshot_for_range(prev_since, prev_until);
+    if with_prev {
+        if let Some(hours) = &hours {
+            let (busy, _, starts, agents, _, _) =
+                AnkarStatsStore::snapshot_hours(hours, &tz, prev_since, prev_until, filter);
             prev.ankar_busy_secs = busy;
             prev.ankar_starts = starts;
+            prev.agents.extend(agents);
         }
+        prev.agents = super::fold_agent_rows(std::mem::take(&mut prev.agents));
         let prev_tasks = prev.sessions.saturating_add(prev.ankar_starts);
-        let prev_hours_secs = if prev.ankar_busy_secs > 0 {
-            prev.ankar_busy_secs
-        } else {
-            (prev.opencode_hours * 3600.0) as u64
-        };
-        let cur_hours_secs = if snap.ankar_busy_secs > 0 {
-            snap.ankar_busy_secs
-        } else {
-            (snap.opencode_hours * 3600.0) as u64
-        };
         snap.delta_input_pct = pct_change(snap.tokens.input, prev.tokens.input);
         snap.delta_output_pct = pct_change(snap.tokens.output, prev.tokens.output);
         snap.delta_tasks_pct = pct_change(tasks_total, prev_tasks);
-        snap.delta_hours_pct = pct_change(cur_hours_secs, prev_hours_secs);
+        snap.delta_hours_pct = pct_change(
+            super::summed_busy_secs(&snap.agents),
+            super::summed_busy_secs(&prev.agents),
+        );
     }
 
-    let _ = PathBuf::new();
     snap
 }
 
@@ -268,4 +356,46 @@ fn range_label(range: StatsRange, since_ms: i64, _until_ms: i64) -> String {
     let z = ts.to_zoned_datetime(jiff::tz::TimeZone::system());
     let start = z.strftime("%b %d").to_string();
     format!("{start} — today")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn range_change_while_loading_is_queued_and_stale_dropped() {
+        let mut s = Sched::default();
+        let g1 = s.submit((StatsRange::Days30, None)).unwrap();
+        assert!(s.submit((StatsRange::Days7, None)).is_none());
+        assert!(s.submit((StatsRange::Days90, None)).is_none());
+        let (keep, next) = s.finish(g1);
+        assert!(!keep);
+        let (g2, r) = next.unwrap();
+        assert_eq!(r, (StatsRange::Days90, None));
+        assert!(s.inflight);
+        assert_eq!(s.finish(g1), (false, None));
+        assert_eq!(s.finish(g2), (true, None));
+        assert!(!s.inflight);
+    }
+
+    #[test]
+    fn abort_clears_inflight_and_pending() {
+        let mut s = Sched::default();
+        s.submit((StatsRange::All, None));
+        s.submit((StatsRange::Days7, None));
+        s.abort();
+        assert!(!s.inflight && s.pending.is_none());
+        assert!(s.submit((StatsRange::All, None)).is_some());
+    }
+
+    #[test]
+    fn a_filter_change_is_a_new_request_even_in_the_same_range() {
+        let mut s = Sched::default();
+        let f = AgentFilter { source: super::super::Source::Ankar, name: "claude".into() };
+        let g1 = s.submit((StatsRange::Days30, None)).unwrap();
+        assert!(s.submit((StatsRange::Days30, Some(f.clone()))).is_none());
+        let (keep, next) = s.finish(g1);
+        assert!(!keep);
+        assert_eq!(next.unwrap().1, (StatsRange::Days30, Some(f)));
+    }
 }

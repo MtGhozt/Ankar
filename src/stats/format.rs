@@ -44,8 +44,10 @@ pub fn format_with_commas(n: u64) -> String {
 }
 
 pub fn format_hours_short(secs: u64) -> String {
-    if secs < 3600 {
-        format!("{}m", (secs / 60).max(1))
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("{}m", secs / 60)
     } else {
         let h = secs as f64 / 3600.0;
         format!("{h:.0} h")

@@ -18,6 +18,10 @@ Built for running and organizing terminal agents (OpenCode, cursor-agent, gemini
 - Zero network calls from the app itself
 - Fonts: Inter (UI) + Lucide subset (icons) — see `assets/fonts/LICENSES.md`
 
+## Agents
+
+Coding agents working on this repo start at [`AGENTS.md`](AGENTS.md).
+
 ## Install / build
 
 Requirements:
@@ -31,6 +35,22 @@ cd ankar
 cargo build --release
 .\target\release\ankar.exe
 ```
+
+### Bundled ConPTY
+
+The ConPTY built into Windows swallows terminal queries (OSC 10/11 background colour, DA), so
+TUIs such as Junie fall back to a light theme and Copilot cannot read the palette. Ankar
+vendors `conpty.dll` and `x64\OpenConsole.exe` (MIT, `Microsoft.Windows.Console.ConPTY`
+NuGet package) in `vendor/conpty/`, and `build.rs` copies them beside the built exe:
+
+```
+ankar.exe
+conpty.dll
+x64\OpenConsole.exe
+```
+
+Ship those two files with `ankar.exe`. Ankar logs which ConPTY it uses at startup
+(`ConPTY: ...` in `%APPDATA%\ankar\ankar-log.txt`).
 
 ## Migrating from nacar
 

@@ -18,6 +18,8 @@ eframe = { version = "0.37", default-features = false, features = [
 ] }
 egui = "0.37"
 alacritty_terminal = "0.26"
+# Same 3.x already pulled in by alacritty_terminal; needed to name the EventedReadWrite trait types.
+polling = "3"
 anyhow = "1"
 log = "0.4"
 env_logger = "0.11"
@@ -27,9 +29,18 @@ toml = "0.8"
 dirs = "6"
 notify-rust = "4"
 syntect = { version = "5", default-features = false, features = ["default-fancy"] }
-image = { version = "0.25", default-features = false, features = ["png", "webp"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
 rusqlite = { version = "0.37", features = ["bundled"] }
 jiff = "1"
+
+# Already in the tree (alacritty_terminal, eframe): the Toolhelp32 process snapshot.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Threading",
+] }
 
 [profile.release]
 lto = true

@@ -2,7 +2,8 @@ use crate::ui_theme;
 use alacritty_terminal::vte::ansi::{Color, NamedColor, Rgb};
 use egui::Color32;
 
-/// Midterm-coherent dark palette: muted greens/ambers, blue accent cursor.
+/// Dark palette in the spirit of Warp's default (picked by eye): saturated hues that hold up on
+/// black, a visible grey for ANSI black, blue accent cursor.
 #[derive(Clone, Debug)]
 pub struct TermColors {
     pub background: Color32,
@@ -18,22 +19,22 @@ impl Default for TermColors {
             foreground: ui_theme::TERM_FG,
             cursor: ui_theme::CURSOR,
             ansi: [
-                Color32::from_rgb(0x3A, 0x3A, 0x3A), // black
-                Color32::from_rgb(0xE5, 0x69, 0x5B), // red
-                Color32::from_rgb(0x7F, 0xB9, 0x8E), // green
-                Color32::from_rgb(0xE1, 0xC1, 0x6B), // yellow
-                Color32::from_rgb(0x5A, 0xA0, 0xF2), // blue
-                Color32::from_rgb(0xC7, 0x92, 0xEA), // magenta
-                Color32::from_rgb(0x6C, 0xC5, 0xC9), // cyan
+                Color32::from_rgb(0x41, 0x41, 0x41), // black
+                Color32::from_rgb(0xF3, 0x65, 0x5F), // red
+                Color32::from_rgb(0x4F, 0xCF, 0x7A), // green
+                Color32::from_rgb(0xF2, 0xC1, 0x4E), // yellow
+                Color32::from_rgb(0x4E, 0x9B, 0xFF), // blue
+                Color32::from_rgb(0xC6, 0x78, 0xDD), // magenta
+                Color32::from_rgb(0x3F, 0xC8, 0xD6), // cyan
                 Color32::from_rgb(0xD4, 0xD4, 0xD4), // white
-                Color32::from_rgb(0x6E, 0x6E, 0x6E), // bright black
-                Color32::from_rgb(0xFF, 0x8A, 0x7A), // bright red
-                Color32::from_rgb(0x9A, 0xD3, 0xA8), // bright green
-                Color32::from_rgb(0xF0, 0xD5, 0x8A), // bright yellow
-                Color32::from_rgb(0x82, 0xB8, 0xFF), // bright blue
-                Color32::from_rgb(0xDD, 0xB1, 0xF5), // bright magenta
-                Color32::from_rgb(0x93, 0xDD, 0xE0), // bright cyan
-                Color32::from_rgb(0xF2, 0xF2, 0xF2), // bright white
+                Color32::from_rgb(0x6B, 0x6B, 0x6B), // bright black
+                Color32::from_rgb(0xFF, 0x7B, 0x72), // bright red
+                Color32::from_rgb(0x6F, 0xE3, 0x97), // bright green
+                Color32::from_rgb(0xFF, 0xD9, 0x6A), // bright yellow
+                Color32::from_rgb(0x79, 0xB4, 0xFF), // bright blue
+                Color32::from_rgb(0xDA, 0x9B, 0xF0), // bright magenta
+                Color32::from_rgb(0x66, 0xDC, 0xE8), // bright cyan
+                Color32::from_rgb(0xF5, 0xF5, 0xF5), // bright white
             ],
         }
     }
@@ -93,7 +94,7 @@ fn rgb_to_color32(rgb: Rgb) -> Color32 {
     Color32::from_rgb(rgb.r, rgb.g, rgb.b)
 }
 
-fn indexed_256(index: u8) -> Color32 {
+pub(crate) fn indexed_256(index: u8) -> Color32 {
     match index {
         0..=15 => TermColors::default().ansi[index as usize],
         16..=231 => {

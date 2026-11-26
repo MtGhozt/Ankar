@@ -24,7 +24,11 @@ pub enum LayoutNode {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SessionStatus {
+    /// Started, has not worked yet.
+    Idle,
+    /// Working.
     Active,
+    /// Worked and finished: waiting on Matias.
     Waiting,
     Finished,
 }
@@ -49,6 +53,24 @@ pub struct Tab {
     pub activity: Option<String>,
     pub exit_code: Option<i32>,
     pub status_changed_at: Instant,
+    /// Launcher name of the agent a plain terminal is running right now (see `procs`). Not saved.
+    pub detected: Option<String>,
+    /// A shell in this tab is running a command (child process), from the last `procs` probe.
+    pub busy_child: bool,
+}
+
+pub fn new_session_cwd(active: Option<&std::path::Path>) -> PathBuf {
+    active
+        .filter(|p| p.is_dir())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\"))
+}
+
+impl Tab {
+    /// Name for the tab and the sidebar row: the running agent, else the session name.
+    pub fn shown_name(&self) -> &str {
+        self.detected.as_deref().unwrap_or(&self.session_name)
+    }
 }
 
 pub struct Workspace {
@@ -148,14 +170,29 @@ impl Workspace {
             session_name,
             pinned: false,
             project_key,
-            status: SessionStatus::Active,
+            status: SessionStatus::Idle,
             activity: None,
             exit_code: None,
             status_changed_at: Instant::now(),
+            detected: None,
+            busy_child: false,
         });
         self.active_tab = self.tabs.len() - 1;
         self.mark_dirty();
         Ok(tab_id)
+    }
+
+    /// The "New session" action (sidebar button and Ctrl+Shift+T): default shell, in the active
+    /// tab's folder.
+    pub fn new_session(&mut self, ctx: &Context) {
+        let cwd = new_session_cwd(self.active_tab().and_then(|t| t.cwd.as_deref()));
+        self.new_session_in(ctx, cwd);
+    }
+
+    pub fn new_session_in(&mut self, ctx: &Context, cwd: PathBuf) {
+        if let Err(e) = self.open_tab(ctx, &crate::shell::default_profile(), Some(cwd)) {
+            log::warn!("new session failed: {e}");
+        }
     }
 
     pub fn open_command_tab(
@@ -197,10 +234,12 @@ impl Workspace {
             session_name: name.to_string(),
             pinned: false,
             project_key,
-            status: SessionStatus::Active,
+            status: SessionStatus::Idle,
             activity: None,
             exit_code: None,
             status_changed_at: Instant::now(),
+            detected: None,
+            busy_child: false,
         });
         self.active_tab = self.tabs.len() - 1;
         self.mark_dirty();
@@ -420,5 +459,19 @@ fn split_ratio(node: &LayoutNode) -> f32 {
     match node {
         LayoutNode::Split { ratio, .. } => *ratio,
         _ => 0.5,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_new_session_starts_in_the_active_folder_else_c() {
+        let here = std::env::temp_dir();
+        assert_eq!(new_session_cwd(Some(&here)), here);
+        assert_eq!(new_session_cwd(None), PathBuf::from(r"C:\"));
+        let gone = here.join("ankar-no-such-dir-4242");
+        assert_eq!(new_session_cwd(Some(&gone)), PathBuf::from(r"C:\"), "a deleted folder falls back");
     }
 }

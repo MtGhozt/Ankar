@@ -34,7 +34,7 @@ fn default_scrollback_lines() -> usize {
 }
 
 fn default_font_size() -> f32 {
-    crate::ui_theme::TERM_FONT_SIZE
+    crate::ui_theme::DEFAULT_TERM_FONT
 }
 
 fn default_accent() -> String {
@@ -43,10 +43,6 @@ fn default_accent() -> String {
 
 fn default_sidebar_width() -> f32 {
     309.33
-}
-
-fn default_files_width() -> f32 {
-    280.0
 }
 
 fn default_true() -> bool {
@@ -70,6 +66,9 @@ fn default_logo_key() -> String {
 pub struct Config {
     pub default_shell: String,
     pub waiting_timeout_secs: u64,
+    /// Windows toast when an agent finishes a long job while Ankar is in the background.
+    #[serde(default)]
+    pub notifications: bool,
     #[serde(default = "default_font_size")]
     pub font_size: f32,
     #[serde(default = "default_accent")]
@@ -82,9 +81,6 @@ pub struct Config {
     pub scrollback_lines: usize,
     #[serde(default = "default_sidebar_width")]
     pub sidebar_width: f32,
-    /// File viewer panel width (logical px). Default 280; drag to resize.
-    #[serde(default = "default_files_width")]
-    pub files_width: f32,
     /// Dim unfocused split panes with a translucent overlay.
     #[serde(default = "default_true")]
     pub dim_inactive_panes: bool,
@@ -98,7 +94,15 @@ pub struct Config {
     /// TUIs like Claude Code draw their own — leave false to avoid a double bar.
     #[serde(default)]
     pub pane_status_bar: bool,
+    /// Filter for `ankar-log.txt` (same syntax as `RUST_LOG`, which overrides it).
+    pub log_level: String,
+    /// One-time migrations already applied. Missing in old files, so it reads as 0.
+    #[serde(default)]
+    pub config_version: u32,
 }
+
+/// 1: the 13 px font default of earlier builds becomes 12 px.
+const CONFIG_VERSION: u32 = 1;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Launcher {
@@ -121,6 +125,7 @@ impl Default for Config {
         Self {
             default_shell: "powershell".into(),
             waiting_timeout_secs: 30,
+            notifications: false,
             font_size: default_font_size(),
             accent: default_accent(),
             pinned_projects: Vec::new(),
@@ -128,11 +133,12 @@ impl Default for Config {
             launchers: default_launchers(),
             scrollback_lines: default_scrollback_lines(),
             sidebar_width: default_sidebar_width(),
-            files_width: default_files_width(),
             dim_inactive_panes: true,
             collapsed_groups: Vec::new(),
             custom_titlebar: false,
             pane_status_bar: false,
+            log_level: "info".into(),
+            config_version: CONFIG_VERSION,
         }
     }
 }
@@ -208,6 +214,14 @@ fn default_launchers() -> Vec<Launcher> {
             color: "#F0F0F0".into(),
             logo: "copilot".into(),
         },
+        Launcher {
+            name: "junie".into(),
+            command: "junie".into(),
+            args: vec![],
+            icon: "bot".into(),
+            color: "#F0F0F0".into(),
+            logo: "junie".into(),
+        },
     ]
 }
 
@@ -222,24 +236,9 @@ impl Launcher {
 }
 
 impl Config {
-    /// Sidebar width in logical px: min 240, max 40% of the window.
-    pub fn clamp_sidebar_width(width: f32, window_width: f32) -> f32 {
-        let max_w = (window_width * 0.4).max(240.0);
-        width.clamp(240.0, max_w)
-    }
-
-    pub fn max_sidebar_width(window_width: f32) -> f32 {
-        Self::clamp_sidebar_width(f32::MAX, window_width)
-    }
-
-    /// Files panel: min 200, max 45% of the window.
-    pub fn clamp_files_width(width: f32, window_width: f32) -> f32 {
-        let max_w = (window_width * 0.45).max(200.0);
-        width.clamp(200.0, max_w)
-    }
-
-    pub fn max_files_width(window_width: f32) -> f32 {
-        Self::clamp_files_width(f32::MAX, window_width)
+    /// Sidebar width in logical px.
+    pub fn clamp_sidebar_width(width: f32) -> f32 {
+        width.clamp(180.0, 420.0)
     }
 
     pub fn config_dir() -> anyhow::Result<PathBuf> {
@@ -249,6 +248,12 @@ impl Config {
 
     pub fn config_path() -> anyhow::Result<PathBuf> {
         Ok(Self::config_dir()?.join("config.toml"))
+    }
+
+    /// `log_level` from config.toml, read before the logger exists (so nothing here may log).
+    pub fn log_level_on_disk() -> Option<String> {
+        let text = fs::read_to_string(Self::config_path().ok()?).ok()?;
+        toml::from_str::<Config>(&text).ok().map(|c| c.log_level)
     }
 
     pub fn sessions_path() -> anyhow::Result<PathBuf> {
@@ -265,9 +270,14 @@ impl Config {
             let text = fs::read_to_string(&path)?;
             match toml::from_str::<Config>(&text) {
                 Ok(mut cfg) => {
-                    cfg.sidebar_width = Self::clamp_sidebar_width(cfg.sidebar_width, 1837.33);
-                    cfg.files_width = Self::clamp_files_width(cfg.files_width, 1837.33);
+                    cfg.sidebar_width = Self::clamp_sidebar_width(cfg.sidebar_width);
                     cfg.merge_default_launchers();
+                    if cfg.migrate() {
+                        log::info!("config migrated to version {CONFIG_VERSION} (font_size {})", cfg.font_size);
+                        if let Err(e) = cfg.save() {
+                            log::warn!("could not save migrated config: {e}");
+                        }
+                    }
                     Ok((cfg, false))
                 }
                 Err(e) => {
@@ -286,6 +296,18 @@ impl Config {
             cfg.write_default_file(&path)?;
             Ok((cfg, false))
         }
+    }
+
+    /// Applies each migration once; true when something changed and should be saved.
+    fn migrate(&mut self) -> bool {
+        if self.config_version >= CONFIG_VERSION {
+            return false;
+        }
+        if self.font_size == 13.0 {
+            self.font_size = default_font_size();
+        }
+        self.config_version = CONFIG_VERSION;
+        true
     }
 
     /// Append any built-in launchers the user doesn't already have (by name).
@@ -330,26 +352,27 @@ default_shell = "{default_shell}"
 # Seconds without PTY output before a live session is "waiting"
 waiting_timeout_secs = {waiting_timeout_secs}
 
-# Terminal font size (points) — Hack at 14.33, cell 8.627×17.733
+# Windows toasts (default false). When true, you only get one if Ankar is not the focused
+# window and an agent (OpenCode) goes from working to idle after working for over 30 seconds.
+notifications = {notifications}
+
+# Terminal font size (px, Hack). Row height is the font's own line box. Ctrl+= / Ctrl+- / Ctrl+0 zoom.
 font_size = {font_size}
 
-# Accent color (hex) — cursor + selection
-accent = "{accent}"
+# One-time migrations already applied (do not edit)
+config_version = {config_version}
 
 # Scrollback lines per terminal (default 2000; hard cap 50000)
 scrollback_lines = {scrollback_lines}
 
-# Sidebar width in logical px (min 240, max 40% of window) — drag the edge to resize
+# Sidebar width in logical px (180–420) — drag the edge to resize (shared by Sessions and Files)
 sidebar_width = {sidebar_width}
-
-# Files panel width in logical px (min 200, max 45% of window) — drag the edge to resize
-files_width = {files_width}
 
 # Dim unfocused split panes
 dim_inactive_panes = {dim_inactive_panes}
 
-# Experimental custom title bar (Windows chrome risks — leave false)
-custom_titlebar = false
+# Log filter for %APPDATA%\ankar\ankar-log.txt (RUST_LOG overrides): error | warn | info | debug | ankar=debug
+log_level = "{log_level}"
 
 # Pinned project folders (absolute paths)
 pinned_projects = []
@@ -377,14 +400,53 @@ color = "#8A8A8A"
 "##,
             default_shell = self.default_shell,
             waiting_timeout_secs = self.waiting_timeout_secs,
+            notifications = self.notifications,
             font_size = self.font_size,
-            accent = self.accent,
             scrollback_lines = self.scrollback_lines,
             sidebar_width = self.sidebar_width,
-            files_width = self.files_width,
             dim_inactive_panes = self.dim_inactive_panes,
+            log_level = self.log_level,
+            config_version = self.config_version,
         );
         fs::write(path, body)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sidebar_width_is_clamped_to_180_420() {
+        assert_eq!(Config::clamp_sidebar_width(50.0), 180.0);
+        assert_eq!(Config::clamp_sidebar_width(300.0), 300.0);
+        assert_eq!(Config::clamp_sidebar_width(900.0), 420.0);
+    }
+
+    #[test]
+    fn an_old_13_px_font_becomes_12_once_and_later_zooms_stick() {
+        let mut old: Config = toml::from_str("font_size = 13.0\n").unwrap();
+        assert_eq!(old.config_version, 0, "a file without the field is unmigrated");
+        assert!(old.migrate());
+        assert_eq!(old.font_size, 12.0);
+        old.font_size = 13.0; // Matias zooms back up afterwards
+        let mut reread: Config = toml::from_str(&toml::to_string(&old).unwrap()).unwrap();
+        assert!(!reread.migrate(), "only once");
+        assert_eq!(reread.font_size, 13.0);
+        let mut custom: Config = toml::from_str("font_size = 15.0\n").unwrap();
+        assert!(custom.migrate());
+        assert_eq!(custom.font_size, 15.0, "other sizes are the user's choice");
+        assert!(!Config::default().migrate(), "new configs start migrated");
+    }
+
+    #[test]
+    fn junie_is_added_to_an_existing_config_and_has_a_logo() {
+        let mut old = Config { launchers: Vec::new(), ..Config::default() };
+        old.merge_default_launchers();
+        let junie = old.launchers.iter().find(|l| l.name == "junie").expect("junie launcher");
+        assert_eq!(junie.command, "junie");
+        assert_eq!(junie.logo_key(), "junie");
+        assert!(crate::logos::embedded_logo(junie.logo_key()).is_some());
     }
 }
