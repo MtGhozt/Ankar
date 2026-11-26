@@ -15,9 +15,12 @@ Open work, most important first. Remove items when done (and add them to FEATURE
 - Full optimization pass: keep Ankar's own private memory as low as possible with many tabs and
   processes open (currently ~112 MB with 2 tabs, plus ~2–3 MB per console host). Profile
   allocations, glyph/texture caches, scrollback size, idle repaint, and per-session buffers.
-- Release to main when stable and not crashing: merge `estabilizacion` into `main`, build a release
-  `.exe` with an icon and version info (so it shows as "Ankar" in Task Manager/PC Manager), and
-  create an installer.
+- Release to main when stable and not crashing: merge `estabilizacion` into `main`, then publish a
+  tagged GitHub Release (for example, `v0.1.0`) with a downloadable Windows installer or zip asset,
+  like Capri-Desktop. The installer must create a Start Menu entry so Ankar appears in Windows
+  search and can be pinned to the taskbar; include the app icon and version info, and ship
+  `conpty.dll` plus `x64\OpenConsole.exe` next to `ankar.exe`. Consider an update check only later
+  and only with the user's approval; Ankar has no network calls by default.
 - Not before the user finishes current university projects/credits.
 
 ## Ideas (not scheduled)
