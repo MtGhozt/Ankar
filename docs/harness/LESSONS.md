@@ -172,5 +172,11 @@ width (`stats_layout`: 900 → 4 columns, 600 → 2, else 1; no card under 180 p
 Number columns stay a fixed width on the right. Not verified by eye.
 Guard: `stats::panel::tests::layout_breakpoints_keep_cards_at_least_180`. Do not use `ui.horizontal` around stats cards.
 
+## 2026-11-25 — TUI rows taller than the text
+Symptom: a one-row highlight was taller than Warp and the text sat with empty space above it.
+Root cause: the cell used Hack's hhea box (14 px at 12 px), and aef1df6 centred the baseline in that box.
+Fix: cell is the shorter OS/2 typo box, pixel-snapped; the galley is shifted so the glyph top is the row top.
+Guard: `ui_theme::tests::hack_cell_uses_the_typo_box_and_shifts_the_galley_up_to_it`.
+
 ## 2026-11-25 — TerminalSession drop blocked the UI thread
 `TerminalSession` drop waited on OpenConsole (`WaitForSingleObject` and `ClosePseudoConsole`) on the UI thread, so a stuck host froze the window; `ad64658` moves teardown to a background thread and joins workers only after `eframe::run_native` returns.

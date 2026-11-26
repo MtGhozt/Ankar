@@ -7,8 +7,9 @@ What exists today, by theme. Update when behaviour changes; keep it short.
 - ConPTY shells via alacritty_terminal 0.26: PowerShell, cmd, WSL profiles. A current
   ConPTY ships in `vendor/conpty` (build.rs copies it beside `ankar.exe`) so OSC 4/10/11 work.
 - Font 12 px by default (an old 13 is migrated once, `config_version`); cell height is the
-  font's ascent + descent + line gap, rounded to a pixel (glyphs centred in the row). At 12 px
-  and scale 1.0 the cell is 7.225 x 14 px; startup and resize log the metrics.
+  tighter of hhea and the OS/2 typo box (ascent + descent, no line gap), rounded to a pixel.
+  Glyphs sit on the row top. At 12 px and scale 1.0 the cell is 7.225 x 12 px; startup logs
+  the metrics, and the first painted row logs cell height, galley row height, and the y offset.
 - TERM=xterm-256color, COLORTERM=truecolor, COLORFGBG=15;0, TERM_PROGRAM=Ankar + version.
 - Replies: OSC 4/10/11/12 colour queries (16-bit, same terminator), DA1/DA2, XTVERSION,
   text-area size; every query and reply is logged at debug.

@@ -93,7 +93,8 @@ pub const MAX_TERM_FONT: f32 = 24.0;
 pub const PANE_PAD_X: f32 = 12.0;
 pub const PANE_PAD_Y: f32 = 12.0;
 
-/// Hack's hhea metrics (USE_TYPO_METRICS is off, so egui uses these). Design units.
+/// Hack's hhea metrics (egui's line box; USE_TYPO_METRICS is off). The cell uses the
+/// shorter OS/2 typo box via [`pick_line_box`]. Design units.
 const HACK_UPEM: f32 = 2048.0;
 const HACK_ADVANCE: f32 = 1233.0;
 const HACK_ASCENT: f32 = 1901.0;
@@ -148,21 +149,31 @@ pub struct FontLineMetrics {
 pub fn cell_size_px(metrics: FontLineMetrics, dpi: f32) -> (f32, f32) {
     let dpi = if dpi.is_finite() && dpi > 0.0 { dpi } else { 1.0 };
     let width = metrics.advance;
-    // A zero gap stays zero. Do not add a positive gap and do not invent 1.2 em.
-    let sum = metrics.ascent
-        + metrics.descent
-        + if metrics.line_gap == 0.0 { metrics.line_gap } else { 0.0 };
-    let height = (sum * dpi).round().max(1.0) / dpi;
+    // Line gap is egui/font leading, not part of the cell. Do not invent 1.2 em.
+    let height = ((metrics.ascent + metrics.descent) * dpi).round().max(1.0) / dpi;
     (width, height)
 }
 
-/// Galley top relative to the row top.
+/// Galley origin relative to the row top.
 ///
-/// The ink baseline is `row_top + (row_h - (ascent + descent)) / 2 + ascent`,
-/// snapped to a physical pixel. `baseline_from_galley_top` is where egui put
-/// that baseline. Leading past `ascent` is subtracted so the ink stays centred
-/// in the cell; the cell is not grown to fit the galley.
+/// The face's ascent sits on the row top. `baseline_from_galley_top` is where
+/// egui put that baseline (it adds leading and bottom-aligns inside a taller
+/// galley row). The difference is snapped to a physical pixel and subtracted,
+/// so a taller row does not push the glyph down.
 pub fn glyph_top_offset(
+    _row_h: f32,
+    ascent: f32,
+    _descent: f32,
+    baseline_from_galley_top: f32,
+    ppp: f32,
+) -> f32 {
+    let ppp = if ppp.is_finite() && ppp > 0.0 { ppp } else { 1.0 };
+    let raw = ascent - baseline_from_galley_top;
+    if raw.is_finite() { (raw * ppp).round() / ppp } else { 0.0 }
+}
+
+/// What `glyph_top_offset` was after aef1df6: baseline centred in the row.
+fn centered_glyph_top_offset(
     row_h: f32,
     ascent: f32,
     descent: f32,
@@ -261,6 +272,28 @@ pub fn log_cell_metrics(grid: Option<(u16, u16)>) {
     );
 }
 
+/// One line, the first time a terminal row is painted.
+/// `before` is the centred offset from aef1df6; `after` puts the glyph top on the row top.
+pub fn log_row_text_once(
+    cell_h: f32,
+    galley_row_h: f32,
+    row_h: f32,
+    ascent: f32,
+    descent: f32,
+    baseline_from_galley_top: f32,
+    ppp: f32,
+) {
+    static LOGGED: AtomicBool = AtomicBool::new(false);
+    if LOGGED.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    let before = centered_glyph_top_offset(row_h, ascent, descent, baseline_from_galley_top, ppp);
+    let after = glyph_top_offset(row_h, ascent, descent, baseline_from_galley_top, ppp);
+    log::info!(
+        "row text: cell_h {cell_h:.3}, galley row {galley_row_h:.3}, text y offset before {before:.3} after {after:.3}"
+    );
+}
+
 fn hack_design() -> DesignMetrics {
     DesignMetrics {
         units_per_em: HACK_UPEM,
@@ -301,17 +334,22 @@ fn read_design(data: &[u8]) -> Option<DesignMetrics> {
     if upem <= 0.0 {
         return None;
     }
-    let (mut ascent, mut descent, mut gap) = hhea_line(hhea)?;
+    let (h_a, h_d, h_g) = hhea_line(hhea)?;
+    let mut ascent = h_a;
+    let mut descent = h_d;
+    let mut gap = h_g;
     if let Some(os2) = table(data, b"OS/2") {
-        let use_typo = u16_at(os2, 62).unwrap_or(0) & 0x80 != 0;
-        if use_typo {
-            if let Some(typo) = typo_line(os2) {
-                (ascent, descent, gap) = typo;
+        if let Some((t_a, t_d, _)) = typo_line(os2) {
+            if let Some((a, d)) = pick_line_box(h_a, h_d, t_a, t_d) {
+                if (a, d) != (h_a, h_d) {
+                    gap = 0.0;
+                }
+                ascent = a;
+                descent = d;
             }
-        } else if ascent == 0.0 && descent == 0.0 {
-            if let Some(typo) = typo_line(os2).filter(|&(a, d, _)| a != 0.0 || d != 0.0) {
-                (ascent, descent, gap) = typo;
-            } else if let Some(win) = win_line(os2) {
+        }
+        if ascent == 0.0 && descent == 0.0 {
+            if let Some(win) = win_line(os2) {
                 (ascent, descent, gap) = win;
             }
         }
@@ -325,6 +363,20 @@ fn read_design(data: &[u8]) -> Option<DesignMetrics> {
         line_gap: gap,
         tweak: 1.0,
     })
+}
+
+/// Design-unit line box (`descent` positive). Typo ascent+descent when that box is
+/// positive and shorter than hhea; otherwise hhea. The line gap is not part of this.
+fn pick_line_box(hhea_ascent: f32, hhea_descent: f32, typo_ascent: f32, typo_descent: f32) -> Option<(f32, f32)> {
+    let typo_ok = typo_ascent > 0.0 && typo_descent > 0.0;
+    let hhea_sum = hhea_ascent + hhea_descent;
+    if typo_ok && (hhea_sum <= 0.0 || typo_ascent + typo_descent < hhea_sum) {
+        Some((typo_ascent, typo_descent))
+    } else if hhea_ascent != 0.0 || hhea_descent != 0.0 {
+        Some((hhea_ascent, hhea_descent))
+    } else {
+        None
+    }
 }
 
 /// hhea ascender / descender / lineGap. Descender is stored signed; we return a positive depth.
@@ -843,15 +895,42 @@ mod tests {
         let mut gapped = m;
         gapped.line_gap = 4.0;
         assert_eq!(cell_size_px(gapped, 1.0).1, h, "a positive line gap is not extra leading");
-        // Baseline snapped to a pixel: galley top is that baseline minus the ascent.
+        // Glyph top on the row top. A taller row must not centre it downward.
         let top = glyph_top_offset(h, m.ascent, m.descent, m.ascent, 1.0);
-        let baseline = ((h - (m.ascent + m.descent)) * 0.5 + m.ascent).round();
-        assert!((top - (baseline - m.ascent)).abs() < 1e-4, "top {top}");
+        assert_eq!(top, 0.0, "glyph top on the row top, not centred; got {top}");
+        assert_eq!(
+            glyph_top_offset(h + 8.0, m.ascent, m.descent, m.ascent, 1.0),
+            top,
+            "a taller row must not push the glyph down"
+        );
         let lower = glyph_top_offset(h, m.ascent, m.descent, m.ascent + 3.0, 1.0);
         assert!(
-            (lower - (top - 3.0)).abs() < 1e-4,
-            "leading past the ascent shifts the galley up"
+            (lower - (-3.0)).abs() < 1e-4,
+            "egui leading above the ascent is pulled up, got {lower}"
         );
+    }
+
+    #[test]
+    fn hack_cell_uses_the_typo_box_and_shifts_the_galley_up_to_it() {
+        // Hack OS/2 typo is the em (1556+492=2048). hhea (1901+483) leaves empty space above caps.
+        let (a, d) = pick_line_box(1901.0, 483.0, 1556.0, 492.0).unwrap();
+        assert_eq!((a, d), (1556.0, 492.0));
+        let m = FontLineMetrics {
+            advance: 1233.0 * 12.0 / 2048.0,
+            ascent: a * 12.0 / 2048.0,
+            descent: d * 12.0 / 2048.0,
+            line_gap: 410.0 * 12.0 / 2048.0,
+        };
+        assert_eq!(cell_size_px(m, 1.0).1, 12.0, "round(ascent+descent)=12, not hhea 14");
+        let (_, h15) = cell_size_px(m, 1.5);
+        let sum = m.ascent + m.descent;
+        assert_eq!(h15, (sum * 1.5).round() / 1.5, "pixel-snapped, not a second dpi scale");
+        // egui still baselines on hhea ascent; pull the galley up so the typo top is the row top.
+        let hhea_ascent = 1901.0 * 12.0 / 2048.0;
+        let offset = glyph_top_offset(12.0, m.ascent, m.descent, hhea_ascent, 1.0);
+        assert_eq!(offset, (m.ascent - hhea_ascent).round(), "got {offset}");
+        assert!(offset < 0.0);
+        assert!(pick_line_box(1901.0, 483.0, 0.0, 0.0).unwrap().0 == 1901.0);
     }
 
     #[test]

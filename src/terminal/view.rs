@@ -1219,6 +1219,8 @@ fn paint_row_text(
             TextFormat {
                 font_id: font_id.clone(),
                 color: fg0,
+                // Default is BOTTOM, which parks the glyph at the bottom of a taller galley row.
+                valign: egui::Align::TOP,
                 ..Default::default()
             },
         );
@@ -1230,6 +1232,15 @@ fn paint_row_text(
             .first()
             .and_then(|row| row.glyphs.first().map(|g| row.pos.y + g.pos.y))
             .unwrap_or(face.ascent);
+        ui_theme::log_row_text_once(
+            ui_theme::cell_h(),
+            galley.size().y,
+            row_h,
+            face.ascent,
+            face.descent,
+            galley_baseline,
+            ppp,
+        );
         let top = y
             + ui_theme::glyph_top_offset(row_h, face.ascent, face.descent, galley_baseline, ppp);
         shapes.push(Shape::galley(Pos2::new(run_x, top), galley, fg0));
