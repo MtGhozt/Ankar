@@ -4,8 +4,7 @@ Metric: Working Set (WS) and Private Bytes via `Get-AnkarMem` (ankar.exe alone v
 
 Windows Task Manager can show many "Console Window and PTY Host" entries (~1.6 MB each, tree
 ~2 GB) so ankar.exe is easy to miss; those hosts are OpenConsole.exe from ConPTY. As of aa631a9,
-closing a tab or quitting kills that session's host. A stats footer (`Ankar: N MB private · M console
-hosts`) was not added: Private Bytes needs windows-sys `Win32_System_ProcessStatus` (not enabled).
+closing a tab or quitting kills that session's host. The stats footer now shows `Ankar: N MB private · M console hosts` (`PrivateUsage`, direct `OpenConsole.exe` children only), refreshed at most every 2s while the panel is open (`5aac787`).
 Host count alone is possible via ToolHelp (`src/procs.rs`).
 
 Scenarios:

@@ -170,3 +170,6 @@ Fix: pass the computed column width; content max ~1100 px centered; breakpoints 
 columns, pairs side by side) / 600 (2 columns, stacked) / below that 1 column; header wraps
 under 600; stats split cannot go under ~420 px (3f3b741).
 Guard: do not call `available_width()` inside `ui.horizontal` for these charts. Not verified by eye.
+
+## 2026-11-25 — TerminalSession drop blocked the UI thread
+`TerminalSession` drop waited on OpenConsole (`WaitForSingleObject` and `ClosePseudoConsole`) on the UI thread, so a stuck host froze the window; `ad64658` moves teardown to a background thread and joins workers only after `eframe::run_native` returns.
