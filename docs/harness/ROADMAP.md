@@ -6,6 +6,20 @@ Open work, most important first. Remove items when done (and add them to FEATURE
 
 - Pin tabs in the tab bar (sessions can be pinned in the sidebar only).
 
+## Later (after stabilization)
+
+- Home tab (fastfetch-style): a permanent, pinned main tab that cannot be closed (only when the
+  app closes). Show a large ASCII logo on the left, colored system key/value info on the right
+  (OS, host, kernel, uptime, shell, display, CPU, GPU, memory, disk, battery, locale), and a color
+  palette strip. Read locally; no network. Reference: user's fastfetch screenshot.
+- Full optimization pass: keep Ankar's own private memory as low as possible with many tabs and
+  processes open (currently ~112 MB with 2 tabs, plus ~2–3 MB per console host). Profile
+  allocations, glyph/texture caches, scrollback size, idle repaint, and per-session buffers.
+- Release to main when stable and not crashing: merge `estabilizacion` into `main`, build a release
+  `.exe` with an icon and version info (so it shows as "Ankar" in Task Manager/PC Manager), and
+  create an installer.
+- Not before the user finishes current university projects/credits.
+
 ## Ideas (not scheduled)
 
 - Warp-style command blocks (the input history).
